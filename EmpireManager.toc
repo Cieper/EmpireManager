@@ -1,0 +1,19 @@
+## Interface: 120005
+## Title: EmpireManager
+## Notes: Command your alt army. Track inventory, professions, and storage across every character, then route everything where it belongs.
+## Author: l0neshad0w
+## Version: 0.3.3
+## SavedVariables: EmpireManagerDB
+## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
+## OptionalDeps: TradeSkillMaster, Pawn
+
+embeds.xml
+Core.lua
+Utils.lua
+TriageLogic.lua
+Queries.lua
+Dashboard.lua
+EmpireManager.xml
+Sidecar.lua
+Triage.lua
+Tabs.lua

@@ -1,0 +1,1188 @@
+-- ----------------------------------------------------------------------------
+--                                   EmpireManager
+--                              https://wow.cyberpunk.gr
+--                (c) by George Litos (l0neshad0w),  All Rights Reserved
+--                   For detailed license information check LICENSE.md
+-- ----------------------------------------------------------------------------
+
+local EmpireManager = LibStub("AceAddon-3.0"):GetAddon("EmpireManager")
+
+-- Role display: single-character abbreviations with colors
+-- profType = "crafting"/"gathering" means the role supports a profession dropdown
+EmpireManager.ROLE_DISPLAY = {
+    {
+        key = "artisan",
+        label = "Artisan",
+        icon = "Interface\\Icons\\INV_Scroll_02",
+        r = 0.576,
+        g = 0.439,
+        b = 0.859,
+        profType = "crafting",
+    },
+    {
+        key = "gatherer",
+        label = "Gatherer",
+        icon = "Interface\\Icons\\INV_Misc_Bag_HerbPouch",
+        r = 0.0,
+        g = 0.8,
+        b = 0.0,
+        profType = "gathering",
+    },
+    {
+        key = "auctioneer",
+        label = "Auctioneer",
+        icon = "Interface\\Icons\\INV_Misc_Coin_01",
+        r = 1.0,
+        g = 0.843,
+        b = 0.0,
+    },
+    {
+        key = "banker",
+        label = "Banker",
+        icon = "Interface\\Icons\\INV_Misc_Bag_07",
+        r = 1.0,
+        g = 0.843,
+        b = 0.0,
+    },
+    {
+        key = "lockpicker",
+        label = "Lockpicker",
+        icon = "Interface\\Icons\\INV_Misc_Key_04",
+        r = 1.0,
+        g = 0.2,
+        b = 0.6,
+    },
+    {
+        key = "zookeeper",
+        label = "Zookeeper",
+        icon = "Interface\\Icons\\INV_Box_PetCarrier_01",
+        r = 0.4,
+        g = 0.9,
+        b = 0.4,
+    },
+    {
+        key = "pvper",
+        label = "PvPer",
+        icon = "Interface\\Icons\\Ability_DualWield",
+        r = 0.95,
+        g = 0.95,
+        b = 0.95,
+    },
+}
+
+-- Expansion display (kept for future expansion filter, Phase 2)
+EmpireManager.EXPANSION_DISPLAY = {
+    {
+        key = "classic",
+        label = "Classic",
+        r = 0.8,
+        g = 0.7,
+        b = 0.3,
+        expansionID = 0,
+        iconWidth = 34,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\classic",
+    },
+    {
+        key = "tbc",
+        label = "The Burning Crusade",
+        apiNames = { "Outland" },
+        r = 0.1,
+        g = 0.8,
+        b = 0.1,
+        expansionID = 1,
+        iconWidth = 32,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\bc",
+    },
+    {
+        key = "wotlk",
+        label = "Wrath of the Lich King",
+        apiNames = { "Northrend" },
+        r = 0.4,
+        g = 0.6,
+        b = 0.9,
+        expansionID = 2,
+        iconWidth = 38,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\wrath",
+    },
+    {
+        key = "cata",
+        label = "Cataclysm",
+        r = 0.9,
+        g = 0.4,
+        b = 0.0,
+        expansionID = 3,
+        iconWidth = 42,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\cata",
+    },
+    {
+        key = "mop",
+        label = "Mists of Pandaria",
+        apiNames = { "Pandaria" },
+        r = 0.0,
+        g = 0.8,
+        b = 0.3,
+        expansionID = 4,
+        iconWidth = 44,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\mop",
+    },
+    {
+        key = "wod",
+        label = "Warlords of Draenor",
+        apiNames = { "Draenor" },
+        r = 0.7,
+        g = 0.3,
+        b = 0.0,
+        expansionID = 5,
+        iconWidth = 44,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\wod",
+    },
+    {
+        key = "legion",
+        label = "Legion",
+        r = 0.1,
+        g = 0.9,
+        b = 0.1,
+        expansionID = 6,
+        iconWidth = 42,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\legion",
+    },
+    {
+        key = "bfa",
+        label = "Battle for Azeroth",
+        apiNames = { "Kul Tiran", "Zandalari" },
+        r = 0.0,
+        g = 0.5,
+        b = 0.8,
+        expansionID = 7,
+        iconWidth = 42,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\bfa",
+    },
+    {
+        key = "shadowlands",
+        label = "Shadowlands",
+        r = 0.5,
+        g = 0.5,
+        b = 0.7,
+        expansionID = 8,
+        iconWidth = 44,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\sl",
+    },
+    {
+        key = "dragonflight",
+        label = "Dragonflight",
+        apiNames = { "Dragon Isles" },
+        r = 0.2,
+        g = 0.7,
+        b = 0.5,
+        expansionID = 9,
+        iconWidth = 44,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\df",
+    },
+    {
+        key = "tww",
+        label = "The War Within",
+        apiNames = { "Khaz Algar" },
+        r = 0.4,
+        g = 0.2,
+        b = 0.6,
+        expansionID = 10,
+        iconWidth = 42,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\tww",
+    },
+    {
+        key = "midnight",
+        label = "Midnight",
+        r = 0.5,
+        g = 0.0,
+        b = 0.8,
+        expansionID = 11,
+        iconWidth = 42,
+        icon = "Interface\\AddOns\\EmpireManager\\Textures\\Expansions\\mn",
+    },
+}
+
+-- Returns an inline texture string for an expansion icon, cropped to its iconWidth
+function EmpireManager:ExpIconString(expInfo, yOffset)
+    local w = expInfo.iconWidth or 44
+    local x1 = math.floor((64 - w) / 2)
+    local x2 = x1 + w
+    return string.format("|T%s:22:%d:0:%d:64:32:%d:%d:5:27|t", expInfo.icon, w, yOffset or 0, x1, x2)
+end
+
+-- Apply the yellow-with-hover icon-button look (same as storage row up/down arrows)
+-- to a Button that already has a NormalTexture set (via XML or code).
+-- `alpha` is optional and defaults to 1 (applied to the normal and pushed textures).
+function EmpireManager:StyleIconButton(btn, alpha)
+    if not btn then
+        return
+    end
+    local nt = btn:GetNormalTexture()
+    if not nt then
+        return
+    end
+    local tex = nt:GetTexture()
+    if not tex then
+        return
+    end
+
+    alpha = alpha or 1
+    nt:SetVertexColor(1, 0.82, 0)
+    nt:SetAlpha(alpha)
+
+    btn:SetPushedTexture(tex)
+    local pt = btn:GetPushedTexture()
+    if pt then
+        pt:SetVertexColor(0.8, 0.65, 0)
+        pt:SetAlpha(alpha)
+    end
+
+    btn:SetHighlightTexture(tex, "ADD")
+    local ht = btn:GetHighlightTexture()
+    if ht then
+        ht:SetVertexColor(1, 1, 0.6)
+        ht:SetAlpha(0.5)
+    end
+end
+
+-- Hardcoded: which item subclasses each profession consumes/produces
+-- Values are {classID, subClassID} pairs from WoW's item classification
+EmpireManager.PROF_ITEM_MAP = {
+    alchemy = { { 7, 9 }, { 7, 10 }, { 7, 11 } }, -- Herbs, Elemental, Other (vials/oils/transmutagens)
+    blacksmithing = { { 7, 7 } }, -- Metal & Stone
+    enchanting = { { 7, 12 } }, -- Enchanting
+    engineering = { { 7, 7 }, { 7, 1 } }, -- Metal & Stone, Parts
+    inscription = { { 7, 9 }, { 7, 16 } }, -- Herbs, Inscription pigments
+    jewelcrafting = {
+        { 7, 4 },
+        { 7, 7 }, -- Raw gems (Trade Goods), Metal & Stone
+        { 3, 0 },
+        { 3, 1 },
+        { 3, 2 },
+        { 3, 3 },
+        { 3, 4 },
+        { 3, 5 },
+        { 3, 6 },
+        { 3, 7 }, -- Cut gems (Gem classID 3)
+        { 3, 8 },
+        { 3, 9 },
+        { 3, 10 },
+        { 3, 11 },
+        { 3, 12 },
+        { 3, 13 },
+        { 3, 14 },
+    },
+    leatherworking = { { 7, 6 } }, -- Leather
+    tailoring = { { 7, 5 } }, -- Cloth
+    herbalism = { { 7, 9 } }, -- Herbs
+    mining = { { 7, 7 } }, -- Metal & Stone
+    skinning = { { 7, 6 } }, -- Leather
+    fishing = { { 7, 0 } }, -- Fish
+    -- Secondary professions
+    cooking = { { 7, 8 } }, -- Cooking mats. Do NOT add subclass 19 - it's the generic "Finishing Reagent" bucket shared across Tailoring/Alchemy/Inscription (Petal Powder, Mycobloom Culture, Weavercloth Embroidery Thread) and cannot route to a single profession.
+    -- archaeology: no clean subclass match (fragments are not standard tradegoods)
+    -- Non-profession storage categories
+    consumables = {
+        { 0, 0 },
+        { 0, 1 },
+        { 0, 2 },
+        { 0, 3 }, -- Generic, Potion, Elixir, Flask
+        { 0, 5 },
+        { 0, 7 },
+        { 0, 8 },
+        { 0, 9 }, -- Food & Drink, Bandage, Other, Vantus Runes
+    },
+    item_enhancements = {
+        { 8, 0 },
+        { 8, 1 },
+        { 8, 2 },
+        { 8, 3 },
+        { 8, 4 },
+        { 8, 5 },
+        { 8, 6 },
+        { 8, 7 },
+        { 8, 8 },
+        { 8, 9 },
+        { 8, 10 }, -- Ring (confirmed in-game from Enchant Ring scrolls)
+        { 8, 11 },
+        { 8, 12 }, -- all armor/weapon slots: enchant scrolls, armor kits, etc.
+    },
+    pets = {
+        { 15, 2 }, -- Old companion pet items (Miscellaneous > Companion)
+        { 17, 0 },
+        { 17, 1 },
+        { 17, 2 },
+        { 17, 3 }, -- Caged battle pets: Humanoid, Dragonkin, Flying, Undead
+        { 17, 4 },
+        { 17, 5 },
+        { 17, 6 },
+        { 17, 7 }, -- Critter, Magic, Elemental, Beast
+        { 17, 8 },
+        { 17, 9 },
+        { 17, 10 }, -- Aquatic, Mechanical, Nocturnal
+    },
+    equipment_boe = {
+        -- Weapons (classID 2)
+        { 2, 0 },
+        { 2, 1 },
+        { 2, 2 },
+        { 2, 3 },
+        { 2, 4 },
+        { 2, 5 },
+        { 2, 6 },
+        { 2, 7 },
+        { 2, 8 },
+        { 2, 9 },
+        { 2, 10 },
+        { 2, 11 },
+        { 2, 13 },
+        { 2, 14 },
+        { 2, 15 },
+        { 2, 16 },
+        { 2, 17 },
+        { 2, 18 },
+        { 2, 19 },
+        { 2, 20 },
+        -- Armor (classID 4)
+        { 4, 0 },
+        { 4, 1 },
+        { 4, 2 },
+        { 4, 3 },
+        { 4, 4 },
+        { 4, 5 },
+        { 4, 6 },
+        { 4, 7 },
+        { 4, 8 },
+        { 4, 9 },
+        { 4, 10 },
+        { 4, 11 },
+    },
+    equipment_boa = {
+        -- Weapons (classID 2)
+        { 2, 0 },
+        { 2, 1 },
+        { 2, 2 },
+        { 2, 3 },
+        { 2, 4 },
+        { 2, 5 },
+        { 2, 6 },
+        { 2, 7 },
+        { 2, 8 },
+        { 2, 9 },
+        { 2, 10 },
+        { 2, 11 },
+        { 2, 13 },
+        { 2, 14 },
+        { 2, 15 },
+        { 2, 16 },
+        { 2, 17 },
+        { 2, 18 },
+        { 2, 19 },
+        { 2, 20 },
+        -- Armor (classID 4)
+        { 4, 0 },
+        { 4, 1 },
+        { 4, 2 },
+        { 4, 3 },
+        { 4, 4 },
+        { 4, 5 },
+        { 4, 6 },
+        { 4, 7 },
+        { 4, 8 },
+        { 4, 9 },
+        { 4, 10 },
+        { 4, 11 },
+    },
+    housing = {
+        { 20, 0 }, -- Furniture
+        { 20, 1 }, -- Dyes
+    },
+    recipes = {
+        -- Recipes (classID 9): Pattern, Plans, Recipe, Book, etc.
+        { 9, 0 },
+        { 9, 1 },
+        { 9, 2 },
+        { 9, 3 },
+        { 9, 4 },
+        { 9, 5 },
+        { 9, 6 },
+        { 9, 7 },
+        { 9, 8 },
+        { 9, 9 },
+        { 9, 10 },
+        { 9, 11 },
+    },
+}
+
+-- itemID → list of profession keys this item is consumed by.
+-- Use this when a single classID/subClassID bucket can't disambiguate the
+-- profession (e.g. Trade Goods subclass 11 "Other" is shared by alchemy
+-- reagents, engineering crafting widgets, and cross-profession Midnight motes).
+-- Override entries take precedence over PROF_ITEM_MAP for routing decisions:
+-- the resulting match set replaces the subclass-derived match set entirely
+-- (no merging) so an item misclassified by subclass can be reassigned cleanly.
+EmpireManager.PROF_ITEM_OVERRIDES = {
+    -- Midnight (expansion 11) cross-profession motes — Trade Goods 7/11.
+    -- Subclass 11 currently maps to alchemy only; these are cross-profession
+    -- transmute/recycle reagents used by every crafting profession.
+    [236949] = { "alchemy", "engineering", "tailoring", "leatherworking", "inscription", "blacksmithing", "jewelcrafting", "enchanting" }, -- Mote of Light
+    [236950] = { "alchemy", "engineering", "tailoring", "leatherworking", "inscription", "blacksmithing", "jewelcrafting", "enchanting" }, -- Mote of Primal Energy
+    [236951] = { "alchemy", "engineering", "tailoring", "leatherworking", "inscription", "blacksmithing", "jewelcrafting", "enchanting" }, -- Mote of Wild Magic
+    [236952] = { "alchemy", "engineering", "tailoring", "leatherworking", "inscription", "blacksmithing", "jewelcrafting", "enchanting" }, -- Mote of Pure Void
+    -- Engineering crafting widgets that share Trade Goods 7/11 with alchemy reagents.
+    [253302] = { "engineering" }, -- Malleable Wireframe
+    [253303] = { "engineering" }, -- Pile of Junk
+
+    -- Midnight universal Parts (7/1) — Aetherlume + Evercore are shared
+    -- recycle/craft reagents across all crafting professions, not engineering-only
+    -- as the 7/1 → engineering map would suggest. Multiple itemIDs per name = quality tiers.
+    [243578] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Aetherlume
+    [243579] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Aetherlume (variant)
+    [243581] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Evercore
+    [243582] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Evercore (variant)
+
+    -- Midnight Trade Goods 7/11 profession-specific reagents.
+    [240990] = { "jewelcrafting" },            -- Sunglass Vial (JC variant per Wowhead spell link)
+    [240991] = { "alchemy", "jewelcrafting" }, -- Sunglass Vial
+    [241131] = { "jewelcrafting" },            -- Amani Lapis Prism
+    [241132] = { "jewelcrafting" },            -- Amani Lapis Prism (variant)
+    [241133] = { "jewelcrafting" },            -- Tenebrous Amethyst Prism
+    [241134] = { "jewelcrafting" },            -- Tenebrous Amethyst Prism (variant)
+    [241135] = { "jewelcrafting" },            -- Sanguine Garnet Prism
+    [241136] = { "jewelcrafting" },            -- Sanguine Garnet Prism (variant)
+    [241137] = { "jewelcrafting" },            -- Harandar Peridot Prism
+    [241138] = { "jewelcrafting" },            -- Harandar Peridot Prism (variant)
+    [251665] = { "tailoring" },                -- Silverleaf Thread
+    [251691] = { "tailoring" },                -- Embroidery Floss
+    [251283] = { "blacksmithing" },            -- Tormented Tantalum
+    [251285] = { "blacksmithing" },            -- Petrified Root
+    [237505] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Moxie (universal Midnight crafting reagent)
+    -- Note: Soul Cipher (245766), Codified Azeroot (245764, 245765), Thalassian Songwater (245882),
+    -- pigments, inks, and Darkmoon cards are all classID 7 / subClassID 16 (Inscription)
+    -- per the Wowhead inscription bucket, so they already route via PROF_ITEM_MAP.
+    -- The Thalassian Treatise items (245756/Tailoring, 245757/Inscription, 245758/LW) need
+    -- in-game verification of their actual subclass before adding overrides.
+
+    -- Trade Goods 7/19 ("Finishing Reagent") — not in PROF_ITEM_MAP because
+    -- the bucket is shared across professions. Per-itemID assignment is required.
+    -- TWW finishing reagents:
+    [228404] = { "alchemy" },                  -- Petal Powder
+    [228401] = { "alchemy" },                  -- Bubbling Mycobloom Culture
+    [222882] = { "tailoring" },                -- Weavercloth Embroidery Thread
+    [210814] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Acuity
+    -- Midnight finishing reagents — universal crafting helpers used across professions.
+    [225673] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Consortium Seal of Approval
+    [246447] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Apprentice's Scribbles
+    [246448] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Ledger
+    [246449] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Mentor's Helpful Handiwork
+    [246450] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Consortium Gold Star
+    [247719] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Multicraft Matrix
+    [247724] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Multicraft Manifold
+    [247725] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Resourceful Rebar
+    [247726] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Resourceful Routing
+    [247788] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Ingenious Identity
+    [260630] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Ingenious Identifier
+    -- Cooking finishing reagents (item-level dropped by zone, garnishes/bites for food crafting):
+    [265800] = { "cooking" },                  -- Earthy Garnish
+    [265801] = { "cooking" },                  -- Savory Anomaly
+    [265803] = { "cooking" },                  -- Bazaar Bites
+}
+
+-- Profession display: crafting, gathering, and secondary professions
+EmpireManager.PROF_DISPLAY = {
+    -- Crafting professions
+    {
+        key = "alchemy",
+        label = "Alchemy",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_Alchemy",
+        r = 0.0,
+        g = 0.8,
+        b = 0.6,
+    },
+    {
+        key = "blacksmithing",
+        label = "Blacksmithing",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_BlackSmithing",
+        r = 0.75,
+        g = 0.8,
+        b = 0.9,
+    },
+    {
+        key = "enchanting",
+        label = "Enchanting",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_Engraving",
+        r = 0.6,
+        g = 0.4,
+        b = 0.9,
+    },
+    {
+        key = "engineering",
+        label = "Engineering",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_Engineering",
+        r = 0.45,
+        g = 0.6,
+        b = 0.75,
+    },
+    {
+        key = "inscription",
+        label = "Inscription",
+        category = "crafting",
+        icon = "Interface\\Icons\\INV_Inscription_Tradeskill01",
+        r = 0.8,
+        g = 0.7,
+        b = 0.5,
+    },
+    {
+        key = "jewelcrafting",
+        label = "Jewelcrafting",
+        category = "crafting",
+        icon = "Interface\\Icons\\INV_Misc_Gem_02",
+        r = 0.9,
+        g = 0.2,
+        b = 0.4,
+    },
+    {
+        key = "leatherworking",
+        label = "Leatherworking",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_LeatherWorking",
+        r = 0.6,
+        g = 0.4,
+        b = 0.2,
+    },
+    {
+        key = "tailoring",
+        label = "Tailoring",
+        category = "crafting",
+        icon = "Interface\\Icons\\Trade_Tailoring",
+        r = 0.8,
+        g = 0.5,
+        b = 0.8,
+    },
+    -- Gathering professions
+    {
+        key = "herbalism",
+        label = "Herbalism",
+        category = "gathering",
+        icon = "Interface\\Icons\\Trade_Herbalism",
+        r = 0.2,
+        g = 0.8,
+        b = 0.2,
+    },
+    {
+        key = "mining",
+        label = "Mining",
+        category = "gathering",
+        icon = "Interface\\Icons\\Trade_Mining",
+        r = 0.7,
+        g = 0.5,
+        b = 0.3,
+    },
+    {
+        key = "skinning",
+        label = "Skinning",
+        category = "gathering",
+        icon = "Interface\\Icons\\INV_Misc_Pelt_Wolf_01",
+        r = 0.7,
+        g = 0.5,
+        b = 0.4,
+    },
+    -- Secondary professions
+    {
+        key = "fishing",
+        label = "Fishing",
+        category = "secondary",
+        icon = "Interface\\Icons\\Trade_Fishing",
+        r = 0.3,
+        g = 0.6,
+        b = 0.9,
+    },
+    {
+        key = "cooking",
+        label = "Cooking",
+        category = "secondary",
+        icon = "Interface\\Icons\\INV_Misc_Food_15",
+        r = 0.9,
+        g = 0.6,
+        b = 0.1,
+    },
+    {
+        key = "archaeology",
+        label = "Archaeology",
+        category = "secondary",
+        icon = "Interface\\Icons\\Trade_Archaeology",
+        r = 0.7,
+        g = 0.5,
+        b = 0.3,
+    },
+}
+
+-- Role help text used by Sidecar role checkboxes and Roster → Roles headings
+EmpireManager.ROLE_TOOLTIPS = {
+    artisan = "Crafting character. Maximum 2 professions.\n\nItems matching those professions will be routed to assigned storage.",
+    gatherer = "Gathering character. Maximum 2 professions.\n\nGathered materials are categorized and routed automatically.",
+    auctioneer = "Receives BoE items for selling.\n\nTriage routes non-Warbound BoE gear to this character via mail. Only one Auctioneer per realm is typical.",
+    banker = "Bank mule for guild or personal bank storage.\n\nAuto-assigned when a character is set as a storage destination. Receives mail from other characters.",
+    lockpicker = "Opens locked items (Rogue/Blacksmith).\n\nMark this character so you remember who can pick locks.",
+    zookeeper = "Battle pet manager.\n\nTag your pet collection character for quick identification.",
+    pvper = "PvP-focused character.\n\nTag for quick identification in the roster.",
+}
+
+-- Non-profession item categories for storage routing (not shown in Sidecar/Roster)
+EmpireManager.STORAGE_CATEGORY_DISPLAY = {
+    {
+        key = "pets",
+        label = "Pets",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Box_PetCarrier_01",
+        r = 0.4,
+        g = 0.9,
+        b = 0.4,
+    },
+    {
+        key = "pvp",
+        label = "PvP",
+        category = "general",
+        icon = "Interface\\Icons\\Ability_DualWield",
+        r = 0.95,
+        g = 0.95,
+        b = 0.95,
+    },
+    {
+        key = "lumber",
+        label = "Lumber",
+        category = "general",
+        icon = "Interface\\Icons\\INV_TradeskillItem_03",
+        r = 0.7,
+        g = 0.5,
+        b = 0.2,
+    },
+    {
+        key = "housing",
+        label = "Housing",
+        category = "general",
+        icon = "Interface\\Icons\\Garrison_Building_Storehouse",
+        r = 0.5,
+        g = 0.75,
+        b = 0.4,
+    },
+    {
+        key = "equipment_boe",
+        label = "Equipment (BoE)",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Sword_39",
+        r = 0.35,
+        g = 0.45,
+        b = 0.95,
+    },
+    {
+        key = "equipment_boa",
+        label = "Equipment (BoA)",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Shield_06",
+        r = 0.0,
+        g = 0.8,
+        b = 0.8,
+    },
+    {
+        key = "recipes",
+        label = "Recipes",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Scroll_06",
+        r = 0.9,
+        g = 0.8,
+        b = 0.4,
+    },
+    {
+        key = "consumables",
+        label = "Consumables",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Potion_54",
+        r = 0.9,
+        g = 0.3,
+        b = 0.3,
+    },
+    {
+        key = "item_enhancements",
+        label = "Item Enhancements",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Enchant_FormulaEpic_01",
+        r = 0.7,
+        g = 0.4,
+        b = 0.9,
+    },
+}
+
+-- Subcategory definitions per storage category
+-- mode: "single" = single-select required, "multi" = multi-select optional (empty = all)
+EmpireManager.SUBCATEGORY_DISPLAY = {
+    equipment_boe = {
+        mode = "multi",
+        items = {
+            { key = "weapons", label = "Weapons" },
+            { key = "armor", label = "Armor" },
+            { key = "jewelry", label = "Jewelry" },
+            { key = "other", label = "Other" },
+        },
+    },
+    equipment_boa = {
+        mode = "multi",
+        items = {
+            { key = "weapons", label = "Weapons" },
+            { key = "armor", label = "Armor" },
+            { key = "jewelry", label = "Jewelry" },
+            { key = "other", label = "Other" },
+        },
+    },
+    recipes = {
+        mode = "multi",
+        items = {
+            { key = "alchemy", label = "Alchemy" },
+            { key = "blacksmithing", label = "Blacksmithing" },
+            { key = "enchanting", label = "Enchanting" },
+            { key = "engineering", label = "Engineering" },
+            { key = "inscription", label = "Inscription" },
+            { key = "jewelcrafting", label = "Jewelcrafting" },
+            { key = "leatherworking", label = "Leatherworking" },
+            { key = "tailoring", label = "Tailoring" },
+            { key = "cooking", label = "Cooking" },
+        },
+    },
+    consumables = {
+        mode = "multi",
+        items = {
+            { key = "potions", label = "Potions" },
+            { key = "flasks", label = "Flasks & Elixirs" },
+            { key = "food", label = "Food & Drink" },
+            { key = "other", label = "Other" },
+        },
+    },
+}
+
+-- Recipe subClassID → profession key (classID 9)
+EmpireManager.RECIPE_SUBCLASS_TO_PROF = {
+    [1] = "leatherworking",
+    [2] = "tailoring",
+    [3] = "engineering",
+    [4] = "blacksmithing",
+    [5] = "cooking",
+    [6] = "alchemy",
+    [8] = "enchanting",
+    [10] = "jewelcrafting",
+    [11] = "inscription",
+}
+
+-- Build reverse lookups for profession icons, keys, and full info
+EmpireManager.PROF_ICON_BY_LABEL = {}
+EmpireManager.PROF_INFO_BY_KEY = {}
+EmpireManager.PROF_INFO_BY_LABEL = {}
+EmpireManager.VALID_PROF_KEYS = {}
+for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
+    EmpireManager.PROF_ICON_BY_LABEL[info.label] = info.icon
+    EmpireManager.PROF_INFO_BY_KEY[info.key] = info
+    EmpireManager.PROF_INFO_BY_LABEL[info.label] = info
+    EmpireManager.VALID_PROF_KEYS[info.key] = true
+end
+-- Also register non-profession storage categories so display lookups resolve them
+for _, info in ipairs(EmpireManager.STORAGE_CATEGORY_DISPLAY) do
+    EmpireManager.PROF_INFO_BY_KEY[info.key] = info
+end
+
+-------------------------------------------------------------------------------
+-- Assignment helpers
+-------------------------------------------------------------------------------
+
+function EmpireManager:HasRole(entry, roleKey)
+    return entry.assignments and entry.assignments[roleKey] ~= nil
+end
+
+-- Check if a character has artisan or gatherer role with a specific profession key
+function EmpireManager:HasProfessionRole(entry, profKey)
+    if not entry.assignments then
+        return false
+    end
+    for _, roleKey in ipairs({ "artisan", "gatherer" }) do
+        local roleData = entry.assignments[roleKey]
+        if type(roleData) == "table" and roleData[profKey] then
+            return true
+        end
+    end
+    return false
+end
+
+-- Get all profession keys assigned across artisan/gatherer roles
+function EmpireManager:GetAssignedProfs(entry)
+    local profs = {}
+    if not entry.assignments then
+        return profs
+    end
+    for _, roleKey in ipairs({ "artisan", "gatherer" }) do
+        local roleData = entry.assignments[roleKey]
+        if type(roleData) == "table" then
+            for key in pairs(roleData) do
+                if self.VALID_PROF_KEYS[key] then
+                    profs[key] = true
+                end
+            end
+        end
+    end
+    return profs
+end
+
+-------------------------------------------------------------------------------
+-- Shared format strings
+-------------------------------------------------------------------------------
+
+local ICON16_FMT = "|T%s:16:16|t %s" -- icon + label
+
+EmpireManager.ICON16_FMT = ICON16_FMT
+
+-------------------------------------------------------------------------------
+-- Formatting helpers
+-------------------------------------------------------------------------------
+
+local GOLD_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12|t"
+local SILVER_ICON = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
+local COPPER_ICON = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
+
+local function ThousandSep(n)
+    local s = tostring(n)
+    local pos = #s % 3
+    if pos == 0 then
+        pos = 3
+    end
+    local parts = { s:sub(1, pos) }
+    for i = pos + 1, #s, 3 do
+        parts[#parts + 1] = s:sub(i, i + 2)
+    end
+    return table.concat(parts, ",")
+end
+
+-- Gold-only formatter (no silver/copper), for dense displays like the dashboard.
+function EmpireManager:FormatGoldOnly(copper)
+    if not copper or copper == 0 then
+        return "0" .. GOLD_ICON
+    end
+    if copper < 0 then
+        return "-" .. self:FormatGoldOnly(-copper)
+    end
+    local g = math.floor(copper / 10000)
+    if g > 0 then
+        return ThousandSep(g) .. GOLD_ICON
+    end
+    local s = math.floor((copper % 10000) / 100)
+    if s > 0 then
+        return s .. SILVER_ICON
+    end
+    return (copper % 100) .. COPPER_ICON
+end
+
+function EmpireManager:FormatGold(copper)
+    if not copper or copper == 0 then
+        return "0" .. GOLD_ICON
+    end
+    if copper < 0 then
+        return "-" .. self:FormatGold(-copper)
+    end
+    local g = math.floor(copper / 10000)
+    local s = math.floor((copper % 10000) / 100)
+    local c = copper % 100
+    if g > 0 and s > 0 then
+        return ThousandSep(g) .. GOLD_ICON .. " " .. s .. SILVER_ICON
+    elseif g > 0 then
+        return ThousandSep(g) .. GOLD_ICON
+    elseif s > 0 and c > 0 then
+        return s .. SILVER_ICON .. " " .. c .. COPPER_ICON
+    elseif s > 0 then
+        return s .. SILVER_ICON
+    else
+        return c .. COPPER_ICON
+    end
+end
+
+function EmpireManager:ClassColoredName(entry)
+    local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
+    local name = entry.name or "?"
+    local display = name
+    if color then
+        return string.format("|cff%02x%02x%02x%s|r", color.r * 255, color.g * 255, color.b * 255, display)
+    end
+    return display
+end
+
+function EmpireManager:FormatRoles(assignments)
+    if not assignments then
+        return ""
+    end
+    local parts = {}
+    for _, display in ipairs(self.ROLE_DISPLAY) do
+        if assignments[display.key] then
+            parts[#parts + 1] = display.icon
+        end
+    end
+    if #parts == 0 then
+        return ""
+    end
+    for i, icon in ipairs(parts) do
+        parts[i] = string.format("|T%s:24:24|t", icon)
+    end
+    return table.concat(parts, " ")
+end
+
+function EmpireManager:FormatProfTags(assignments)
+    if not assignments then
+        return ""
+    end
+    local profSet = self:GetAssignedProfs({ assignments = assignments })
+    local parts = {}
+    for _, info in ipairs(self.PROF_DISPLAY) do
+        if profSet[info.key] then
+            parts[#parts + 1] = string.format("|T%s:24:24|t", info.icon)
+        end
+    end
+    return #parts > 0 and table.concat(parts, " ") or ""
+end
+
+function EmpireManager:FormatTimeSince(timestamp)
+    if not timestamp or timestamp == 0 then
+        return "Never"
+    end
+    local diff = time() - timestamp
+    if diff < 60 then
+        return "Just now"
+    elseif diff < 3600 then
+        return string.format("%dm ago", math.floor(diff / 60))
+    elseif diff < 86400 then
+        return string.format("%dh ago", math.floor(diff / 3600))
+    else
+        return string.format("%dd ago", math.floor(diff / 86400))
+    end
+end
+
+function EmpireManager:CalculateGrandTotals()
+    local totalGold = 0
+    local charCount = 0
+    for _, entry in pairs(self.db.global.registry) do
+        charCount = charCount + 1
+        totalGold = totalGold + (entry.gold or 0)
+    end
+    return totalGold, charCount
+end
+
+-- Readable class names from engine tokens
+local CLASS_NAMES = {
+    WARRIOR = "Warrior",
+    PALADIN = "Paladin",
+    HUNTER = "Hunter",
+    ROGUE = "Rogue",
+    PRIEST = "Priest",
+    DEATHKNIGHT = "Death Knight",
+    SHAMAN = "Shaman",
+    MAGE = "Mage",
+    WARLOCK = "Warlock",
+    MONK = "Monk",
+    DRUID = "Druid",
+    DEMONHUNTER = "Demon Hunter",
+    EVOKER = "Evoker",
+}
+
+local RACE_NAMES = {
+    Human = "Human",
+    Orc = "Orc",
+    Dwarf = "Dwarf",
+    NightElf = "Night Elf",
+    Scourge = "Undead",
+    Tauren = "Tauren",
+    Gnome = "Gnome",
+    Troll = "Troll",
+    Goblin = "Goblin",
+    BloodElf = "Blood Elf",
+    Draenei = "Draenei",
+    Worgen = "Worgen",
+    Pandaren = "Pandaren",
+    Nightborne = "Nightborne",
+    HighmountainTauren = "Highmountain Tauren",
+    VoidElf = "Void Elf",
+    LightforgedDraenei = "Lightforged Draenei",
+    ZandalariTroll = "Zandalari Troll",
+    KulTiran = "Kul Tiran",
+    DarkIronDwarf = "Dark Iron Dwarf",
+    Vulpera = "Vulpera",
+    MagharOrc = "Mag'har Orc",
+    Mechagnome = "Mechagnome",
+    Dracthyr = "Dracthyr",
+    EarthenDwarf = "Earthen",
+    Harronir = "Haranir",
+}
+EmpireManager.CLASS_NAMES = CLASS_NAMES
+EmpireManager.RACE_NAMES = RACE_NAMES
+
+-- Inverse of CLASS_NAMES: readable name → engine token (case-insensitive lookup).
+local CLASS_TOKENS = {}
+for token, label in pairs(CLASS_NAMES) do
+    CLASS_TOKENS[label:lower()] = token
+end
+EmpireManager.CLASS_TOKENS = CLASS_TOKENS
+
+function EmpireManager:FormatPlaytime(seconds)
+    if not seconds or seconds == 0 then
+        return nil
+    end
+    local days = math.floor(seconds / 86400)
+    local hours = math.floor((seconds % 86400) / 3600)
+    if days > 0 then
+        return string.format("%dd %dh", days, hours)
+    else
+        local mins = math.floor((seconds % 3600) / 60)
+        return string.format("%dh %dm", hours, mins)
+    end
+end
+
+function EmpireManager:ShowNameTooltip(widget, entry, anchor)
+    GameTooltip:SetOwner(widget.frame, anchor or "ANCHOR_CURSOR")
+
+    -- Name (white, header size)
+    GameTooltip:AddLine(entry.name or "?", 1, 1, 1)
+
+    -- Guild / Realm (dim, like the game's guild line)
+    local guild = (entry.guild and entry.guild ~= "") and entry.guild or nil
+    if guild then
+        GameTooltip:AddLine(guild, 0.51, 0.35, 0.76) -- purple, matches game guild color
+    end
+    GameTooltip:AddLine((entry.realm or "?") .. " Realm", 1, 0.82, 0)
+
+    -- Spec + Class (class-colored, like game's "Protection Paladin")
+    GameTooltip:AddLine(" ")
+    local className = CLASS_NAMES[entry.class] or entry.class or "?"
+    local specLine = entry.spec and (entry.spec .. " " .. className) or className
+    local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
+    if cc then
+        GameTooltip:AddLine(specLine, cc.r, cc.g, cc.b)
+    else
+        GameTooltip:AddLine(specLine, 0.8, 0.8, 0.8)
+    end
+
+    -- Level (white)
+    GameTooltip:AddLine(string.format("Level %d", entry.level or 0), 1, 1, 1)
+
+    -- Zone (light blue, like the game)
+    if entry.zone then
+        local subZonePart = (entry.subZone and entry.subZone ~= "") and (" - " .. entry.subZone) or ""
+        GameTooltip:AddLine(entry.zone .. subZonePart, 0.51, 0.77, 1.0)
+    end
+
+    -- Professions (warm yellow, comma-separated)
+    if entry.professions and #entry.professions > 0 then
+        local names = {}
+        for _, p in ipairs(entry.professions) do
+            names[#names + 1] = p.name
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(table.concat(names, ", "), 1, 0.82, 0)
+    end
+
+    -- Gold (with coin icons, matching game tooltip)
+    if entry.gold and entry.gold > 0 then
+        local g = math.floor(entry.gold / 10000)
+        local s = math.floor((entry.gold % 10000) / 100)
+        local c = entry.gold % 100
+        GameTooltip:AddLine(string.format("%d%s %d%s %d%s", g, GOLD_ICON, s, SILVER_ICON, c, COPPER_ICON), 1, 1, 1)
+    end
+
+    -- Bag / Bank free slots
+    if entry.freeBagSlots or entry.freeBankSlots then
+        GameTooltip:AddLine(" ")
+        if entry.freeBagSlots then
+            GameTooltip:AddLine(string.format("Bags: %d free", entry.freeBagSlots), 1, 1, 1)
+        end
+        if entry.freeBankSlots then
+            GameTooltip:AddLine(string.format("Bank: %d free", entry.freeBankSlots), 1, 1, 1)
+        end
+    end
+
+    -- Metadata (dimmer, bottom section)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine(string.format("Last Seen: %s", self:FormatTimeSince(entry.lastSeen)), 1, 1, 1)
+    local played = self:FormatPlaytime(entry.playedTotal)
+    if played then
+        GameTooltip:AddLine(string.format("Played: %s", played), 1, 1, 1)
+    end
+
+    -- Note (gold, wrapped, max 10 lines)
+    if entry.storageNote and entry.storageNote ~= "" then
+        GameTooltip:AddLine(" ")
+        local lines, count = {}, 0
+        for line in entry.storageNote:gmatch("[^\n]+") do
+            count = count + 1
+            if count > 10 then
+                lines[#lines + 1] = "..."
+                break
+            end
+            lines[#lines + 1] = line
+        end
+        GameTooltip:AddLine(table.concat(lines, "\n"), 1, 0.82, 0, true)
+    end
+
+    GameTooltip:Show()
+end
+
+-------------------------------------------------------------------------------
+-- Statistics: Increment a named stat counter (global + session)
+-------------------------------------------------------------------------------
+
+function EmpireManager:IncrementStat(statKey, amount)
+    amount = amount or 1
+    local gStats = self.db.global.stats
+    if gStats then
+        gStats[statKey] = (gStats[statKey] or 0) + amount
+    end
+    if self._sessionStats then
+        self._sessionStats[statKey] = (self._sessionStats[statKey] or 0) + amount
+    end
+end
+
+-- Central chat output. Gated by db.global.options.chatMessages unless `always`
+-- is true (used for errors and direct command responses).
+function EmpireManager:ChatMsg(text, always)
+    if not always then
+        local opts = self.db and self.db.global and self.db.global.options
+        if opts and opts.chatMessages == false then
+            return
+        end
+    end
+    self:Print(text)
+end
+
+-- Verbose chat output: internal progress/debug lines (restacking, capacity
+-- snapshots, action-intent lines). Silenced unless both chatMessages AND
+-- verboseMessages are enabled.
+function EmpireManager:ChatVerbose(text)
+    local opts = self.db and self.db.global and self.db.global.options
+    if not opts or opts.chatMessages == false or opts.verboseMessages ~= true then
+        return
+    end
+    self:Print(text)
+end
+
+-- Hint chat output: advisory [Hint] lines (upgradeable bags, unpurchased tabs).
+-- Silenced unless both chatMessages AND showHints are enabled.
+function EmpireManager:ChatHint(text)
+    local opts = self.db and self.db.global and self.db.global.options
+    if not opts or opts.chatMessages == false or opts.showHints == false then
+        return
+    end
+    self:Print(text)
+end
+
+-- Colored chat prefix constants. Centralized so future localization or
+-- color-scheme changes touch one place.
+EmpireManager.MSG = {
+    STORAGE = "|cff4d99ff[Storage]|r",
+    TRIAGE = "|cff4d99ff[Triage]|r",
+    BANK = "|cff4d99ff[Bank]|r",
+    HINT = "|cff4d99ff[Hint]|r",
+    ERROR = "|cffff4444", -- prepend to [Triage]/[Bank] for errors; close with |r
+}

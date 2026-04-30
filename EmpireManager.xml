@@ -1,0 +1,1265 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+
+    <!-- ================================================================== -->
+    <!-- Wardrobe-style top tab (smaller font + tighter padding)           -->
+    <!-- ================================================================== -->
+    <Button name="EMTopTabTemplate" inherits="TabSystemTopButtonTemplate" virtual="true">
+        <KeyValues>
+            <KeyValue key="selectedFontObject" value="GameFontHighlight" type="string"/>
+            <KeyValue key="unselectedFontObject" value="GameFontNormal" type="string"/>
+            <KeyValue key="textOffsetY" value="3" type="number"/>
+            <KeyValue key="textPadding" value="17" type="number"/>
+        </KeyValues>
+        <NormalFont style="GameFontNormal"/>
+        <HighlightFont style="GameFontHighlight"/>
+    </Button>
+
+    <!-- ================================================================== -->
+    <!-- Character Row Template (used by ScrollBox pool)                    -->
+    <!-- ================================================================== -->
+    <Button name="EMCharacterRowTemplate" virtual="true"
+            mixin="EMCharacterRowMixin"
+            registerForClicks="LeftButtonUp,RightButtonUp">
+        <Size x="1" y="20"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.08"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad method="OnLoad"/>
+            <OnClick method="OnClick"/>
+            <OnEnter method="OnEnter"/>
+            <OnLeave method="OnLeave"/>
+        </Scripts>
+    </Button>
+
+    <!-- ================================================================== -->
+    <!-- Map Row Template (zone heading or character row)                   -->
+    <!-- ================================================================== -->
+    <Button name="EMMapRowTemplate" virtual="true"
+            registerForClicks="LeftButtonUp">
+        <Size x="1" y="22"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.08"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Button>
+
+    <!-- ================================================================== -->
+    <!-- Storage Row Template (used by ScrollBox pool)                     -->
+    <!-- ================================================================== -->
+    <Button name="EMStorageRowTemplate" virtual="true"
+            registerForClicks="LeftButtonUp,RightButtonUp">
+        <Size x="1" y="24"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.08"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Button>
+
+    <!-- Storage Notice Template (empty state / unconfigured notice)       -->
+    <Frame name="EMStorageNoticeTemplate" virtual="true">
+        <Size x="1" y="24"/>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Main Dashboard Frame                                               -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerFrame"
+           inherits="PortraitFrameTemplate"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           mixin="EmpireManagerFrameMixin">
+        <Size x="800" y="538"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+
+        <Frames>
+            <!-- Info button (Appearances-style, overlaps portrait icon) -->
+            <Button parentKey="InfoButton" inherits="MainHelpPlateButton" hidden="true"
+                    frameLevel="510">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="44" y="19"/>
+                </Anchors>
+            </Button>
+
+            <!-- Tab System (Blizzard modern tabs) -->
+            <Frame parentKey="TabSystem" inherits="TabSystemTemplate">
+                <KeyValues>
+                    <KeyValue key="minTabWidth" value="100" type="number"/>
+                    <KeyValue key="maxTabWidth" value="200" type="number"/>
+                </KeyValues>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT" x="11" y="2"/>
+                </Anchors>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page 1: Characters (grid with filter + scroll)             -->
+            <!-- ========================================================== -->
+            <Frame parentKey="CharactersPage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-32"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <!-- Import/Export icon button (far right, matches Storage page placement) -->
+                    <Button parentKey="IEButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT" x="-24" y="-2"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\import-export"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\import-export" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\import-export">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+
+                    <!-- Triage icon button (left of IE, matches Storage page Add Rule placement) -->
+                    <Button parentKey="TriageButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="RIGHT" relativeKey="$parent.IEButton"
+                                    relativePoint="LEFT" x="-8" y="0"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\t"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\t" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\t">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+
+                    <!-- Filter Bar (same row as triage button, centered) -->
+                    <Frame parentKey="FilterBar">
+                        <Size y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="0" y="-2"/>
+                            <Anchor point="TOPRIGHT"
+                                    relativeKey="$parent.TriageButton"
+                                    relativePoint="TOPLEFT" x="-8" y="-2"/>
+                        </Anchors>
+                        <Frames>
+                            <EditBox parentKey="SearchBox"
+                                     inherits="SearchBoxTemplate"
+                                     autoFocus="false">
+                                <Size x="220" y="22"/>
+                                <Anchors>
+                                    <Anchor point="CENTER" x="-16" y="0"/>
+                                </Anchors>
+                            </EditBox>
+                            <DropdownButton parentKey="FilterButton"
+                                    inherits="WowStyle1FilterDropdownTemplate">
+                                <Anchors>
+                                    <Anchor point="LEFT"
+                                            relativeKey="$parent.SearchBox"
+                                            relativePoint="RIGHT" x="8"/>
+                                </Anchors>
+                                <Frames>
+                                    <Button parentKey="ClearFiltersButton">
+                                        <Size x="23" y="23"/>
+                                        <Anchors>
+                                            <Anchor point="CENTER"
+                                                    relativeKey="$parent"
+                                                    relativePoint="TOPRIGHT" x="-3" y="0"/>
+                                        </Anchors>
+                                        <NormalTexture atlas="auctionhouse-ui-filter-redx">
+                                            <Size x="23" y="23"/>
+                                        </NormalTexture>
+                                        <HighlightTexture atlas="auctionhouse-ui-filter-redx"
+                                                          alphaMode="ADD" alpha="0.4">
+                                            <Size x="23" y="23"/>
+                                        </HighlightTexture>
+                                    </Button>
+                                </Frames>
+                            </DropdownButton>
+                        </Frames>
+                    </Frame>
+
+                    <!-- ItemList: shrunk frame; scrollbar sits OUTSIDE on the right (AH-style) -->
+                    <Frame parentKey="Inset" useParentLevel="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"
+                                    relativeKey="$parent.FilterBar"
+                                    relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                            <Anchor point="BOTTOMRIGHT" x="-20"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" x="3" y="-22"/>
+                                        <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="0" y="-19"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="HeaderContainer">
+                                <Size y="19"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="4" y="-1"/>
+                                    <Anchor point="TOPRIGHT" x="-4" y="-1"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="BOTTOMLEFT" x="0" y="-6"/>
+                                    <Anchor point="RIGHT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="RIGHT"/>
+                                    <Anchor point="BOTTOM" x="0" y="3"/>
+                                </Anchors>
+                            </Frame>
+                            <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="TOPRIGHT" x="9" y="0"/>
+                                    <Anchor point="BOTTOMLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="BOTTOMRIGHT" x="9" y="4"/>
+                                </Anchors>
+                            </EventFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page: Storage (native)                                    -->
+            <!-- ========================================================== -->
+            <Frame parentKey="StoragePage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-32"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <!-- Import/Export icon button (far right, 24px padded) -->
+                    <Button parentKey="IEButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT" x="-24" y="-2"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\import-export"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\import-export" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\import-export">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+                    <!-- Add Rule icon button (left of IO) -->
+                    <Button parentKey="AddButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="RIGHT" relativeKey="$parent.IEButton"
+                                    relativePoint="LEFT" x="-8" y="0"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\add"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\add" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\add">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+
+                    <!-- Title text (centered, matches grid width) -->
+                    <Frame parentKey="TitleBar">
+                        <Size y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="0" y="-2"/>
+                            <Anchor point="TOPRIGHT" x="-20" y="-2"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString parentKey="Text" inherits="GameFontNormalMed1"
+                                            text="Storage Rules" justifyH="CENTER">
+                                    <Anchors>
+                                        <Anchor point="CENTER" x="26" y="0"/>
+                                    </Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+
+                    <!-- ItemList: shrunk frame; scrollbar sits OUTSIDE on the right (AH-style) -->
+                    <Frame parentKey="Inset" useParentLevel="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"
+                                    relativeKey="$parent.TitleBar"
+                                    relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                            <Anchor point="BOTTOMRIGHT" x="-20"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" x="3" y="-22"/>
+                                        <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="0" y="-19"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="HeaderContainer">
+                                <Size y="19"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="4" y="-1"/>
+                                    <Anchor point="TOPRIGHT" x="-4" y="-1"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="BOTTOMLEFT" x="0" y="-6"/>
+                                    <Anchor point="RIGHT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="RIGHT"/>
+                                    <Anchor point="BOTTOM" x="0" y="3"/>
+                                </Anchors>
+                            </Frame>
+                            <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="TOPRIGHT" x="9" y="0"/>
+                                    <Anchor point="BOTTOMLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="BOTTOMRIGHT" x="9" y="4"/>
+                                </Anchors>
+                            </EventFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page: Roster (native sub-tabs)                             -->
+            <!-- ========================================================== -->
+            <Frame parentKey="RosterPage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-70"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <!-- Top tabs (Wardrobe pattern: TOPLEFT inside content) -->
+                    <Frame parentKey="TabSystem" inherits="TabSystemTemplate">
+                        <KeyValues>
+                            <KeyValue key="tabTemplate" value="EMTopTabTemplate" type="string"/>
+                            <KeyValue key="minTabWidth" value="60" type="number"/>
+                            <KeyValue key="maxTabWidth" value="140" type="number"/>
+                        </KeyValues>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="52" y="38"/>
+                        </Anchors>
+                    </Frame>
+
+                    <!-- Inset border around scroll area (Collections-style, below top tabs) -->
+                    <Frame parentKey="Inset" useParentLevel="true" inherits="CollectionsBackgroundTemplate">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="BOTTOMRIGHT"/>
+                        </Anchors>
+                        <Frames>
+                            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                                <KeyValues>
+                                    <KeyValue key="scrollBarTemplate" value="MinimalScrollBar" type="string"/>
+                                    <KeyValue key="scrollBarX" value="2" type="number"/>
+                                    <KeyValue key="scrollBarTopY" value="-4" type="number"/>
+                                    <KeyValue key="scrollBarBottomY" value="4" type="number"/>
+                                </KeyValues>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="16" y="-12"/>
+                                    <Anchor point="BOTTOMRIGHT" x="-28" y="12"/>
+                                </Anchors>
+                                <Frames>
+                                    <Frame parentKey="Content">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"/>
+                                            <Anchor point="TOPRIGHT"/>
+                                        </Anchors>
+                                    </Frame>
+                                </Frames>
+                            </ScrollFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page: Map (ScrollBox + DataProvider)                       -->
+            <!-- ========================================================== -->
+            <Frame parentKey="MapPage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-32"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <!-- Title bar (same pattern as Storage page) -->
+                    <Frame parentKey="TitleBar">
+                        <Size y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="0" y="-2"/>
+                            <Anchor point="TOPRIGHT" x="-20" y="-2"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString parentKey="Text" inherits="GameFontNormalMed1"
+                                            text="Character Locations" justifyH="CENTER">
+                                    <Anchors>
+                                        <Anchor point="CENTER" x="26" y="0"/>
+                                    </Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+
+                    <!-- ItemList: AH-style wrapping frame; scrollbar outside on the right -->
+                    <Frame parentKey="Inset" useParentLevel="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"
+                                    relativeKey="$parent.TitleBar"
+                                    relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                            <Anchor point="BOTTOMRIGHT" x="-20"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" x="3" y="-22"/>
+                                        <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="0" y="-19"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="HeaderContainer">
+                                <Size y="19"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="4" y="-1"/>
+                                    <Anchor point="TOPRIGHT" x="-4" y="-1"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="BOTTOMLEFT" x="0" y="-6"/>
+                                    <Anchor point="RIGHT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="RIGHT"/>
+                                    <Anchor point="BOTTOM" x="0" y="3"/>
+                                </Anchors>
+                            </Frame>
+                            <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="TOPRIGHT" x="9" y="0"/>
+                                    <Anchor point="BOTTOMLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="BOTTOMRIGHT" x="9" y="4"/>
+                                </Anchors>
+                            </EventFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page: About (simple scroll with static content)            -->
+            <!-- ========================================================== -->
+            <Frame parentKey="AboutPage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-60"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Inset" useParentLevel="true" inherits="CollectionsBackgroundTemplate">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="BOTTOMRIGHT"/>
+                        </Anchors>
+                        <Frames>
+                            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                                <KeyValues>
+                                    <KeyValue key="scrollBarTemplate" value="MinimalScrollBar" type="string"/>
+                                    <KeyValue key="scrollBarX" value="2" type="number"/>
+                                    <KeyValue key="scrollBarTopY" value="-4" type="number"/>
+                                    <KeyValue key="scrollBarBottomY" value="4" type="number"/>
+                                </KeyValues>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="16" y="-12"/>
+                                    <Anchor point="BOTTOMRIGHT" x="-28" y="12"/>
+                                </Anchors>
+                                <Frames>
+                                    <Frame parentKey="Content">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"/>
+                                            <Anchor point="TOPRIGHT"/>
+                                        </Anchors>
+                                    </Frame>
+                                </Frames>
+                            </ScrollFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+        </Frames>
+
+        <Scripts>
+            <OnLoad method="OnLoad"/>
+            <OnShow method="OnShow"/>
+            <OnHide method="OnHide"/>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Sidecar (character config panel, anchors to dashboard right edge) -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerSidecar"
+           inherits="PortraitFrameTemplate"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" clampedToScreen="true">
+        <Size x="480" y="500"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+
+        <Frames>
+            <!-- Info button (per-tab help tips, same as Blizzard) -->
+            <Button parentKey="InfoButton" inherits="MainHelpPlateButton" hidden="true"
+                    frameLevel="510">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="44" y="19"/>
+                </Anchors>
+            </Button>
+
+            <!-- Content area with top sub-tabs (Wardrobe-style) -->
+            <Frame parentKey="ContentArea">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-32"/>
+                    <Anchor point="BOTTOMRIGHT" x="-4" y="8"/>
+                </Anchors>
+                <Frames>
+                    <!-- Top tabs (Wardrobe pattern: TOPLEFT inside content) -->
+                    <Frame parentKey="TabSystem" inherits="TabSystemTemplate">
+                        <KeyValues>
+                            <KeyValue key="tabTemplate" value="EMTopTabTemplate" type="string"/>
+                            <KeyValue key="minTabWidth" value="40" type="number"/>
+                            <KeyValue key="maxTabWidth" value="120" type="number"/>
+                        </KeyValues>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="52" y="2"/>
+                        </Anchors>
+                    </Frame>
+
+                    <!-- Inset border around content area (Collections-style: marble + tile + shadows) -->
+                    <Frame parentKey="Inset" useParentLevel="true" inherits="CollectionsBackgroundTemplate">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="4" y="-35"/>
+                            <Anchor point="BOTTOMRIGHT" x="-4" y="0"/>
+                        </Anchors>
+                    </Frame>
+
+                    <!-- Content area below tabs -->
+                    <Frame parentKey="ContentPanel">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="4" y="-35"/>
+                            <Anchor point="BOTTOMRIGHT" x="-4" y="0"/>
+                        </Anchors>
+                    </Frame>
+
+                    <!-- Notes editor (same as IO frame EditScroll) -->
+                    <ScrollFrame parentKey="NotesEdit" inherits="InputScrollFrameTemplate"
+                                 hidden="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="16" y="-60"/>
+                            <Anchor point="BOTTOMRIGHT" x="-30" y="12"/>
+                        </Anchors>
+                        <KeyValues>
+                            <KeyValue key="maxLetters" value="1000" type="number"/>
+                            <KeyValue key="hideCharCount" value="true" type="boolean"/>
+                        </KeyValues>
+                    </ScrollFrame>
+                </Frames>
+            </Frame>
+        </Frames>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Storage Rule Dialog (Add/Edit modal)                                -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerStorageDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="DIALOG"
+           inherits="BackdropTemplate">
+        <Size x="460" y="420"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+
+            <!-- Form rows (labels + dropdowns created in Lua, anchored to these) -->
+            <!-- Row 1: Category -->
+            <Frame parentKey="Row1">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="48" y="-56"/>
+                    <Anchor point="TOPRIGHT" x="-14" y="-56"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Category:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 2: Bank Type -->
+            <Frame parentKey="Row2">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row1"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Bank Type:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 3: Tabs -->
+            <Frame parentKey="Row3">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row2"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Tabs:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 4: Character (conditional) -->
+            <Frame parentKey="Row4">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row3"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Character:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 5: Guild (conditional) -->
+            <Frame parentKey="Row5">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row3"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Guild:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 6: Expansions (optional) -->
+            <Frame parentKey="Row6">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row3"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Expansions:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <!-- Row 7: Subcategory (optional) -->
+            <Frame parentKey="Row7">
+                <Size y="32"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.Row6"
+                            relativePoint="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT" x="-14"/>
+                </Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <FontString parentKey="Label" inherits="GameFontHighlight"
+                                justifyH="LEFT" text="Subcategory:">
+                        <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
+                        <Size x="90"/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- Bottom buttons: [Delete]          [Cancel][Save] -->
+            <Button parentKey="DeleteButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" x="22" y="20"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="SaveButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-22" y="20"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="CancelButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-126" y="20"/>
+                </Anchors>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Import/Export Window                                                -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerIOFrame"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="HIGH"
+           inherits="BackdropTemplate">
+        <Size x="600" y="460"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="EditScroll" inherits="InputScrollFrameTemplate">
+                <Size x="528" y="260"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="32" y="-64"/>
+                </Anchors>
+                <KeyValues>
+                    <KeyValue key="maxLetters" value="0" type="number"/>
+                    <KeyValue key="hideCharCount" value="true" type="boolean"/>
+                </KeyValues>
+            </ScrollFrame>
+            <Frame parentKey="StatusFrame">
+                <Size y="20"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.EditScroll"
+                            relativePoint="BOTTOMLEFT" x="0" y="-6"/>
+                    <Anchor point="RIGHT" x="-12"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString parentKey="StatusText" inherits="GameFontHighlight"
+                                    justifyH="LEFT" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Triage Overlay                                                      -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerTriageFrame"
+           inherits="PortraitFrameTemplate"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           resizable="true">
+        <Size x="500" y="550"/>
+        <ResizeBounds>
+            <minResize x="456" y="300"/>
+            <maxResize x="1280" y="1080"/>
+        </ResizeBounds>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+
+        <Frames>
+            <!-- Info button (help tooltip, overlaps portrait icon) -->
+            <Button parentKey="InfoButton" inherits="MainHelpPlateButton" hidden="true"
+                    frameLevel="510">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="44" y="19"/>
+                </Anchors>
+            </Button>
+
+            <!-- Unified status/summary bar (scan state OR counts) -->
+            <Frame parentKey="SummaryBar">
+                <Size y="24"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="8" y="-32"/>
+                    <Anchor point="TOPRIGHT" x="-8" y="-32"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString parentKey="SummaryLabel" inherits="GameFontNormalLarge" justifyH="CENTER" maxLines="1">
+                            <Anchors>
+                                <Anchor point="LEFT"/>
+                                <Anchor point="RIGHT"/>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+
+            <!-- Bottom tabs (TabSystemTemplate, same pattern as dashboard/sidecar) -->
+            <Frame parentKey="TabSystem" inherits="TabSystemTemplate">
+                <KeyValues>
+                    <KeyValue key="minTabWidth" value="70" type="number"/>
+                    <KeyValue key="maxTabWidth" value="130" type="number"/>
+                </KeyValues>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT" x="8" y="2"/>
+                </Anchors>
+            </Frame>
+
+            <!-- List panel backdrop (TooltipBackdropTemplate; visual only) -->
+            <Frame parentKey="ListPanel" inherits="TooltipBackdropTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.SummaryBar"
+                            relativePoint="BOTTOMLEFT" y="-2"/>
+                    <Anchor point="BOTTOMRIGHT" x="-12" y="52"/>
+                </Anchors>
+            </Frame>
+
+            <!-- Scrollable content area (sibling of ListPanel; sits inside its visible region) -->
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.ListPanel"
+                            relativePoint="TOPLEFT" x="6" y="-6"/>
+                    <Anchor point="BOTTOMRIGHT" relativeKey="$parent.ListPanel"
+                            relativePoint="BOTTOMRIGHT" x="-22" y="6"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Mail Per-Character Dialog                                           -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerMailDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="HIGH"
+           inherits="BackdropTemplate">
+        <Size x="450" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="44"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Vendor Confirmation Dialog (uncommon+ gear)                          -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerVendorDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="HIGH"
+           inherits="BackdropTemplate">
+        <Size x="450" y="320"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="44"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Keeplist Window                                                      -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerKeeplistWindow"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           inherits="BackdropTemplate">
+        <Size x="460" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <EditBox parentKey="AddBox" inherits="InputBoxTemplate" autoFocus="false">
+                <Size x="260" y="22"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                </Anchors>
+            </EditBox>
+            <Button parentKey="AddButton" inherits="UIPanelButtonTemplate">
+                <Size x="60" y="22"/>
+                <Anchors>
+                    <Anchor point="LEFT" relativeKey="$parent.AddBox"
+                            relativePoint="RIGHT" x="4"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-84"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="16"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Vendorlist Window                                                    -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerVendorlistWindow"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           inherits="BackdropTemplate">
+        <Size x="460" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <EditBox parentKey="AddBox" inherits="InputBoxTemplate" autoFocus="false">
+                <Size x="260" y="22"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                </Anchors>
+            </EditBox>
+            <Button parentKey="AddButton" inherits="UIPanelButtonTemplate">
+                <Size x="60" y="22"/>
+                <Anchors>
+                    <Anchor point="LEFT" relativeKey="$parent.AddBox"
+                            relativePoint="RIGHT" x="4"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-84"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="16"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Guild Blacklist Window                                               -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerGuildBlacklistWindow"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           inherits="BackdropTemplate">
+        <Size x="460" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <Frame parentKey="AddRow">
+                <Size y="28"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                    <Anchor point="TOPRIGHT" x="-24" y="-56"/>
+                </Anchors>
+            </Frame>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-84"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="16"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <Frame name="EmpireManagerCharBlacklistWindow"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           inherits="BackdropTemplate">
+        <Size x="460" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-56"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="16"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+</Ui>

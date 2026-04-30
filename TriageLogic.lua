@@ -1,0 +1,2281 @@
+-- ----------------------------------------------------------------------------
+--                                   EmpireManager
+--                              https://wow.cyberpunk.gr
+--                (c) by George Litos (l0neshad0w),  All Rights Reserved
+--                   For detailed license information check LICENSE.md
+-- ----------------------------------------------------------------------------
+
+local EmpireManager = LibStub("AceAddon-3.0"):GetAddon("EmpireManager")
+
+-------------------------------------------------------------------------------
+-- Reusable event listener frame pool (WoW frames can't be GC'd)
+-- Exposed as addon methods since deposit/mail actions in Triage.lua need them.
+-------------------------------------------------------------------------------
+
+local listenerPool = {}
+local activeListeners = {}
+function EmpireManager:AcquireListener()
+    local f = table.remove(listenerPool)
+    if not f then
+        f = CreateFrame("Frame")
+    end
+    activeListeners[f] = true
+    return f
+end
+function EmpireManager:ReleaseListener(f)
+    activeListeners[f] = nil
+    f:UnregisterAllEvents()
+    f:SetScript("OnEvent", nil)
+    listenerPool[#listenerPool + 1] = f
+end
+function EmpireManager:ReleaseAllListeners()
+    for f in pairs(activeListeners) do
+        activeListeners[f] = nil
+        f:UnregisterAllEvents()
+        f:SetScript("OnEvent", nil)
+        listenerPool[#listenerPool + 1] = f
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Async Coroutine Scanner (spreads work across frames to avoid UI freezes)
+-------------------------------------------------------------------------------
+
+-- Time budget per frame in milliseconds. Scanning yields when this is exceeded.
+local ASYNC_BUDGET_MS = 1 -- ~1ms per frame — very conservative to prevent any stutter
+
+-- Active async scan state (only one scan at a time)
+local asyncCoroutine = nil
+local asyncOnComplete = nil
+local asyncTickerFrame = nil
+local asyncFrameSkip = 0 -- gate: resume every 2nd frame
+
+-- Drive the coroutine: resume once per frame then return.
+-- This guarantees at most one yield-to-yield work unit per frame, preventing
+-- any single expensive slot scan from monopolizing the frame.
+-- When the coroutine finishes, the callback is deferred to the next frame
+-- via C_Timer.After(0) so the completion handler never blocks the current frame.
+local function AsyncTick()
+    if not asyncCoroutine then
+        if asyncTickerFrame then
+            asyncTickerFrame:SetScript("OnUpdate", nil)
+        end
+        return
+    end
+    -- Resume every 2nd frame so each batch (BANK_BATCH_SIZE=100) gets a clean
+    -- frame to recover, esp. when GetItemInfo is uncached on first bank open.
+    asyncFrameSkip = asyncFrameSkip + 1
+    if asyncFrameSkip < 2 then
+        return
+    end
+    asyncFrameSkip = 0
+    local startMs = debugprofilestop()
+    local ok, result = coroutine.resume(asyncCoroutine, startMs)
+    if not ok then
+        -- Coroutine errored — abort
+        local err = result
+        asyncCoroutine = nil
+        if asyncTickerFrame then
+            asyncTickerFrame:SetScript("OnUpdate", nil)
+        end
+        local cb = asyncOnComplete
+        asyncOnComplete = nil
+        if cb then
+            C_Timer.After(0, function()
+                local f = cb
+                cb = nil
+                f(nil, err)
+            end)
+        end
+        return
+    end
+    if coroutine.status(asyncCoroutine) == "dead" then
+        -- Coroutine finished — defer callback to next frame
+        local cb = asyncOnComplete
+        local res = result
+        asyncCoroutine = nil
+        asyncOnComplete = nil
+        asyncTickerFrame:SetScript("OnUpdate", nil)
+        if cb then
+            C_Timer.After(0, function()
+                local f, r = cb, res
+                cb, res = nil, nil
+                f(r)
+            end)
+        end
+        return
+    end
+    -- Coroutine yielded — always return, resume next frame.
+    -- No budget loop: one resume per frame keeps each frame fast.
+end
+
+-- Cancel any running async scan (e.g., when tab switches or overlay closes)
+function EmpireManager:CancelAsyncScan()
+    if asyncCoroutine then
+        asyncCoroutine = nil
+        asyncOnComplete = nil
+        if asyncTickerFrame then
+            asyncTickerFrame:SetScript("OnUpdate", nil)
+        end
+    end
+end
+
+-- Start an async scan. scanFn is a function(yieldCheck) that calls yieldCheck()
+-- periodically; yieldCheck() yields when the frame budget is exhausted.
+-- onComplete(results, err) is called when done.
+-- Exposed as both local (for this file) and addon method (for Core.lua).
+local function StartAsyncScan(scanFn, onComplete)
+    -- Cancel any existing scan
+    EmpireManager:CancelAsyncScan()
+
+    if not asyncTickerFrame then
+        asyncTickerFrame = CreateFrame("Frame")
+    end
+
+    asyncOnComplete = onComplete
+    asyncFrameSkip = 0
+    asyncCoroutine = coroutine.create(function(frameStartMs)
+        -- yieldCheck: call this inside the scan loop. It yields when the
+        -- time budget for the current frame is exceeded, and returns the
+        -- new frame start time after resumption.
+        local currentFrameStart = frameStartMs
+        local function yieldCheck()
+            local elapsed = debugprofilestop() - currentFrameStart
+            if elapsed >= ASYNC_BUDGET_MS then
+                currentFrameStart = coroutine.yield() -- resumed next frame with new startMs
+            end
+        end
+        return scanFn(yieldCheck)
+    end)
+
+    asyncTickerFrame:SetScript("OnUpdate", AsyncTick)
+    -- Kick off the first resume (pass current time)
+    AsyncTick()
+end
+
+-- Expose for use in Core.lua (bank capacity snapshots, etc.)
+function EmpireManager:StartAsyncScan(scanFn, onComplete)
+    StartAsyncScan(scanFn, onComplete)
+end
+
+-------------------------------------------------------------------------------
+-- Category Constants
+-------------------------------------------------------------------------------
+
+local CAT_KEEP = "KEEP"
+local CAT_ROUTE = "ROUTE"
+local CAT_STASH = "STASH"
+local CAT_VENDOR = "VENDOR"
+local CAT_TAKEOUT = "TAKEOUT"
+
+-- Expose for Triage.lua UI
+EmpireManager.CAT_KEEP = CAT_KEEP
+EmpireManager.CAT_ROUTE = CAT_ROUTE
+EmpireManager.CAT_STASH = CAT_STASH
+EmpireManager.CAT_VENDOR = CAT_VENDOR
+EmpireManager.CAT_TAKEOUT = CAT_TAKEOUT
+
+-- Category display info
+EmpireManager.CATEGORY_INFO = {
+    [CAT_KEEP] = { label = "Keep", r = 0.0, g = 0.8, b = 0.0 },
+    [CAT_ROUTE] = { label = "Route", r = 1.0, g = 0.8, b = 0.0 },
+    [CAT_STASH] = { label = "Stash", r = 0.3, g = 0.6, b = 1.0 },
+    [CAT_VENDOR] = { label = "Vendor", r = 0.6, g = 0.6, b = 0.6 },
+    [CAT_TAKEOUT] = { label = "Take Out", r = 1.0, g = 0.8, b = 0.0 },
+}
+
+-- Category sort order for display grouping (bag triage)
+EmpireManager.CATEGORY_ORDER = { CAT_KEEP, CAT_ROUTE, CAT_STASH, CAT_VENDOR }
+
+-- Cached triage results
+EmpireManager.triageResults = nil
+EmpireManager.triageLastScan = 0
+-- Flipped true by BAG_UPDATE_DELAYED; cleared after a successful scan.
+-- When false, RunTriageAsync returns cached results without re-scanning.
+EmpireManager._bagsDirty = true
+
+-------------------------------------------------------------------------------
+-- Move Contexts — bank-type-specific API strategies
+--
+-- Each context provides a uniform interface so the move engine works
+-- identically for character bank, warband bank, and guild bank.
+-- Guild bank uses entirely different WoW APIs and must be moved one item
+-- at a time with a server query after each move.
+-------------------------------------------------------------------------------
+
+EmpireManager.MoveContexts = {}
+local MoveContexts = EmpireManager.MoveContexts
+
+MoveContexts.charbank = {
+    name = "Character Bank",
+    batchSize = 0, -- 0 = unlimited (fire all at once)
+    GetItemInfo = function(container, slot)
+        return C_Container.GetContainerItemInfo(container, slot)
+    end,
+    GetNumSlots = function(container)
+        return C_Container.GetContainerNumSlots(container) or 0
+    end,
+    PickupItem = function(container, slot)
+        C_Container.PickupContainerItem(container, slot)
+    end,
+    SplitItem = function(container, slot, qty)
+        C_Container.SplitContainerItem(container, slot, qty)
+    end,
+    IsItemAllowedInBank = function(_srcBag, _srcSlot)
+        return true -- no restrictions for character bank
+    end,
+    ResolveAddress = function(tabNum)
+        return 5 + tabNum -- tab 1-6 → container 6-11
+    end,
+    TabRange = function()
+        return 1, 6
+    end,
+    ContainerRange = function()
+        return 6, 11
+    end,
+    needsQueryAfterMove = false,
+}
+
+MoveContexts.warbandbank = {
+    name = "Warband Bank",
+    batchSize = 5, -- batched by 5 (WoW rate limiting)
+    GetItemInfo = function(container, slot)
+        return C_Container.GetContainerItemInfo(container, slot)
+    end,
+    GetNumSlots = function(container)
+        return C_Container.GetContainerNumSlots(container) or 0
+    end,
+    PickupItem = function(container, slot)
+        C_Container.PickupContainerItem(container, slot)
+    end,
+    SplitItem = function(container, slot, qty)
+        C_Container.SplitContainerItem(container, slot, qty)
+    end,
+    IsItemAllowedInBank = function(srcBag, srcSlot)
+        local loc = ItemLocation:CreateFromBagAndSlot(srcBag, srcSlot)
+        if not C_Item.DoesItemExist(loc) then
+            return false
+        end
+        if C_Bank and C_Bank.IsItemAllowedInBankType then
+            local allowed = C_Bank.IsItemAllowedInBankType(Enum.BankType.Account, loc)
+            if not allowed then
+                local info = C_Container.GetContainerItemInfo(srcBag, srcSlot)
+                EmpireManager:Print(
+                    "|cffff0000[Bank]|r Not allowed in Warband Bank: " .. tostring(info and info.itemName)
+                )
+            end
+            return allowed
+        end
+        return true
+    end,
+    ResolveAddress = function(tabNum)
+        return 11 + tabNum -- tab 1-5 → container 12-16
+    end,
+    TabRange = function()
+        return 1, 5
+    end,
+    ContainerRange = function()
+        return 12, 16
+    end,
+    needsQueryAfterMove = false,
+}
+
+MoveContexts.guildbank = {
+    name = "Guild Bank",
+    batchSize = 1, -- ONE move at a time (proven rule)
+    _currentTab = nil, -- cached to avoid redundant SetCurrentGuildBankTab calls
+    EnsureTab = function(self, tab)
+        if self._currentTab ~= tab then
+            SetCurrentGuildBankTab(tab)
+            self._currentTab = tab
+        end
+    end,
+    GetItemInfo = function(tab, slot)
+        MoveContexts.guildbank:EnsureTab(tab)
+        local tex, count, locked = GetGuildBankItemInfo(tab, slot)
+        if not tex then
+            return nil
+        end
+        local link = GetGuildBankItemLink(tab, slot)
+        local itemID = link and select(1, C_Item.GetItemInfoInstant(link))
+        return {
+            itemID = itemID,
+            stackCount = count,
+            isLocked = locked,
+            itemLink = link,
+            iconFileID = tex,
+        }
+    end,
+    GetNumSlots = function(tab)
+        local _, _, _, _, numSlots = GetGuildBankTabInfo(tab)
+        -- Guild bank tabs are always 98 slots (14x7). API returns -1 or
+        -- bogus values like 100000 for purchased tabs.
+        if not numSlots or numSlots <= 0 or numSlots > 98 then
+            numSlots = 98
+        end
+        return numSlots
+    end,
+    PickupItem = function(tab, slot)
+        MoveContexts.guildbank:EnsureTab(tab)
+        PickupGuildBankItem(tab, slot)
+    end,
+    SplitItem = function(tab, slot, qty)
+        SplitGuildBankItem(tab, slot, qty)
+    end,
+    IsItemAllowedInBank = function(srcBag, srcSlot)
+        -- Bound items cannot go in guild bank
+        local loc = ItemLocation:CreateFromBagAndSlot(srcBag, srcSlot)
+        if not C_Item.DoesItemExist(loc) then
+            return false
+        end
+        return not C_Item.IsBound(loc)
+    end,
+    ResolveAddress = function(tabNum)
+        return tabNum -- guild bank tab number IS the address directly
+    end,
+    TabRange = function()
+        return 1, GetNumGuildBankTabs()
+    end,
+    ContainerRange = function()
+        return 1, GetNumGuildBankTabs()
+    end,
+    needsQueryAfterMove = true, -- QueryGuildBankTab after each move
+    QueryAfterMove = function(tab)
+        QueryGuildBankTab(tab)
+    end,
+}
+
+-------------------------------------------------------------------------------
+-- Profession Storage Cache (built from PROF_ITEM_MAP + storageAssignments)
+-------------------------------------------------------------------------------
+
+-- (classID*1000 + subClassID) → array of profession keys that consume this item type
+-- Exposed on addon object so bank triage scanner can access it.
+EmpireManager._profMatchCache = {}
+local profMatchCache = EmpireManager._profMatchCache
+-- itemID → set of profession keys (built from PROF_ITEM_OVERRIDES). Takes
+-- precedence over profMatchCache so misclassified subclass buckets can be fixed
+-- without remapping the whole subclass.
+EmpireManager._profOverrideCache = {}
+local profOverrideCache = EmpireManager._profOverrideCache
+local storageCacheBuilt = false
+
+-- True if the keep-own-mat-in-bags rule should be skipped for this item due to
+-- the "latest expansion only" sub-option. Items without an expansionID (legacy
+-- vanilla items) are always treated as "old".
+local function IsBlockedByLatestOnly(entry, item)
+    if not entry.keepOwnProfMatsInBagsLatestOnly then
+        return false
+    end
+    local latest = GetExpansionLevel and GetExpansionLevel() or 0
+    local exp = item and item.expansionID
+    return not exp or exp < latest
+end
+
+-- Resolve the profession match set for an item: itemID override wins over the
+-- subclass cache. Returns nil when neither matches.
+local function GetProfMatchSet(item)
+    if not item then
+        return nil
+    end
+    local override = item.itemID and profOverrideCache[item.itemID]
+    if override then
+        return override
+    end
+    local classID = item.itemClassID
+    if not classID or classID < 0 then
+        return nil
+    end
+    return profMatchCache[classID * 1000 + (item.itemSubClassID or 0)]
+end
+
+-- Check if an item matches a storage assignment's subcategory filter.
+-- No subcategories = match all (backward compatible).
+local RECIPE_SUBCLASS_TO_PROF = EmpireManager.RECIPE_SUBCLASS_TO_PROF
+
+local function MatchesSubcategory(assignment, item)
+    local subcats = assignment.subcategories
+    if not subcats or #subcats == 0 then
+        return true
+    end
+
+    local subcatSet = {}
+    for _, sc in ipairs(subcats) do
+        subcatSet[sc] = true
+    end
+    local prof = assignment.profession
+
+    if prof == "equipment_boe" or prof == "equipment_boa" then
+        if subcatSet["weapons"] and item.itemClassID == 2 then
+            return true
+        end
+        if subcatSet["armor"] and item.itemClassID == 4 and item.itemSubClassID >= 1 and item.itemSubClassID <= 4 then
+            return true
+        end
+        if subcatSet["jewelry"] and item.itemClassID == 4 and item.itemSubClassID == 0 then
+            return true
+        end
+        if subcatSet["other"] then
+            local isKnown = item.itemClassID == 2
+                or (item.itemClassID == 4 and item.itemSubClassID >= 0 and item.itemSubClassID <= 4)
+            if not isKnown then
+                return true
+            end
+        end
+        return false
+    elseif prof == "recipes" then
+        local recipeProfKey = RECIPE_SUBCLASS_TO_PROF[item.itemSubClassID]
+        return recipeProfKey and (subcatSet[recipeProfKey] or false) or false
+    elseif prof == "consumables" then
+        local sub = item.itemSubClassID
+        if subcatSet["potions"] and sub == 1 then
+            return true
+        end
+        if subcatSet["flasks"] and (sub == 2 or sub == 3) then
+            return true
+        end
+        if subcatSet["food"] and sub == 5 then
+            return true
+        end
+        if subcatSet["other"] and sub ~= 1 and sub ~= 2 and sub ~= 3 and sub ~= 5 then
+            return true
+        end
+        return false
+    end
+
+    return true
+end
+
+-- Can this assignment's destination bank type physically accept the item,
+-- given its bind state? Guild banks reject warbound AND soulbound items.
+-- Warband banks reject soulbound (non-warbound). Character banks accept anything.
+-- Skipped when the item is already in a bank (we're reorganizing, not depositing).
+local function IsBankTypeCompatible(item, assignment)
+    if item.bankType then
+        return true -- already in a bank, blizzard already accepted it there
+    end
+    if item.isWarbound then
+        return assignment.type == "charbank" or assignment.type == "warbandbank"
+    end
+    if item.isBound then
+        return assignment.type == "charbank"
+    end
+    return true
+end
+
+-- Check if an assignment passes expansion + subcategory filters for an item.
+-- Array order = priority: first eligible assignment wins.
+local function IsAssignmentEligible(assignment, item)
+    -- Expansion filter: skip if item's expansion doesn't match any selected
+    if assignment.expansions and #assignment.expansions > 0 then
+        if not item.expansionID then
+            return false
+        end
+        local match = false
+        for _, eid in ipairs(assignment.expansions) do
+            if item.expansionID == eid then
+                match = true
+                break
+            end
+        end
+        if not match then
+            return false
+        end
+    end
+    -- Subcategory filter
+    if not MatchesSubcategory(assignment, item) then
+        return false
+    end
+    return true
+end
+
+local function RebuildStorageCache(self)
+    -- Rebuild into the shared table (clear + repopulate, not reassign)
+    for k in pairs(profMatchCache) do
+        profMatchCache[k] = nil
+    end
+    for profKey, subclasses in pairs(self.PROF_ITEM_MAP) do
+        for _, pair in ipairs(subclasses) do
+            local cacheKey = pair[1] * 1000 + pair[2]
+            if not profMatchCache[cacheKey] then
+                profMatchCache[cacheKey] = {}
+            end
+            profMatchCache[cacheKey][profKey] = true
+        end
+    end
+    for k in pairs(profOverrideCache) do
+        profOverrideCache[k] = nil
+    end
+    if self.PROF_ITEM_OVERRIDES then
+        for itemID, profs in pairs(self.PROF_ITEM_OVERRIDES) do
+            local set = {}
+            for _, profKey in ipairs(profs) do
+                set[profKey] = true
+            end
+            profOverrideCache[itemID] = set
+        end
+    end
+    storageCacheBuilt = true
+end
+
+function EmpireManager:EnsureStorageCache()
+    if not storageCacheBuilt then
+        RebuildStorageCache(self)
+    end
+end
+
+-- Invalidate caches when storage assignments change.
+-- Also drops cached triage classifications so the next scan re-runs ClassifyItem
+-- against the fresh rule set (otherwise the bag-scan fast-path in RunTriageAsync
+-- returns stale results when bags haven't changed).
+function EmpireManager:InvalidateStorageCache()
+    storageCacheBuilt = false
+    self.triageResults = nil
+    self.bankTriageResults = nil
+    self._triageFingerprint = nil
+    self._bankTriageFingerprint = nil
+    self._triageFingerprintCount = nil
+    self._bankTriageFingerprintCount = nil
+end
+
+-------------------------------------------------------------------------------
+-- Tooltip Bind Helpers (shared by bag and bank scanning)
+-------------------------------------------------------------------------------
+
+-- Tooltip bind detection is expensive (parses tooltip lines per item).
+-- Only needed for items where ClassifyItem checks bind state:
+--   classID 2 (Weapon) / 4 (Armor) → soulbound gear vendor check
+-- Tooltip scan is needed for:
+--   classID 1 (Container) / 15 (Miscellaneous) → lockbox detection
+--   classID 2 (Weapon) / 4 (Armor) → equipment warbound/BoE detection
+--   classID 12 (Quest) → subcategory soulbound/warbound filtering
+--   bindType 2 (BoE) → auctioneer/disenchant routing
+--   Any storable category (consumables, gems, item enhancements, recipes,
+--   battle pets, housing) can be warbound with misleading bindType=1.
+--   Scan all classIDs used in PROF_ITEM_MAP to catch warbound items.
+local TOOLTIP_SCAN_CLASSES = {
+    [0] = true, -- Consumable
+    [1] = true, -- Container (lockbox)
+    [2] = true, -- Weapon
+    [3] = true, -- Gem
+    [4] = true, -- Armor
+    [7] = true, -- Trade Goods (reagents can be warbound despite bindType=1)
+    [8] = true, -- Item Enhancement
+    [9] = true, -- Recipe
+    [12] = true, -- Quest
+    [15] = true, -- Miscellaneous
+    [17] = true, -- Battle Pet
+    [20] = true, -- Housing
+}
+-- Forward-declared; populated at ITEM_CATEGORY_MAP definition below.
+local ITEM_CATEGORY_MAP
+
+local function NeedsTooltipScan(classID, bindType, itemID)
+    if TOOLTIP_SCAN_CLASSES[classID] or bindType == 2 then
+        return true
+    end
+    -- Items with an explicit category assignment need tooltip-accurate bind detection
+    -- regardless of classID (e.g. lumber reagents routed to warband bank).
+    if itemID and ITEM_CATEGORY_MAP and ITEM_CATEGORY_MAP[itemID] then
+        return true
+    end
+    return false
+end
+
+-- Parse tooltip data for warbound/soulbound/lockbox/teleport flags.
+-- isTeleport: any "Use: Teleport..." line (trinkets/rings like Runed Signet of
+-- the Kirin Tor, Time-Lost Artifact). Used to preserve these from vendor.
+local function ParseTooltipBind(tooltipData)
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    if tooltipData and tooltipData.lines then
+        for _, line in ipairs(tooltipData.lines) do
+            local txt = line.leftText
+            if txt then
+                if
+                    txt == ITEM_ACCOUNTBOUND
+                    or txt == ITEM_BIND_TO_ACCOUNT
+                    or txt == ITEM_BNETACCOUNTBOUND
+                    or txt == ITEM_BIND_TO_BNETACCOUNT
+                    or txt == ITEM_ACCOUNTBOUND_UNTIL_EQUIP
+                    or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP
+                then
+                    isWarbound = true
+                elseif txt == ITEM_SOULBOUND then
+                    isSoulbound = true
+                elseif txt == LOCKED then
+                    isLockbox = true
+                elseif txt == ITEM_UNIQUE or txt:match("^Unique %(%d+%)$") then
+                    isUnique = true
+                end
+                if not isTeleport and txt:find("[Tt]eleport") then
+                    isTeleport = true
+                end
+            end
+        end
+    end
+    if isSoulbound then
+        isWarbound = false
+    end
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport
+end
+
+-- Parse bag slot count from an item's tooltip. Returns slot count or nil.
+-- Used by Rule D.2a-bag to compare a BoP container against equipped bags.
+-- Matches leftText lines like "24 Slot Bag" / "30 Slot Reagent Bag".
+local function ParseBagSlots(itemLink)
+    if not itemLink or not C_TooltipInfo or not C_TooltipInfo.GetHyperlink then
+        return nil
+    end
+    local tooltipData = C_TooltipInfo.GetHyperlink(itemLink)
+    if not tooltipData or not tooltipData.lines then
+        return nil
+    end
+    for _, line in ipairs(tooltipData.lines) do
+        local txt = line.leftText
+        if txt then
+            local n = txt:match("^(%d+)%s+Slot")
+            if n then
+                return tonumber(n)
+            end
+        end
+    end
+    return nil
+end
+
+-- Per-scan tooltip cache: avoids re-parsing tooltips for the same itemID.
+-- Cleared at the start of each async scan via ResetTooltipCache().
+-- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport }
+-- isSoulbound is NOT cached: it is per-slot state (one stack of an itemID may
+-- be bound while another slot of the same itemID is a fresh BoE), so we must
+-- re-parse the tooltip each call to get the slot-specific soulbound flag.
+local tooltipCache = {}
+local function ResetTooltipCache()
+    tooltipCache = {}
+end
+
+local function CachedTooltipBind(itemID, tooltipDataFn)
+    local tooltipData = tooltipDataFn()
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = ParseTooltipBind(tooltipData)
+    local cached = tooltipCache[itemID]
+    if cached then
+        -- Per-slot soulbound from the live tooltip; static flags from the cache.
+        return cached[1], isSoulbound, cached[2], cached[3], cached[4]
+    end
+    tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport }
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport
+end
+
+-------------------------------------------------------------------------------
+-- Bag Scanning (shared core: optional yieldCheck for async mode)
+-------------------------------------------------------------------------------
+
+-- Scan a single bag slot and append item record to items table
+local function ScanBagSlot(items, bag, slot)
+    local info = C_Container.GetContainerItemInfo(bag, slot)
+    if not info then
+        return
+    end
+
+    local _, _, _, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(info.itemID)
+    local _, _, _, _, _, _, _, _, _, _, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
+        C_Item.GetItemInfo(info.hyperlink or info.itemID)
+
+    -- Use C_Item.IsBound (live API) as primary bound check — more reliable than
+    -- info.isBound which can return false for soulbound items when data isn't cached.
+    local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+    local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
+
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
+        if C_TooltipInfo and C_TooltipInfo.GetBagItem then
+            local bagRef, slotRef = bag, slot -- capture for closure
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(info.itemID, function()
+                return C_TooltipInfo.GetBagItem(bagRef, slotRef)
+            end)
+        end
+    end
+
+    -- Tooltip soulbound detection as additional fallback
+    if isSoulbound then
+        isBound = true
+    end
+
+    local hasNoValue = info.hasNoValue or false
+    local uncached = not sellPrice -- GetItemInfo returned nil → data not cached yet
+    local sp = 0
+    if hasNoValue then
+        sp = 0
+    elseif sellPrice then
+        sp = sellPrice
+    end
+
+    items[#items + 1] = {
+        bag = bag,
+        slot = slot,
+        itemID = info.itemID,
+        itemName = info.itemName or "",
+        itemLink = info.hyperlink,
+        stackCount = info.stackCount or 1,
+        quality = info.quality or 0,
+        isBound = isBound,
+        isWarbound = isWarbound,
+        isLockbox = isLockbox,
+        isUnique = isUnique,
+        isTeleport = isTeleport,
+        iconID = info.iconFileID,
+        itemClassID = classID or -1,
+        itemSubClassID = subClassID or -1,
+        itemEquipLoc = itemEquipLoc or "",
+        expansionID = expansionID,
+        sellPrice = sp * (info.stackCount or 1),
+        sellPricePerUnit = sp,
+        hasNoValue = hasNoValue,
+        bindType = bindType or 0,
+        isCraftingReagent = isCraftingReagent,
+        _uncached = uncached,
+    }
+end
+
+-- Core bag scan loop. yieldCheck is nil (sync) or a function that yields when
+-- the frame time budget is exceeded.
+local function ScanBagsCore(yieldCheck)
+    ResetTooltipCache()
+    local items = {}
+    for bag = 0, 5 do
+        local numSlots = C_Container.GetContainerNumSlots(bag)
+        for slot = 1, numSlots do
+            ScanBagSlot(items, bag, slot)
+            if yieldCheck then
+                yieldCheck()
+            end
+        end
+    end
+    return items
+end
+
+-------------------------------------------------------------------------------
+-- Bank Scanning (shared core: optional yieldCheck for async mode)
+-------------------------------------------------------------------------------
+
+-- Scan a single guild bank slot and append item record to items table
+local function ScanGuildBankSlot(items, tab, slot)
+    local link = GetGuildBankItemLink(tab, slot)
+    if not link then
+        return
+    end
+
+    local _, count = GetGuildBankItemInfo(tab, slot)
+    local itemID, _, _, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
+    if not itemID then
+        return
+    end
+
+    local itemName, _, quality, _, _, _, _, _, _, icon, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
+        C_Item.GetItemInfo(link)
+
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    if NeedsTooltipScan(classID or -1, bindType or 0, itemID) then
+        if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
+            local linkRef = link -- capture for closure
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(itemID, function()
+                return C_TooltipInfo.GetHyperlink(linkRef)
+            end)
+        end
+    end
+
+    items[#items + 1] = {
+        bag = tab,
+        slot = slot,
+        itemID = itemID,
+        itemName = itemName or "",
+        itemLink = link,
+        stackCount = count or 1,
+        quality = quality or 0,
+        isBound = isSoulbound or isWarbound,
+        isWarbound = isWarbound,
+        isLockbox = isLockbox,
+        isTeleport = isTeleport,
+        iconID = icon,
+        itemClassID = classID or -1,
+        itemSubClassID = subClassID or -1,
+        itemEquipLoc = itemEquipLoc or "",
+        expansionID = expansionID,
+        sellPrice = (sellPrice or 0) * (count or 1),
+        sellPricePerUnit = sellPrice or 0,
+        hasNoValue = not sellPrice or sellPrice == 0,
+        bindType = bindType or 0,
+        isCraftingReagent = isCraftingReagent,
+        srcTab = tab,
+        bankType = "guildbank",
+        bankContainer = tab,
+    }
+end
+
+-- Scan a single container bank slot (charbank/warbandbank) and append item record
+local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
+    local info = C_Container.GetContainerItemInfo(container, slot)
+    if not info then
+        return
+    end
+
+    local _, _, _, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(info.itemID)
+    local _, _, _, _, _, _, _, _, _, _, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
+        C_Item.GetItemInfo(info.hyperlink or info.itemID)
+
+    -- Use C_Item.IsBound (live API) as primary bound check
+    local loc = ItemLocation:CreateFromBagAndSlot(container, slot)
+    local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
+
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
+        if C_TooltipInfo and C_TooltipInfo.GetBagItem then
+            local cRef, sRef = container, slot -- capture for closure
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(info.itemID, function()
+                return C_TooltipInfo.GetBagItem(cRef, sRef)
+            end)
+        end
+    end
+
+    -- Tooltip soulbound detection as additional fallback
+    if isSoulbound then
+        isBound = true
+    end
+
+    local hasNoValue = info.hasNoValue or false
+    local sp = hasNoValue and 0 or (sellPrice or 0)
+    items[#items + 1] = {
+        bag = container,
+        slot = slot,
+        itemID = info.itemID,
+        itemName = info.itemName or "",
+        itemLink = info.hyperlink,
+        stackCount = info.stackCount or 1,
+        quality = info.quality or 0,
+        isBound = isBound,
+        isWarbound = isWarbound,
+        isLockbox = isLockbox,
+        isTeleport = isTeleport,
+        iconID = info.iconFileID,
+        itemClassID = classID or -1,
+        itemSubClassID = subClassID or -1,
+        itemEquipLoc = itemEquipLoc or "",
+        expansionID = expansionID,
+        sellPrice = sp * (info.stackCount or 1),
+        sellPricePerUnit = sp,
+        hasNoValue = hasNoValue,
+        bindType = bindType or 0,
+        isCraftingReagent = isCraftingReagent,
+        srcTab = tabNum,
+        bankType = bankType,
+        bankContainer = container,
+    }
+end
+
+-- Core bank scan loop. yieldCheck is nil (sync) or a function that yields
+-- when the frame time budget is exceeded.
+-- Bank slots are expensive (tooltip parsing), so we force-yield every
+-- BANK_BATCH_SIZE slots to guarantee frame time stays low.
+local BANK_BATCH_SIZE = 100
+
+local function ScanBankCore(addon, yieldCheck)
+    ResetTooltipCache()
+    local items = {}
+    local isGuild = addon:IsGuildBankOpen()
+    local count = 0
+
+    if isGuild then
+        local numTabs = GetNumGuildBankTabs()
+        for tab = 1, numTabs do
+            local _, _, isViewable = GetGuildBankTabInfo(tab)
+            if isViewable then
+                local numSlots = MoveContexts.guildbank.GetNumSlots(tab)
+                for slot = 1, numSlots do
+                    ScanGuildBankSlot(items, tab, slot)
+                    if yieldCheck then
+                        count = count + 1
+                        if count >= BANK_BATCH_SIZE then
+                            count = 0
+                            coroutine.yield()
+                        end
+                    end
+                end
+            end
+        end
+    elseif addon.bankIsOpen then
+        local bankRanges = {
+            { type = "charbank", startContainer = 6, endContainer = 11, tabOffset = 5 },
+            { type = "warbandbank", startContainer = 12, endContainer = 16, tabOffset = 11 },
+        }
+        for _, br in ipairs(bankRanges) do
+            for container = br.startContainer, br.endContainer do
+                local numSlots = C_Container.GetContainerNumSlots(container)
+                if numSlots and numSlots > 0 then
+                    local tabNum = container - br.tabOffset
+                    for slot = 1, numSlots do
+                        ScanContainerBankSlot(items, container, slot, tabNum, br.type)
+                        if yieldCheck then
+                            count = count + 1
+                            if count >= BANK_BATCH_SIZE then
+                                count = 0
+                                coroutine.yield()
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return items
+end
+
+-------------------------------------------------------------------------------
+-- Item Class Constants (Enum.ItemClass)
+-------------------------------------------------------------------------------
+
+local ITEM_CLASS_TRADEGOODS = 7 -- Enum.ItemClass.Tradegoods
+local ITEM_CLASS_MISC = 15 -- Enum.ItemClass.Miscellaneous
+local ITEM_SUBCLASS_COMPANION = 2 -- companion pets under Miscellaneous
+
+-- Known pet charm / pet consumable item IDs (add more as needed)
+local ZOOKEEPER_ITEMS = {
+    [86143] = true, -- Battle Pet Bandage
+    [116415] = true, -- Shiny Pet Charm
+    [163036] = true, -- Polished Pet Charm
+    [122457] = true, -- Ultimate Battle-Training Stone
+    [98715] = true, -- Marked Flawless Battle-Stone
+    [116429] = true, -- Flawless Battle-Training Stone
+    [116374] = true, -- Beast Battle-Training Stone
+    [116416] = true, -- Humanoid Battle-Training Stone
+    [116417] = true, -- Mechanical Battle-Training Stone
+    [116418] = true, -- Critter Battle-Training Stone
+    [116419] = true, -- Dragonkin Battle-Training Stone
+    [116420] = true, -- Elemental Battle-Training Stone
+    [116421] = true, -- Flying Battle-Training Stone
+    [116422] = true, -- Magic Battle-Training Stone
+    [116423] = true, -- Undead Battle-Training Stone
+    [116424] = true, -- Aquatic Battle-Training Stone
+    [127755] = true, -- Fel-Touched Battle-Training Stone
+}
+
+-- Known PvP BoA/BoE item IDs (add more as needed)
+local PVPER_ITEMS = {
+    [137642] = true, -- Mark of Honor
+    [230285] = true, -- Astral Combatant's Heraldry
+    [230287] = true, -- Astral Gladiator's Heraldry
+}
+
+-- Quest-class items (classID 12) and Miscellaneous items (classID 15 sub 0/4)
+-- that look like "old" items by expansionID but are still actively useful
+-- (evergreen currencies, cross-expansion tokens, hearthstones, etc.) and
+-- must NOT be auto-stashed by the stashOldQuestItems rule.
+local OLD_QUEST_STASH_BLOCKLIST = {
+    [143776] = true, -- Shrouded Timewarped Coin (Timewalking currency)
+    [6948] = true, -- Hearthstone (always needed in bags)
+    [249699] = true, -- Shadowguard Translocator (still used during Nightfall)
+    [231510] = true, -- Timewarped Relic Coffer Key (Legion Timewalking weeks)
+}
+
+-- itemEquipLoc → inventory slot IDs (for ilvl comparison fallback)
+local EQUIPLOC_TO_SLOTS = {
+    INVTYPE_HEAD = { 1 },
+    INVTYPE_NECK = { 2 },
+    INVTYPE_SHOULDER = { 3 },
+    INVTYPE_CHEST = { 5 },
+    INVTYPE_ROBE = { 5 },
+    INVTYPE_WAIST = { 6 },
+    INVTYPE_LEGS = { 7 },
+    INVTYPE_FEET = { 8 },
+    INVTYPE_WRIST = { 9 },
+    INVTYPE_HAND = { 10 },
+    INVTYPE_FINGER = { 11, 12 },
+    INVTYPE_TRINKET = { 13, 14 },
+    INVTYPE_CLOAK = { 15 },
+    INVTYPE_WEAPON = { 16, 17 },
+    INVTYPE_SHIELD = { 17 },
+    INVTYPE_2HWEAPON = { 16 },
+    INVTYPE_WEAPONMAINHAND = { 16 },
+    INVTYPE_WEAPONOFFHAND = { 17 },
+    INVTYPE_HOLDABLE = { 17 },
+    INVTYPE_RANGED = { 16 },
+    INVTYPE_RANGEDRIGHT = { 16 },
+}
+
+-- ItemID → storage category key (for items that can't be matched by classID/subClassID alone)
+ITEM_CATEGORY_MAP = {
+    -- Pet consumables / charms
+    [86143] = "pets", -- Battle Pet Bandage
+    [116415] = "pets", -- Shiny Pet Charm
+    [163036] = "pets", -- Polished Pet Charm
+    [122457] = "pets", -- Ultimate Battle-Training Stone
+    [98715] = "pets", -- Marked Flawless Battle-Stone
+    [116429] = "pets", -- Flawless Battle-Training Stone
+    [116374] = "pets", -- Beast Battle-Training Stone
+    [116416] = "pets", -- Humanoid Battle-Training Stone
+    [116417] = "pets", -- Mechanical Battle-Training Stone
+    [116418] = "pets", -- Critter Battle-Training Stone
+    [116419] = "pets", -- Dragonkin Battle-Training Stone
+    [116420] = "pets", -- Elemental Battle-Training Stone
+    [116421] = "pets", -- Flying Battle-Training Stone
+    [116422] = "pets", -- Magic Battle-Training Stone
+    [116423] = "pets", -- Undead Battle-Training Stone
+    [116424] = "pets", -- Aquatic Battle-Training Stone
+    [127755] = "pets", -- Fel-Touched Battle-Training Stone
+    -- Archaeology keystones (no clean subclass match — itemID routing)
+    [52843] = "archaeology", -- Dwarf Rune Stone
+    [63127] = "archaeology", -- Highborne Scroll
+    [63128] = "archaeology", -- Troll Tablet
+    [64392] = "archaeology", -- Orc Blood Text
+    [64394] = "archaeology", -- Draenei Tome
+    [64395] = "archaeology", -- Vrykul Rune Stick
+    [64396] = "archaeology", -- Nerubian Obelisk
+    [64397] = "archaeology", -- Tol'vir Hieroglyphic
+    -- PvP tokens
+    [137642] = "pvp", -- Mark of Honor
+    [230285] = "pvp", -- Astral Combatant's Heraldry
+    [230287] = "pvp", -- Astral Gladiator's Heraldry
+    [256559] = "pvp", -- Galactic Combatant's Heraldry (Midnight)
+    [256607] = "pvp", -- Galactic Aspirant's Heraldry (Midnight)
+    [256608] = "pvp", -- Galactic Gladiator's Heraldry (Midnight)
+    -- Lumber (housing crafting reagents)
+    [242691] = "lumber", -- Olemba Lumber
+    [245586] = "lumber", -- Ironwood Lumber
+    [248012] = "lumber", -- Dornic Fir Lumber
+    [251762] = "lumber", -- Coldwind Lumber
+    [251763] = "lumber", -- Bamboo Lumber
+    [251764] = "lumber", -- Ashwood Lumber
+    [251766] = "lumber", -- Shadowmoon Lumber
+    [251767] = "lumber", -- Fel-Touched Lumber
+    [251768] = "lumber", -- Darkpine Lumber
+    [251772] = "lumber", -- Arden Lumber
+    [251773] = "lumber", -- Dragonpine Lumber
+    [256963] = "lumber", -- Thalassian Lumber
+}
+
+-- Category key → owning role (characters with this role keep the items)
+local CATEGORY_ROLE_MAP = {
+    pets = "zookeeper",
+    pvp = "pvper",
+}
+
+-------------------------------------------------------------------------------
+-- Role Recipient Lookup
+-------------------------------------------------------------------------------
+
+-- Recipient lookup for mail routing, driven by a predicate on registry entries.
+-- Warbound items can be mailed cross-realm (same Battle.net account).
+-- Regular tradeable items can only be mailed within the same realm.
+-- Returns: method ("mail"|"stash"|nil), recipientName
+local function FindRecipientBy(addon, isWarbound, predicate)
+    local currentEntry = addon.db.global.registry[addon.playerGUID]
+    local currentRealm = currentEntry and currentEntry.realm
+    local currentName = currentEntry and currentEntry.name
+
+    local sameRealm, anyRealm = nil, nil
+    for guid, e in pairs(addon.db.global.registry) do
+        -- Skip self by GUID or by name+realm (imported stub may have a different GUID)
+        local isSelf = guid == addon.playerGUID or (currentName and e.name == currentName and e.realm == currentRealm)
+        if not isSelf and predicate(e) then
+            local eRealm = e.realm
+            if not currentRealm or not eRealm or eRealm == currentRealm then
+                sameRealm = e
+                break
+            elseif not anyRealm then
+                anyRealm = e
+            end
+        end
+    end
+
+    if sameRealm then
+        return "mail", sameRealm.name
+    elseif anyRealm then
+        if isWarbound then
+            return "mail", anyRealm.name .. "-" .. (anyRealm.realm or "")
+        else
+            return "stash", anyRealm.name
+        end
+    end
+    return nil, nil
+end
+
+local function HasEnchanting(e)
+    return e.assignments and e.assignments.artisan and e.assignments.artisan.enchanting
+end
+
+-- Cached recipient lookup: returns results from per-scan cache to avoid
+-- iterating the registry for every routable item.
+function EmpireManager:CachedFindRecipient(roleKey, isWarbound)
+    local ctx = self._classifyCtx
+    local cacheKey = roleKey .. (isWarbound and "_wb" or "_nw")
+    local cached = ctx and ctx.recipientCache[cacheKey]
+    if cached ~= nil then
+        return cached.method, cached.name
+    end
+
+    local predicate
+    if roleKey == "enchanter" then
+        predicate = HasEnchanting
+    else
+        predicate = function(e)
+            return e.assignments and e.assignments[roleKey]
+        end
+    end
+    local method, name = FindRecipientBy(self, isWarbound, predicate)
+    if ctx then
+        ctx.recipientCache[cacheKey] = { method = method, name = name }
+    end
+    return method, name
+end
+
+-------------------------------------------------------------------------------
+-- ilvl Comparison (fallback when Pawn is not installed)
+-------------------------------------------------------------------------------
+
+-- Returns the lowest equipped ilvl across the slot(s) matching an itemEquipLoc.
+-- For dual slots (rings, trinkets), returns the min of the two equipped items.
+-- Returns nil if no item is equipped in any matching slot.
+function EmpireManager:GetEquippedIlvlForSlot(itemEquipLoc)
+    local slots = EQUIPLOC_TO_SLOTS[itemEquipLoc]
+    if not slots then
+        return nil
+    end
+    local minIlvl = nil
+    for _, slotID in ipairs(slots) do
+        local link = GetInventoryItemLink("player", slotID)
+        if link then
+            local ilvl = C_Item.GetDetailedItemLevelInfo(link)
+            if ilvl and (not minIlvl or ilvl < minIlvl) then
+                minIlvl = ilvl
+            end
+        end
+    end
+    return minIlvl
+end
+
+-- Returns true if any currently-equipped item in the slots matching itemEquipLoc
+-- shares the same classID+subClassID as the dropped item. Purpose: prevent
+-- vendoring a gear type the player is not actually using (e.g. 2H sword while
+-- equipping daggers, mail drop while wearing leather). Returns false if the
+-- slot is empty or every equipped piece is a different weapon/armor subtype.
+function EmpireManager:HasMatchingEquippedType(itemEquipLoc, classID, subClassID)
+    local slots = EQUIPLOC_TO_SLOTS[itemEquipLoc]
+    if not slots then
+        return false
+    end
+    for _, slotID in ipairs(slots) do
+        local link = GetInventoryItemLink("player", slotID)
+        if link then
+            local _, _, _, _, _, eqClassID, eqSubClassID = C_Item.GetItemInfoInstant(link)
+            if eqClassID == classID and eqSubClassID == subClassID then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-------------------------------------------------------------------------------
+-- TSM Price Lookup (optional dependency)
+-------------------------------------------------------------------------------
+
+-- Returns price in copper from TSM, or nil if TSM is not loaded / has no data.
+function EmpireManager:GetTSMPrice(itemLink, priceSource)
+    if not TSM_API or not TSM_API.GetCustomPriceValue then
+        return nil
+    end
+    local tsmItem = TSM_API.ToItemString(itemLink)
+    if not tsmItem then
+        return nil
+    end
+    local price = TSM_API.GetCustomPriceValue(priceSource, tsmItem)
+    if price and price > 0 then
+        return price
+    end
+    return nil
+end
+
+-- Item class constants for disenchant eligibility
+local ITEM_CLASS_WEAPON = 2 -- Enum.ItemClass.Weapon
+local ITEM_CLASS_ARMOR = 4 -- Enum.ItemClass.Armor
+
+-- Determine if a BoE item should be disenchanted rather than sold on the AH.
+-- With TSM: disenchant value > market value → DE is more profitable.
+-- Without TSM: per-unit sell price < threshold → DE (user-configured fallback).
+function EmpireManager:ShouldDisenchant(item)
+    -- Only weapons and armor can be disenchanted
+    if item.itemClassID ~= ITEM_CLASS_WEAPON and item.itemClassID ~= ITEM_CLASS_ARMOR then
+        return false
+    end
+    -- WoW requires uncommon (green, quality >= 2) or higher for disenchanting
+    if (item.quality or 0) < 2 then
+        return false
+    end
+
+    local deValue = self:GetTSMPrice(item.itemLink, "DBDisenchant")
+    local marketValue = self:GetTSMPrice(item.itemLink, "DBMarket")
+
+    if deValue and marketValue then
+        return deValue > marketValue
+    end
+
+    -- Fallback: threshold-based (when TSM is unavailable or has no data).
+    -- Threshold is stored in copper (same unit as item sell price).
+    local thresholdCopper = self.db.global.options.disenchantThreshold or 0
+    if thresholdCopper > 0 then
+        local value = marketValue or item.sellPricePerUnit or 0
+        return value > 0 and value < thresholdCopper
+    end
+
+    return false
+end
+
+-------------------------------------------------------------------------------
+-- Classification Logic
+-------------------------------------------------------------------------------
+
+-- Build per-scan context to avoid repeated lookups inside ClassifyItem.
+-- Called once before the classification loop in RunTriage/RunTriageAsync/RunBankTriageAsync.
+local function PrepareClassificationContext(addon)
+    if not storageCacheBuilt then
+        RebuildStorageCache(addon)
+    end
+
+    local opts = addon.db.global.options or {}
+    local ctx = {
+        keepList = addon.db.global.keepList or {},
+        vendorWhitelist = addon.db.global.vendorWhitelist or {},
+        storageAssignments = addon.db.global.storageAssignments or {},
+        vendorBopIlvl = opts.vendorBopIlvl,
+        pawnVendorBop = opts.pawnVendorBop,
+        disenchantRouting = opts.disenchantRouting,
+    }
+
+    -- Cache recipient lookups (registry doesn't change during a scan)
+    local recipientCache = {}
+    ctx.recipientCache = recipientCache
+    -- Lazily populated: recipientCache["lockpicker_true"] = { method, name }
+
+    -- Cache equipped ilvl per equip location (gear doesn't change during a scan)
+    ctx.equippedIlvlCache = {}
+    -- Cache "does equipped gear share this item's classID+subClassID?" per (loc, type)
+    -- to avoid repeated GetInventoryItemLink/GetItemInfoInstant calls.
+    ctx.equippedTypeCache = {}
+
+    -- Cache smallest equipped bag size per container subtype (Rule D.2a-bag).
+    -- Regular bags: bag IDs 1-4 (backpack 0 excluded — it can't be replaced).
+    -- Reagent bag: bag ID 5 (single slot, only one can ever be equipped).
+    local smallestRegular
+    for bag = 1, 4 do
+        local slots = C_Container.GetContainerNumSlots(bag) or 0
+        if slots > 0 and (not smallestRegular or slots < smallestRegular) then
+            smallestRegular = slots
+        end
+    end
+    ctx.smallestEquippedBag = smallestRegular
+    ctx.reagentBagSlots = C_Container.GetContainerNumSlots(5) or 0
+
+    addon._classifyCtx = ctx
+end
+
+function EmpireManager:ClassifyItem(item, entry)
+    local ctx = self._classifyCtx -- per-scan context from PrepareClassificationContext
+
+    -- Keep List: items here are protected from every triage action (vendor, mail, stash).
+    -- Wins over every other rule, including vendorWhitelist.
+    if ctx and ctx.keepList[item.itemID] then
+        return CAT_KEEP, "Keep List"
+    end
+
+    -- Vendor whitelist: force specific items to VENDOR
+    if ctx and ctx.vendorWhitelist[item.itemID] and item.sellPrice > 0 then
+        return CAT_VENDOR, "Vendor (whitelisted)"
+    end
+
+    -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books)
+    if item.quality == 0 and item.sellPrice > 0 then
+        return CAT_VENDOR, "Vendor junk"
+    end
+
+    -- Rule D.2a-bag: Soulbound container smaller than smallest equipped → VENDOR.
+    -- classID 1 = Container. Subclass 0 = regular bag (bags 1-4), subclass 11 =
+    -- reagent bag (bag 5). Profession bags (1-10) are situational — left alone.
+    if
+        item.isBound
+        and not item.isWarbound
+        and item.itemClassID == 1
+        and (item.itemSubClassID == 0 or item.itemSubClassID == 11)
+        and item.sellPrice > 0
+    then
+        local bagSlots = ParseBagSlots(item.itemLink)
+        local compareTo
+        if item.itemSubClassID == 11 then
+            compareTo = ctx and ctx.reagentBagSlots
+        else
+            compareTo = ctx and ctx.smallestEquippedBag
+        end
+        if bagSlots and compareTo and compareTo > 0 and bagSlots < compareTo then
+            return CAT_VENDOR, string.format("Inferior bag (%d slots)", bagSlots)
+        end
+    end
+
+    -- Rule D.2a: Soulbound equippable gear → Pawn/iLvl vendor check
+    -- Only actual gear (Weapon=2, Armor=4) qualifies — recipes, consumables, etc. skip.
+    -- Warbound gear skips this — it can be routed to other characters.
+    -- Enchanter override: if the character has Enchanting and enchanterKeepDE is on,
+    -- gear that would be vendored is kept for disenchanting instead.
+    if item.isBound and not item.isWarbound then
+        local isEquipGear = item.itemEquipLoc ~= ""
+            and (item.itemClassID == ITEM_CLASS_WEAPON or item.itemClassID == ITEM_CLASS_ARMOR)
+        if isEquipGear and item.sellPrice > 0 and item.quality < 5 then
+            -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup)
+            if self._equipSetItems and self._equipSetItems[item.itemID] then
+                return CAT_KEEP, "Equipment set: " .. self._equipSetItems[item.itemID]
+            end
+            -- Teleport guard: trinkets/rings with "Use: Teleport" effects are
+            -- irreplaceable utility. Never vendor (e.g. Runed Signet of the
+            -- Kirin Tor, Time-Lost Artifact).
+            if item.isTeleport then
+                return CAT_KEEP, "Teleport item"
+            end
+            -- Gear-type guard: only vendor if the player is actually using
+            -- this exact classID+subClassID (e.g. vendor a dagger only when a
+            -- dagger is equipped; vendor mail only when mail is equipped).
+            -- Protects off-spec weapons (2H when dual-wielding, bows for a
+            -- rogue alt, etc.) and wrong-armor-type drops without needing the
+            -- user to curate the Keep List in advance.
+            if ctx and (ctx.vendorBopIlvl or ctx.pawnVendorBop) then
+                local typeKey = (item.itemClassID or 0) * 100000 + (item.itemSubClassID or 0)
+                local typeCacheKey = item.itemEquipLoc .. ":" .. typeKey
+                if ctx.equippedTypeCache[typeCacheKey] == nil then
+                    ctx.equippedTypeCache[typeCacheKey] =
+                        self:HasMatchingEquippedType(item.itemEquipLoc, item.itemClassID, item.itemSubClassID)
+                end
+                if not ctx.equippedTypeCache[typeCacheKey] then
+                    return CAT_KEEP, "Off-type Gear (No matching slot equipped)"
+                end
+            end
+            -- ilvl comparison: vendor if item ilvl < lowest equipped in that slot
+            -- BUG (12.0): GetDetailedItemLevelInfo returns pre-squish ilvl for old items
+            -- (e.g. 554 instead of 79). Comparison is broken until Blizzard fixes it.
+            local equippedIlvl, itemIlvl
+            if ctx and ctx.vendorBopIlvl then
+                -- Use cached ilvl per equip location
+                local loc = item.itemEquipLoc
+                if ctx.equippedIlvlCache[loc] == nil then
+                    ctx.equippedIlvlCache[loc] = self:GetEquippedIlvlForSlot(loc) or false
+                end
+                equippedIlvl = ctx.equippedIlvlCache[loc] or nil
+                itemIlvl = C_Item.GetDetailedItemLevelInfo(item.itemLink)
+            end
+            -- Collect vendor reason instead of returning immediately
+            -- (enchanter override checked after all vendor checks)
+            local vendorReason
+            -- Pawn check (if installed and enabled)
+            local pawnResult = nil -- nil = unavailable/uncertain
+            if ctx and ctx.pawnVendorBop and PawnIsItemDefinitivelyAnUpgrade then
+                pawnResult = PawnIsItemDefinitivelyAnUpgrade(item.itemLink)
+                if pawnResult == false then
+                    -- Pawn says not an upgrade, but for dual slots (rings/trinkets)
+                    -- keep it if ilvl >= lowest equipped (could replace the weaker one).
+                    -- Guard: GetDetailedItemLevelInfo returns pre-squish ilvl for old
+                    -- expansion items (e.g. 554 instead of 79). Detect by checking if
+                    -- itemIlvl is more than 2x equippedIlvl — trust Pawn in that case.
+                    if
+                        not (equippedIlvl and itemIlvl and itemIlvl >= equippedIlvl and itemIlvl <= equippedIlvl * 2)
+                    then
+                        vendorReason = "Soulbound non-upgrade (Pawn)"
+                    end
+                    -- pawnResult == true: Pawn says upgrade — skip ilvl check, keep
+                end
+            end
+            -- ilvl fallback: runs when Pawn is unavailable, uncertain (nil), or not enabled
+            if not vendorReason and pawnResult == nil and ctx and ctx.vendorBopIlvl then
+                if equippedIlvl and equippedIlvl > 0 and itemIlvl and itemIlvl < equippedIlvl then
+                    vendorReason = "Soulbound lower iLvl"
+                end
+            end
+            -- Enchanter override: keep for DE instead of vendoring
+            if vendorReason then
+                local asn = entry.assignments or {}
+                if entry.enchanterKeepDE ~= false and asn.artisan and asn.artisan.enchanting then
+                    return CAT_KEEP, "Keep for disenchant"
+                end
+                return CAT_VENDOR, vendorReason
+            end
+        end
+    end
+
+    local assignments = entry.assignments or {}
+
+    -- ItemID-based category matching (lumber, archaeology, PvP tokens, etc.)
+    -- Checked before soulbound — these are known categories that route by itemID
+    -- regardless of bind status (WoW reports warbound reagents as isBound=true).
+    local itemCategory = ITEM_CATEGORY_MAP[item.itemID]
+    if itemCategory then
+        -- Own role check: zookeeper keeps pet consumables, pvper keeps PvP tokens
+        local ownerRole = CATEGORY_ROLE_MAP[itemCategory]
+        if ownerRole and assignments[ownerRole] then
+            return CAT_KEEP, "Own role item"
+        end
+        -- Check storage assignments for this category
+        local assignments_list = ctx and ctx.storageAssignments or {}
+        for ruleIndex, assignment in ipairs(assignments_list) do
+            if assignment.profession == itemCategory then
+                if IsBankTypeCompatible(item, assignment) and IsAssignmentEligible(assignment, item) then
+                    return self:GetStorageRouting(assignment, entry, itemCategory, ruleIndex, item)
+                end
+            end
+        end
+        -- No storage assignment matched — fall through to remaining rules
+    end
+
+    -- Rule D.2b-quest: Quest items (classID 12) and Keys (classID 13) → check storage assignment with bind restrictions
+    -- Soulbound: charbank only. Warbound: charbank or warbandbank. Unbound: any.
+    if item.itemClassID == 12 or item.itemClassID == 13 then
+        local matchSet = GetProfMatchSet(item)
+        if matchSet then
+            local assignments_list = ctx and ctx.storageAssignments or {}
+            for ruleIndex, assignment in ipairs(assignments_list) do
+                if matchSet[assignment.profession] then
+                    -- Enforce physical bind constraints on bank type
+                    local typeOK = true
+                    if item.isBound and not item.isWarbound then
+                        typeOK = assignment.type == "charbank"
+                    elseif item.isWarbound then
+                        typeOK = assignment.type == "charbank" or assignment.type == "warbandbank"
+                    end
+                    if typeOK and IsAssignmentEligible(assignment, item) then
+                        return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
+                    end
+                end
+            end
+        end
+        -- Stash old quest items and keys to character bank (opt-in via Sidecar).
+        -- Covers bound AND unbound, the expansion filter prevents touching current-content items.
+        if
+            entry.stashOldQuestItems
+            and not item.isWarbound
+            and not item.bankType
+            and not OLD_QUEST_STASH_BLOCKLIST[item.itemID]
+            and item.expansionID
+            and item.expansionID < GetExpansionLevel()
+        then
+            return CAT_STASH, "Move to Bank (Old Quest item)", { destType = "charbank", profKey = "quest_old" }
+        end
+        -- No assignment matched: soulbound quest items → KEEP
+        if item.isBound and not item.isWarbound then
+            return CAT_KEEP, "Soulbound"
+        end
+        -- Warbound/unbound quest items fall through to remaining rules
+    end
+
+    -- Rule D.2b-artifact: Legion artifact weapons -> charbank.
+    if (item.quality or 0) == 6 and item.itemClassID == 2 and not item.bankType then
+        return CAT_STASH, "Move to Bank (Artifact Weapon)", { destType = "charbank", profKey = "quest_old" }
+    end
+
+    -- Rule D.2b-oldmisc: Extend stashOldQuestItems to BoP clutter.
+    --   classID 15 sub 0 (Misc/Junk) + sub 4 (Misc/Other): legacy quest-reward
+    --     clutter (faction tokens, lore items, relics, fragments, NPC gifts).
+    --   classID 0 sub 0 (Consumable/Generic) + sub 8 (Consumable/Other): legacy
+    --     event toys, challenge-mode cosmetics, old buffs (War Ravaged Armor
+    --     Set, Battle Standard, Blossoming Branch, Elixir of Shadow Sight...).
+    -- Items of current expansion level are spared. Blocklist protects always-
+    -- useful items (Hearthstone, Shadowguard Translocator, Timewalking keys).
+    if
+        entry.stashOldQuestItems
+        and ((item.itemClassID == 15 and (item.itemSubClassID == 0 or item.itemSubClassID == 4)) or (item.itemClassID == 0 and (item.itemSubClassID == 0 or item.itemSubClassID == 8)))
+        and item.isBound
+        and not item.isWarbound
+        and not item.bankType
+        and not OLD_QUEST_STASH_BLOCKLIST[item.itemID]
+        and item.expansionID
+        and item.expansionID < GetExpansionLevel()
+    then
+        return CAT_STASH, "Move to Bank (Legacy item)", { destType = "charbank", profKey = "quest_old" }
+    end
+
+    -- Rule D.2b-own: Soulbound (BoP) items that match a profession via subclass
+    -- and for which THIS character has an own charbank rule → deposit to own bank.
+    -- Own charbank accepts BoP items (unlike mail/warband), so bankers can
+    -- auto-stash their own-profession BoP reagents (e.g. Truesteel Ingot on
+    -- Ax, Artisan's Acuity on Krotos). Skipped if itemCategory was already
+    -- considered by the earlier ITEM_CATEGORY_MAP loop.
+    if item.isBound and not item.isWarbound and not item.bankType and not itemCategory and item.itemClassID >= 0 then
+        local matchSet = GetProfMatchSet(item)
+        if matchSet and item.itemClassID == 7 and item.isCraftingReagent == false and not profOverrideCache[item.itemID or 0] then
+            matchSet = nil
+        end
+        if matchSet then
+            -- Respect keepOwnProfMatsInBags: if the user wants their own mats kept
+            -- in bags for convenience, don't move them to bank even when banker.
+            -- The "latest expansion only" sub-option lets old-expansion mats route out.
+            if entry.keepOwnProfMatsInBags and not IsBlockedByLatestOnly(entry, item) then
+                for _, roleKey in ipairs({ "artisan", "gatherer" }) do
+                    local roleData = assignments[roleKey]
+                    if roleData and type(roleData) == "table" then
+                        for profKey in pairs(roleData) do
+                            if matchSet[profKey] then
+                                return CAT_KEEP, "Own Profession material"
+                            end
+                        end
+                    end
+                end
+            end
+            local guid = self.playerGUID
+            local assignments_list = ctx and ctx.storageAssignments or {}
+            for ruleIndex, assignment in ipairs(assignments_list) do
+                if
+                    assignment.type == "charbank"
+                    and assignment.char == guid
+                    and matchSet[assignment.profession]
+                    and IsAssignmentEligible(assignment, item)
+                then
+                    return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
+                end
+            end
+        end
+    end
+
+    -- Rule D.2b: Non-gear soulbound items → KEEP (never route soulbound)
+    -- Warbound items continue to routing rules (can be mailed/warband-banked).
+    if item.isBound and not item.isWarbound then
+        return CAT_KEEP, "Soulbound"
+    end
+
+    -- Rule B.1: Lockpicker — mail lockboxes to designated lockpicker,
+    -- or if this alt IS the lockpicker, keep as own-role item.
+    -- Guard: never route a soulbound (non-warbound) lockbox — mail and warband deposit will fail.
+    if item.isLockbox and not (item.isBound and not item.isWarbound) then
+        if assignments.lockpicker then
+            return CAT_KEEP, "Own role item (Lockbox)"
+        end
+        local method, name = self:CachedFindRecipient("lockpicker", item.isWarbound)
+        if method == "mail" then
+            return CAT_ROUTE, "Mail to " .. name .. " (Lockbox)"
+        elseif method == "stash" then
+            return CAT_STASH, "Stash in Warband for " .. name .. " (Lockbox)", { destType = "warbandbank" }
+        end
+        -- Lockpicker role unassigned or holder unreachable → surface, don't silently keep.
+        return CAT_KEEP, "Lockpicker unreachable"
+    end
+
+    -- Check if this item matches any profession/category via item subclass
+    if not itemCategory and item.itemClassID >= 0 then
+        local matchSet = GetProfMatchSet(item)
+        -- Trade Goods (classID 7) items that Blizzard explicitly does NOT mark as
+        -- crafting reagents (isCraftingReagent == false) are not actual profession
+        -- materials despite sharing a subclass with reagents. Subclass 11 ("Other")
+        -- especially is a dumping ground for PvP currencies, tokens, Heraldries,
+        -- flavor items — none of which should route by profession tag.
+        -- Note: this is distinct from nil, which means the cache isn't populated yet;
+        -- only `== false` is a definitive "not a reagent" signal.
+        -- Itemid overrides bypass this guard — they're explicit reagent declarations.
+        if matchSet and item.itemClassID == 7 and item.isCraftingReagent == false and not profOverrideCache[item.itemID or 0] then
+            matchSet = nil
+        end
+        if matchSet then
+            -- Own profession mat check (bags): if this character has artisan/gatherer
+            -- with a matching profession, keep the mat in bags. Gated by the
+            -- per-character keepOwnProfMatsInBags flag, and optionally narrowed to
+            -- the latest expansion via keepOwnProfMatsInBagsLatestOnly.
+            if not item.bankType and entry.keepOwnProfMatsInBags and not IsBlockedByLatestOnly(entry, item) then
+                for _, roleKey in ipairs({ "artisan", "gatherer" }) do
+                    local roleData = assignments[roleKey]
+                    if roleData and type(roleData) == "table" then
+                        for profKey in pairs(roleData) do
+                            if matchSet[profKey] then
+                                return CAT_KEEP, "Own Profession material"
+                            end
+                        end
+                    end
+                end
+            end
+
+            local assignments_list = ctx and ctx.storageAssignments or {}
+
+            -- Single pass: array order = priority (first eligible match wins).
+            -- Users control priority via up/down reorder buttons.
+            for ruleIndex, assignment in ipairs(assignments_list) do
+                if matchSet[assignment.profession] then
+                    -- Equipment (BoE): only match unbound BoE gear (not bound, not warbound).
+                    -- Guild bank items: bindType is unreliable (Blizzard returns BoP for
+                    -- Warbound Until Equipped items). If it's in the guild bank, treat all
+                    -- equipment as eligible — the guild bank enforced bind rules on deposit.
+                    if assignment.profession == "equipment_boe" then
+                        local eligible = false
+                        if item.bankType == "guildbank" then
+                            -- Guild bank: skip bind check, all equipment is eligible
+                            eligible = true
+                        elseif item.bindType == 2 and not item.isBound and not item.isWarbound then
+                            -- Unbound BoE in bags/other bank
+                            if not item.bankType and assignments.auctioneer and entry.auctioneerKeepBOE ~= false then
+                                -- Auctioneer keeps BoE equipment in bags — skip storage routing
+                                eligible = false
+                            else
+                                eligible = true
+                            end
+                        end
+                        if eligible and IsAssignmentEligible(assignment, item) then
+                            return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
+                        end
+                    -- Equipment (BoA): only match warbound (account-bound) gear
+                    elseif assignment.profession == "equipment_boa" then
+                        if
+                            item.isWarbound
+                            and IsBankTypeCompatible(item, assignment)
+                            and IsAssignmentEligible(assignment, item)
+                        then
+                            return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
+                        end
+                    elseif IsBankTypeCompatible(item, assignment) and IsAssignmentEligible(assignment, item) then
+                        return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Rule B.2: Zookeeper fallback — pet items with no storage assignment configured.
+    -- Guard: never route a soulbound (non-warbound) pet item — the destination will reject it.
+    if not assignments.zookeeper and not (item.isBound and not item.isWarbound) then
+        local isPetItem = (item.itemClassID == ITEM_CLASS_MISC and item.itemSubClassID == ITEM_SUBCLASS_COMPANION)
+            or ZOOKEEPER_ITEMS[item.itemID]
+        if isPetItem then
+            local method, name = self:CachedFindRecipient("zookeeper", item.isWarbound)
+            if method == "mail" then
+                return CAT_ROUTE, "Mail to " .. name .. " (pets)"
+            elseif method == "stash" then
+                return CAT_STASH, "Stash in Warband for " .. name .. " (pets)", { destType = "warbandbank" }
+            end
+            -- Zookeeper role unassigned or holder unreachable → surface, don't silently keep.
+            return CAT_KEEP, "Zookeeper unreachable"
+        end
+    end
+
+    -- Rule B.3: PvPer fallback — PvP tokens with no storage assignment configured.
+    -- Guard: never route a soulbound (non-warbound) PvP token — it can't be mailed or
+    -- deposited to warband bank. If the item is truly soulbound, keep it here.
+    if not assignments.pvper and PVPER_ITEMS[item.itemID] and not (item.isBound and not item.isWarbound) then
+        local method, name = self:CachedFindRecipient("pvper", item.isWarbound)
+        if method == "mail" then
+            return CAT_ROUTE, "Mail to " .. name .. " (PvP)"
+        elseif method == "stash" then
+            return CAT_STASH, "Stash in Warband for " .. name .. " (PvP)", { destType = "warbandbank" }
+        end
+        -- PvPer role unassigned or holder unreachable → surface, don't silently keep.
+        return CAT_KEEP, "PvPer unreachable"
+    end
+
+    -- Rule B.4: Auctioneer / Disenchant — any unbound BoE item
+    -- Covers weapons, armor, recipes, containers, etc. — anything sellable on the AH.
+    -- Excludes warbound (account-bound) items — they can't be sold on the AH.
+    -- When disenchant routing is enabled, low-value equippable BoE goes to the
+    -- Enchanting Artisan instead (TSM: DBDisenchant > DBMarket, or threshold fallback).
+    -- Guild bank equippable gear: skip bind check — bindType is unreliable for GB items.
+    -- "Warbound Until Equipped" gear has isWarbound=true AND itemEquipLoc set; permanently
+    -- warbound consumables/gems have isWarbound=true but itemEquipLoc="".
+    -- Also covers bindType=0 equippable gear (vintage "no bind" items like Cubic Zirconia Ring,
+    -- Shiny Silver Necklace) — they have a sell price and valid equip loc, so they're AH-eligible.
+    local loc = item.itemEquipLoc or ""
+    local isRealEquip = loc ~= "" and loc ~= "INVTYPE_NON_EQUIP" and loc ~= "INVTYPE_NON_EQUIP_IGNORE"
+    local isGuildBankEquip = item.bankType == "guildbank" and isRealEquip and not (item.isBound and not item.isWarbound) -- exclude truly soulbound gear
+    local isUnboundBoE = item.bindType == 2 and not item.isBound and not item.isWarbound
+    local isNoBindEquip = item.bindType == 0 and isRealEquip and not item.isBound and not item.isWarbound
+    if isGuildBankEquip or isUnboundBoE or isNoBindEquip then
+        local isOwnAuctioneer = assignments.auctioneer
+        local isOwnEnchanter = assignments.artisan and assignments.artisan.enchanting
+
+        -- Gate: B.4 only fires if an Auctioneer exists somewhere on the account.
+        -- No auctioneer = no rule for BoE gear → fall through to KEEP.
+        -- DE is a modifier on auctioneer routing, not an independent rule.
+        local auctioneerMethod, auctioneerName = self:CachedFindRecipient("auctioneer", false)
+        local auctioneerExists = isOwnAuctioneer or auctioneerMethod ~= nil
+        if auctioneerExists then
+            -- Determine if item should be disenchanted
+            local shouldDE = false
+            if ctx and ctx.disenchantRouting then
+                shouldDE = self:ShouldDisenchant(item)
+            end
+
+            -- Own role: enchanter keeps DE items, auctioneer keeps AH items.
+            -- For bag items this resolves to KEEP; for guild-bank items the ClassifyBankItem
+            -- wrapper converts KEEP-on-GB into TAKEOUT so the auctioneer pulls them into bags.
+            if shouldDE and isOwnEnchanter then
+                return CAT_KEEP, "Enchanter (disenchant)"
+            end
+            if
+                isOwnAuctioneer
+                and entry.auctioneerKeepBOE ~= false
+                and (not item.bankType or item.bankType == "guildbank")
+            then
+                return CAT_KEEP, "Auctioneer (sell on AH)"
+            end
+
+            -- Route to enchanting artisan if DE is more profitable
+            if shouldDE then
+                local method, name = self:CachedFindRecipient("enchanter", false)
+                if method == "mail" then
+                    return CAT_ROUTE, "Mail to " .. name .. " (DE)"
+                elseif method == "stash" then
+                    return CAT_STASH, "Stash in Warband for " .. name .. " (DE)", { destType = "warbandbank" }
+                end
+                -- No enchanter found — fall through to auctioneer
+            end
+
+            -- Default: route to auctioneer
+            if auctioneerMethod == "mail" then
+                return CAT_ROUTE, "Mail to " .. auctioneerName .. " (AH)"
+            elseif auctioneerMethod == "stash" then
+                return CAT_STASH, "Stash in Warband for " .. auctioneerName .. " (AH)", { destType = "warbandbank" }
+            end
+        end
+    end
+
+    -- Vendor threshold: white-quality (common) items below per-unit sell price → VENDOR
+    -- Only quality 0-1. Gray already caught by D.1. Green+ never auto-vendored.
+    -- Excluded: items matching any profession in PROF_ITEM_MAP (crafting materials),
+    -- plus trade goods (7), consumables (0), reagents (5), recipes (9).
+    local threshold = self.db.global.options.defaultVendorThreshold or 0
+    local hasProfMatch = GetProfMatchSet(item)
+    if
+        threshold > 0
+        and item.quality <= 1
+        and item.sellPrice > 0
+        and not hasProfMatch
+        and item.itemClassID ~= ITEM_CLASS_TRADEGOODS
+        and item.itemClassID ~= 0
+        and item.itemClassID ~= 5
+        and item.itemClassID ~= 9
+        and item.itemClassID ~= ITEM_CLASS_MISC
+    then
+        local perUnit = item.sellPricePerUnit or (item.sellPrice / item.stackCount)
+        if perUnit <= threshold then
+            return CAT_VENDOR, "Vendor below threshold (Common)"
+        end
+    end
+
+    -- Rule D.3: Unrecognized items → KEEP (avoid false positives)
+    return CAT_KEEP, "No matching Rule"
+end
+
+-------------------------------------------------------------------------------
+-- Routing Decision Tree (profession-based)
+-------------------------------------------------------------------------------
+
+function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, item)
+    local guid = self.playerGUID
+    local sType = assignment.type or "warbandbank"
+
+    -- Build tab suffix for display (e.g., " Tabs 1, 3" or " Tab 2" or "")
+    local tabSuffix = ""
+    if assignment.tabs and #assignment.tabs > 0 then
+        if #assignment.tabs == 1 then
+            tabSuffix = " Tab " .. assignment.tabs[1]
+        else
+            tabSuffix = " Tabs " .. table.concat(assignment.tabs, ", ")
+        end
+    end
+
+    -- Resolve profession label for display
+    local pInfo = self.PROF_INFO_BY_KEY[profKey]
+    local profLabel = pInfo and pInfo.label or profKey
+
+    -- Warband bank: any character can deposit directly
+    if sType == "warbandbank" then
+        return CAT_STASH,
+            "Deposit in Warband Bank" .. tabSuffix .. " (" .. profLabel .. ")",
+            { destType = "warbandbank", destTabs = assignment.tabs, profKey = profKey, ruleIndex = ruleIndex }
+    end
+
+    if sType == "guildbank" then
+        local guildName = assignment.guild or ""
+        local myGuild = entry.guild or ""
+        -- Same guild? Deposit directly
+        if guildName ~= "" and myGuild == guildName then
+            return CAT_STASH,
+                "Deposit in <" .. guildName .. ">" .. tabSuffix .. " (" .. profLabel .. ")",
+                {
+                    destType = "guildbank",
+                    destTabs = assignment.tabs,
+                    guild = guildName,
+                    profKey = profKey,
+                    ruleIndex = ruleIndex,
+                }
+        end
+        -- Different guild — find a banker in that guild to mail to, or stash in warband
+        local bankerEntry
+        if assignment.char then
+            bankerEntry = self.db.global.registry[assignment.char]
+        end
+        -- Auto-resolve: find any character in the target guild
+        if not bankerEntry then
+            local resolvedGuid = self:FindCharInGuild(guildName, guid)
+            if resolvedGuid then
+                bankerEntry = self.db.global.registry[resolvedGuid]
+            end
+        end
+        if bankerEntry and bankerEntry.name then
+            if (entry.realm or "") == (bankerEntry.realm or "") then
+                return CAT_ROUTE,
+                    "Mail to " .. bankerEntry.name .. " <" .. guildName .. "> (" .. profLabel .. ")",
+                    { profKey = profKey, ruleIndex = ruleIndex }
+            else
+                -- Cross-realm: item must transit via warband bank. Warband bank rejects
+                -- truly soulbound items, so there's no physical path — keep in place.
+                if item.isBound and not item.isWarbound then
+                    return CAT_KEEP, "Soulbound (cross-realm, no path)"
+                end
+                return CAT_STASH,
+                    "Stash in Warband for <" .. guildName .. "> (" .. profLabel .. ")",
+                    { destType = "warbandbank", profKey = profKey, ruleIndex = ruleIndex }
+            end
+        end
+        -- Guild bank rule with no resolvable banker → surface, don't silently route to a dead end.
+        return CAT_KEEP, "Banker unreachable (" .. profLabel .. ")"
+    end
+
+    if sType == "charbank" then
+        -- Am I the assigned banker? ("self" = always own character's bank)
+        if assignment.char and (assignment.char == guid or assignment.char == "self") then
+            return CAT_STASH,
+                "Move to Bank" .. tabSuffix .. " (" .. profLabel .. ")",
+                { destType = "charbank", destTabs = assignment.tabs, profKey = profKey, ruleIndex = ruleIndex }
+        end
+        -- Not the banker — mail or warband-stash
+        if assignment.char then
+            local bankerEntry = self.db.global.registry[assignment.char]
+            if bankerEntry and bankerEntry.name then
+                if (entry.realm or "") == (bankerEntry.realm or "") then
+                    return CAT_ROUTE,
+                        "Mail to " .. bankerEntry.name .. " (" .. profLabel .. ")",
+                        { profKey = profKey, ruleIndex = ruleIndex }
+                else
+                    -- Cross-realm: item must transit via warband bank. Warband bank
+                    -- rejects truly soulbound items, so there's no physical path — keep.
+                    if item.isBound and not item.isWarbound then
+                        return CAT_KEEP, "Soulbound (cross-realm, no path)"
+                    end
+                    return CAT_STASH,
+                        "Stash in Warband for " .. bankerEntry.name .. " (" .. profLabel .. ")",
+                        { destType = "warbandbank", profKey = profKey, ruleIndex = ruleIndex }
+                end
+            end
+        end
+        -- Charbank rule with no resolvable banker character → destination unreachable.
+        return CAT_KEEP, "Banker unreachable (" .. profLabel .. ")"
+    end
+
+    -- Fallback: unrecognized storage type (defensive; should never fire).
+    return CAT_KEEP, "Storage rule invalid (" .. profLabel .. ")"
+end
+
+-------------------------------------------------------------------------------
+-- Equipment Set Lookup (shared by sync and async paths)
+-------------------------------------------------------------------------------
+
+local function BuildEquipSetLookup(addon)
+    addon._equipSetItems = nil
+    if addon.db.global.options.skipEquipmentSets and C_EquipmentSet and C_EquipmentSet.GetEquipmentSetIDs then
+        local lookup = {}
+        local setIDs = C_EquipmentSet.GetEquipmentSetIDs()
+        for _, setID in ipairs(setIDs) do
+            local setName = C_EquipmentSet.GetEquipmentSetInfo(setID)
+            local itemIDs = C_EquipmentSet.GetItemIDs(setID)
+            for _, id in pairs(itemIDs or {}) do
+                if id and id > 0 and not lookup[id] then
+                    lookup[id] = setName or "?"
+                end
+            end
+        end
+        addon._equipSetItems = lookup
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Run Triage (scan + classify)
+-------------------------------------------------------------------------------
+
+-- Sync wrapper: used only by mid-deposit RebuildMoveList and TriageDebugCheck.
+-- All other callers use RunTriageAsync or cached self.triageResults.
+function EmpireManager:RunTriage()
+    local guid = self.playerGUID
+    local entry = self.db.global.registry[guid]
+    if not entry then
+        return {}
+    end
+
+    local bagItems = ScanBagsCore(nil) -- synchronous, no yielding
+    local results = {}
+
+    BuildEquipSetLookup(self)
+    PrepareClassificationContext(self)
+
+    for _, item in ipairs(bagItems) do
+        local category, action, routing = self:ClassifyItem(item, entry)
+        results[#results + 1] = {
+            item = item,
+            category = category,
+            action = action,
+            routing = routing,
+        }
+    end
+    self._classifyCtx = nil
+
+    -- Sort by category order, then by destination, then by item name
+    local catOrder = {}
+    for i, cat in ipairs(EmpireManager.CATEGORY_ORDER) do
+        catOrder[cat] = i
+    end
+    table.sort(results, function(a, b)
+        local oa = catOrder[a.category] or 99
+        local ob = catOrder[b.category] or 99
+        if oa ~= ob then
+            return oa < ob
+        end
+        -- Within VENDOR rows, sort by quality DESC so uncommon+ gear floats to
+        -- the top of the section (more visible to the user before bulk vendor).
+        if a.category == CAT_VENDOR then
+            local qa = a.item.quality or 0
+            local qb = b.item.quality or 0
+            if qa ~= qb then
+                return qa > qb
+            end
+            return a.item.itemName < b.item.itemName
+        end
+        local da = a.action or ""
+        local db = b.action or ""
+        if da ~= db then
+            return da < db
+        end
+        return a.item.itemName < b.item.itemName
+    end)
+
+    self.triageResults = results
+    self.triageLastScan = time()
+    self:WarnOnUnreachableDestinations(results)
+    return results
+end
+
+-------------------------------------------------------------------------------
+-- Unreachable-destination chat warnings
+-- Surfaces broken role/storage rules (deleted lockpicker, missing banker, etc.)
+-- that would otherwise be hidden because CAT_KEEP rows are not rendered in the
+-- triage list. Dedup'd per session by (itemID, reason) so repeated scans of
+-- the same item don't spam chat.
+-------------------------------------------------------------------------------
+
+function EmpireManager:WarnOnUnreachableDestinations(results)
+    if not results or #results == 0 then
+        return
+    end
+    self._unreachableWarned = self._unreachableWarned or {}
+    local seen = self._unreachableWarned
+    for _, r in ipairs(results) do
+        local action = r.action or ""
+        if action:find("unreachable", 1, true) then
+            local key = (r.item.itemID or 0) .. ":" .. action
+            if not seen[key] then
+                seen[key] = true
+                -- Explicit |r after the item link to prevent the link's
+                -- quality color from bleeding onto the trailing reason text.
+                self:Print(
+                    string.format("|cffff8800[Triage]|r %s|r - %s", r.item.itemLink or r.item.itemName or "?", action)
+                )
+            end
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Triage Summary Counts
+-------------------------------------------------------------------------------
+
+function EmpireManager:GetTriageSummary(results)
+    local counts = { [CAT_KEEP] = 0, [CAT_ROUTE] = 0, [CAT_STASH] = 0, [CAT_VENDOR] = 0 }
+    local vendorValue = 0
+    for _, r in ipairs(results) do
+        counts[r.category] = (counts[r.category] or 0) + 1
+        if r.category == CAT_VENDOR then
+            vendorValue = vendorValue + (r.item.sellPrice or 0)
+        end
+    end
+    return counts, vendorValue
+end
+
+-------------------------------------------------------------------------------
+-- Bank Triage: Classify bank item (wraps ClassifyItem with bank-aware logic)
+-------------------------------------------------------------------------------
+
+-- Check if a bank item is already in one of the routing's destination tabs.
+local function IsItemInDestination(item, routing)
+    if not routing or not routing.destType then
+        return false
+    end
+    if item.bankType ~= routing.destType then
+        return false
+    end
+    -- No specific tabs = "any tab in this bank type" → already home
+    if not routing.destTabs or #routing.destTabs == 0 then
+        return true
+    end
+    for _, tab in ipairs(routing.destTabs) do
+        if item.srcTab == tab then
+            return true
+        end
+    end
+    return false
+end
+
+-- Check if a bank item's routing points to a different tab of the same bank type.
+-- Returns an array of all eligible destination tabs (excluding the item's current tab), or nil.
+local function FindIntraBankDests(item, routing)
+    if not routing or not routing.destType or not routing.destTabs then
+        return nil
+    end
+    if item.bankType ~= routing.destType then
+        return nil
+    end
+    -- Same bank type, different tab(s) → reorganize candidates
+    local tabs = {}
+    for _, tab in ipairs(routing.destTabs) do
+        if item.srcTab ~= tab then
+            tabs[#tabs + 1] = tab
+        end
+    end
+    if #tabs == 0 then
+        return nil
+    end
+    return tabs
+end
+
+function EmpireManager:ClassifyBankItem(item, entry)
+    -- Keep own profession mats in character bank
+    if item.bankType == "charbank" and entry.keepOwnProfMatsInBank then
+        local matchSet = GetProfMatchSet(item)
+        if matchSet then
+            local asn = entry.assignments or {}
+            for _, roleKey in ipairs({ "artisan", "gatherer" }) do
+                local roleData = asn[roleKey]
+                if roleData and type(roleData) == "table" then
+                    for profKey in pairs(roleData) do
+                        if matchSet[profKey] then
+                            return CAT_KEEP, "Own profession mat (charbank)"
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local category, action, routing = self:ClassifyItem(item, entry)
+
+    if category == CAT_STASH then
+        -- Item wants to be stashed somewhere — check if it's already there
+        if IsItemInDestination(item, routing) then
+            return CAT_KEEP, "Correct storage", routing
+        end
+        -- Same bank type but wrong tab → intra-bank move (reorganize)
+        local destTabs = FindIntraBankDests(item, routing)
+        if destTabs then
+            local pInfo = routing and routing.profKey and self.PROF_INFO_BY_KEY[routing.profKey]
+            local profLabel = pInfo and pInfo.label or ""
+            local suffix = profLabel ~= "" and (" (" .. profLabel .. ")") or ""
+            local bankLabel = routing.destType == "warbandbank" and "Warband Bank"
+                or routing.destType == "guildbank" and ("<" .. (routing.guild or "Guild") .. ">")
+                or "Bank"
+            -- Display text shows all eligible destination tabs
+            local tabStrs = {}
+            for _, t in ipairs(destTabs) do
+                tabStrs[#tabStrs + 1] = tostring(t)
+            end
+            local tabText = #destTabs == 1 and ("Tab " .. tabStrs[1]) or ("Tabs " .. table.concat(tabStrs, ", "))
+            return CAT_STASH, string.format("Move to %s %s%s", bankLabel, tabText, suffix), routing, destTabs
+        end
+        -- Different bank type or no tab match → take out. Category implies the
+        -- takeout; the action text keeps the destination-focused wording.
+        return CAT_TAKEOUT, action, routing
+    end
+
+    if category == CAT_KEEP then
+        -- Guild bank items classified as "keep for auctioneer" belong in bags, not the GB.
+        -- Pull them out so the auctioneer can list them on the AH.
+        if item.bankType == "guildbank" and action == "Auctioneer (sell on AH)" then
+            return CAT_TAKEOUT, action, routing
+        end
+        return CAT_KEEP, action, routing
+    end
+
+    -- ROUTE, VENDOR, or anything else → take out with original reason
+    -- e.g. "Mail to Metanoia (Alchemy)", "Vendor junk", "Soulbound non-upgrade (Pawn)"
+    return CAT_TAKEOUT, action, routing
+end
+
+-------------------------------------------------------------------------------
+-- Async Triage (scan across frames, classify when done, invoke callback)
+-- Primary scan path: used by UI refresh and chat notification callers.
+-------------------------------------------------------------------------------
+
+function EmpireManager:RunTriageAsync(callback)
+    local guid = self.playerGUID
+    local entry = self.db.global.registry[guid]
+    if not entry then
+        callback({})
+        return
+    end
+
+    -- Cache hit: bags haven't changed since last scan, skip the work.
+    if not self._bagsDirty and self.triageResults then
+        callback(self.triageResults)
+        return
+    end
+
+    local addon = self
+    StartAsyncScan(function(yieldCheck)
+        -- Phase 1: scan bag slots (yields between slots)
+        local bagItems = ScanBagsCore(yieldCheck)
+
+        -- Phase 2: classify each item (yields between items)
+        BuildEquipSetLookup(addon)
+        PrepareClassificationContext(addon)
+        local results = {}
+        for _, item in ipairs(bagItems) do
+            local category, action, routing = addon:ClassifyItem(item, entry)
+            results[#results + 1] = {
+                item = item,
+                category = category,
+                action = action,
+                routing = routing,
+            }
+            yieldCheck()
+        end
+        addon._classifyCtx = nil
+
+        -- Sort by category order, then by destination, then by item name
+        local catOrder = {}
+        for i, cat in ipairs(EmpireManager.CATEGORY_ORDER) do
+            catOrder[cat] = i
+        end
+        table.sort(results, function(a, b)
+            local oa = catOrder[a.category] or 99
+            local ob = catOrder[b.category] or 99
+            if oa ~= ob then
+                return oa < ob
+            end
+            -- Within VENDOR rows, sort by quality ASC (junk first, quality last).
+            -- This is intentional for vendor buyback: WoW's merchant buyback queue
+            -- holds only the last 12 items sold and is FIFO — when the queue fills,
+            -- the oldest items drop off and become unrecoverable. Selling junk first
+            -- means uncommon+ items are the *last* things sold, so they sit at the
+            -- top of the buyback list and are still recoverable if the user
+            -- realizes a mistake right after the bulk vendor.
+            if a.category == CAT_VENDOR then
+                local qa = a.item.quality or 0
+                local qb = b.item.quality or 0
+                if qa ~= qb then
+                    return qa < qb
+                end
+                return a.item.itemName < b.item.itemName
+            end
+            local da = a.action or ""
+            local db = b.action or ""
+            if da ~= db then
+                return da < db
+            end
+            return a.item.itemName < b.item.itemName
+        end)
+
+        addon.triageResults = results
+        addon.triageLastScan = time()
+        addon._bagsDirty = false
+        addon:WarnOnUnreachableDestinations(results)
+
+        -- Track uncached count for deferred rescan
+        local uncachedCount = 0
+        for _, item in ipairs(bagItems) do
+            if item._uncached then
+                uncachedCount = uncachedCount + 1
+            end
+        end
+
+        return { results = results, uncachedCount = uncachedCount }
+    end, function(packed, err)
+        if not packed then
+            if err then
+                addon:Print("|cffff4444[Triage]|r Scan error: " .. tostring(err))
+            end
+            callback({})
+            return
+        end
+
+        if packed.uncachedCount > 0 and addon.triageFrame and addon.triageFrame:IsShown() then
+            C_Timer.After(1.5, function()
+                if addon.triageFrame and addon.triageFrame:IsShown() then
+                    addon:RefreshTriageDisplay(false, true)
+                end
+            end)
+        end
+
+        callback(packed.results)
+    end)
+end
+
+function EmpireManager:RunBankTriageAsync(callback)
+    local guid = self.playerGUID
+    local entry = self.db.global.registry[guid]
+    if not entry then
+        callback({})
+        return
+    end
+
+    local addon = self
+    StartAsyncScan(function(yieldCheck)
+        -- Phase 1: scan bank slots (yields between slots)
+        local bankItems = ScanBankCore(addon, yieldCheck)
+
+        -- Phase 2: classify each item (yields between items)
+        BuildEquipSetLookup(addon)
+        PrepareClassificationContext(addon)
+        local results = {}
+        for _, item in ipairs(bankItems) do
+            local category, action, routing, destTabs = addon:ClassifyBankItem(item, entry)
+            results[#results + 1] = {
+                item = item,
+                category = category,
+                action = action,
+                routing = routing,
+                destTabs = destTabs,
+            }
+            yieldCheck()
+        end
+        addon._classifyCtx = nil
+
+        local bankCatOrder = { [CAT_STASH] = 1, [CAT_TAKEOUT] = 2, [CAT_KEEP] = 3 }
+        table.sort(results, function(a, b)
+            local oa = bankCatOrder[a.category] or 99
+            local ob = bankCatOrder[b.category] or 99
+            if oa ~= ob then
+                return oa < ob
+            end
+            local da = a.action or ""
+            local db = b.action or ""
+            if da ~= db then
+                return da < db
+            end
+            return (a.item.itemName or "") < (b.item.itemName or "")
+        end)
+
+        addon.bankTriageResults = results
+        return results
+    end, function(results, err)
+        if not results then
+            if err then
+                addon:Print("|cffff4444[Triage]|r Bank scan error: " .. tostring(err))
+            end
+            callback({})
+            return
+        end
+        callback(results)
+    end)
+end
