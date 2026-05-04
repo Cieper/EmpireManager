@@ -9,13 +9,19 @@ local EmpireManager = LibStub("AceAddon-3.0"):GetAddon("EmpireManager")
 
 EmpireManager._debugShowKeep = false -- toggled by /em triage debug
 
--- Debounced rescan trigger for option changes. Sliders fire setter on every
--- step while dragging; this coalesces a burst of changes into one rescan ~0.5s
--- after the last change. No-op when the triage window is closed.
--- Invalidates the cached classification: RunTriageAsync short-circuits to
--- cached results when bags haven't changed, but option changes mean the
--- existing classification is stale and must be redone.
+-- Invalidate the cached classification on option change. RunTriageAsync
+-- short-circuits to cached results when bags haven't changed, but option
+-- changes mean the existing classification is stale and must be redone -
+-- whether the window is open now or opens later.
+-- When the triage window IS open, also schedule a debounced live rescan
+-- (~0.5s) so dragging a slider repaints the view without manual rescan.
 function EmpireManager:OnTriageOptionChanged()
+    -- Always invalidate, even when the window is closed.
+    self._bagsDirty = true
+    self.triageResults = nil
+    self.bankTriageResults = nil
+
+    -- Live refresh only when the window is open.
     if not self.triageFrame or not self.triageFrame:IsShown() then
         return
     end
@@ -28,9 +34,6 @@ function EmpireManager:OnTriageOptionChanged()
         if not self.triageFrame or not self.triageFrame:IsShown() then
             return
         end
-        self._bagsDirty = true
-        self.triageResults = nil
-        self.bankTriageResults = nil
         if self._triageActiveTab == "bags" then
             self:RefreshTriageDisplay(true)
         else
