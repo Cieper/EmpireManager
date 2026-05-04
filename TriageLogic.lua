@@ -1247,6 +1247,7 @@ local function PrepareClassificationContext(addon)
         storageAssignments = addon.db.global.storageAssignments or {},
         vendorBopIlvl = opts.vendorBopIlvl,
         pawnVendorBop = opts.pawnVendorBop,
+        vendorIlvlCeiling = opts.vendorIlvlCeiling or 0,
         disenchantRouting = opts.disenchantRouting,
     }
 
@@ -1336,6 +1337,16 @@ function EmpireManager:ClassifyItem(item, entry)
             -- Kirin Tor, Time-Lost Artifact).
             if item.isTeleport then
                 return CAT_KEEP, "Teleport item"
+            end
+            -- iLvl ceiling: gear at or above the configured ceiling is preserved
+            -- regardless of Pawn/iLvl checks. Guards against vendoring upgrades
+            -- triage misclassified (e.g. greens close to current gear).
+            local ceiling = ctx and ctx.vendorIlvlCeiling or 0
+            if ceiling > 0 then
+                local itemIlvl = C_Item.GetDetailedItemLevelInfo(item.itemLink)
+                if itemIlvl and itemIlvl >= ceiling then
+                    return CAT_KEEP, string.format("Above iLvl limit (%d)", ceiling)
+                end
             end
             -- Gear-type guard: only vendor if the player is actually using
             -- this exact classID+subClassID (e.g. vendor a dagger only when a

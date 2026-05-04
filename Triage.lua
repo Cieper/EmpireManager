@@ -9,6 +9,36 @@ local EmpireManager = LibStub("AceAddon-3.0"):GetAddon("EmpireManager")
 
 EmpireManager._debugShowKeep = false -- toggled by /em triage debug
 
+-- Debounced rescan trigger for option changes. Sliders fire setter on every
+-- step while dragging; this coalesces a burst of changes into one rescan ~0.5s
+-- after the last change. No-op when the triage window is closed.
+-- Invalidates the cached classification: RunTriageAsync short-circuits to
+-- cached results when bags haven't changed, but option changes mean the
+-- existing classification is stale and must be redone.
+function EmpireManager:OnTriageOptionChanged()
+    if not self.triageFrame or not self.triageFrame:IsShown() then
+        return
+    end
+    if self._triageOptionRescanPending then
+        return
+    end
+    self._triageOptionRescanPending = true
+    C_Timer.After(0.5, function()
+        self._triageOptionRescanPending = nil
+        if not self.triageFrame or not self.triageFrame:IsShown() then
+            return
+        end
+        self._bagsDirty = true
+        self.triageResults = nil
+        self.bankTriageResults = nil
+        if self._triageActiveTab == "bags" then
+            self:RefreshTriageDisplay(true)
+        else
+            self:RefreshBankTriageDisplay(true)
+        end
+    end)
+end
+
 -------------------------------------------------------------------------------
 -- Frame Pool — reuse hidden frames instead of creating new ones each rebuild.
 -- WoW frames cannot be garbage-collected; without pooling, every triage tab
@@ -487,14 +517,25 @@ local function _PerformKeeplistAdd(itemID, itemName)
     EmpireManager:Print(string.format("Added %s to Keep List.", itemName))
     EmpireManager._bagsDirty = true -- force reclassification on next scan
     EmpireManager.bankTriageResults = nil
+    -- Hide all rows of the newly keep-listed item until the next reclassify scan
+    -- moves them to KEEP. Skip table is per-row, so add a row key per matching row.
     if EmpireManager._triageActiveTab == "bags" then
         EmpireManager.triageSkippedItems = EmpireManager.triageSkippedItems or {}
-        EmpireManager.triageSkippedItems[itemID] = true
+        for _, r in ipairs(EmpireManager.triageResults or {}) do
+            if r.item and r.item.itemID == itemID then
+                EmpireManager.triageSkippedItems[(r.item.bag or 0) .. ":" .. (r.item.slot or 0)] = true
+            end
+        end
         EmpireManager._triageFingerprint = nil
         EmpireManager:RefreshTriageDisplay()
     else
         EmpireManager.bankTriageSkippedItems = EmpireManager.bankTriageSkippedItems or {}
-        EmpireManager.bankTriageSkippedItems[itemID] = true
+        for _, r in ipairs(EmpireManager.bankTriageResults or {}) do
+            if r.item and r.item.itemID == itemID then
+                local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
+                EmpireManager.bankTriageSkippedItems[rowKey] = true
+            end
+        end
         EmpireManager._bankTriageFingerprint = nil
         EmpireManager:RefreshBankTriageDisplay(true)
     end
@@ -1435,6 +1476,10 @@ function EmpireManager:RefreshTriageDisplay(forceRescan, silent)
 
     if forceRescan then
         self._triageBagsBuilt = false
+        -- Invalidate the cached classification so RunTriageAsync re-classifies
+        -- with current options instead of returning the stale result set.
+        self._bagsDirty = true
+        self.triageResults = nil
     end
 
     -- Save scroll position before rebuild
@@ -1496,12 +1541,15 @@ end
 
 -- Separated UI builder so it can be called from the async callback
 function EmpireManager:_BuildBagTriageUI(results, savedOffset)
-    -- Filter out session-skipped items/actions for display and counts
+    -- Filter out session-skipped rows/actions for display and counts.
+    -- Skip key is per-row (bag:slot), not per-itemID, so 3 separate rows of the same
+    -- non-stacking item (e.g. caged pets) skip independently.
     local skippedItems = self.triageSkippedItems or {}
     local skippedActions = self.triageSkippedActions or {}
     local visibleResults = {}
     for _, r in ipairs(results) do
-        if not skippedItems[r.item.itemID] and not skippedActions[r.action] then
+        local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
+        if not skippedItems[rowKey] and not skippedActions[r.action] then
             visibleResults[#visibleResults + 1] = r
         end
     end
@@ -1673,8 +1721,9 @@ function EmpireManager:_BuildBagTriageUI(results, savedOffset)
                     if btn == "RightButton" then
                         self.triageSkippedItems = self.triageSkippedItems or {}
                         for _, res in ipairs(visibleResults) do
-                            if res.category == headerCat and res.item.itemID then
-                                self.triageSkippedItems[res.item.itemID] = true
+                            if res.category == headerCat then
+                                local rowKey = (res.item.bag or 0) .. ":" .. (res.item.slot or 0)
+                                self.triageSkippedItems[rowKey] = true
                             end
                         end
                         self._triageFingerprint = nil
@@ -2008,7 +2057,8 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
                 return
             end
         elseif button == "RightButton" then
-            -- Side decides between skip-item (left) and skip-action (right).
+            -- Side decides between skip-row (left) and skip-action (right).
+            -- Skip-row is per bag/slot so duplicates (e.g. 3 caged pets) skip independently.
             local cx = GetCursorPosition()
             local scale = row:GetEffectiveScale()
             local midX = ((row:GetLeft() + row:GetRight()) / 2 + (row._clickBias or 0)) * scale
@@ -2016,7 +2066,10 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
                 local skipKey = result.item.bankType and (result.item.bankType .. ":" .. result.action) or result.action
                 skipActionsTable[skipKey] = true
             else
-                skipItemsTable[result.item.itemID] = true
+                local rowKey = result.item.bankType
+                    and (result.item.bankType .. ":" .. (result.item.bag or 0) .. ":" .. (result.item.slot or 0))
+                    or ((result.item.bag or 0) .. ":" .. (result.item.slot or 0))
+                skipItemsTable[rowKey] = true
             end
             EmpireManager[fingerprintKey] = nil
             refreshFunc()
@@ -2108,15 +2161,17 @@ function EmpireManager:_BuildBankTriageUI(results, savedOffset)
         bankTypeFilter = "guildbank"
     end
 
-    -- Filter by bank type and session-skipped items/actions
+    -- Filter by bank type and session-skipped rows/actions.
+    -- Skip key is per-row (bankType:bag:slot), not per-itemID.
     local skippedItems = self.bankTriageSkippedItems or {}
     local skippedActions = self.bankTriageSkippedActions or {}
     local visibleResults = {}
     for _, r in ipairs(results) do
         local actionKey = r.item.bankType and (r.item.bankType .. ":" .. r.action) or r.action
+        local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             (not bankTypeFilter or r.item.bankType == bankTypeFilter)
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[actionKey]
         then
             visibleResults[#visibleResults + 1] = r
@@ -2297,8 +2352,13 @@ function EmpireManager:_BuildBankTriageUI(results, savedOffset)
                 if btn == "RightButton" then
                     self.bankTriageSkippedItems = self.bankTriageSkippedItems or {}
                     for _, res in ipairs(actionableRows) do
-                        if res.category == headerCat and res.item.itemID then
-                            self.bankTriageSkippedItems[res.item.itemID] = true
+                        if res.category == headerCat then
+                            local rowKey = (res.item.bankType or "")
+                                .. ":"
+                                .. (res.item.bag or 0)
+                                .. ":"
+                                .. (res.item.slot or 0)
+                            self.bankTriageSkippedItems[rowKey] = true
                         end
                     end
                     self._bankTriageFingerprint = nil
@@ -2450,7 +2510,8 @@ function EmpireManager:VendorTriageJunk()
     local autoItems = {}
     local confirmItems = {}
     for _, r in ipairs(self.triageResults) do
-        if r.category == CAT_VENDOR and not skippedItems[r.item.itemID] and not skippedActions[r.action] then
+        local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
+        if r.category == CAT_VENDOR and not skippedItems[rowKey] and not skippedActions[r.action] then
             local entry = {
                 bag = r.item.bag,
                 slot = r.item.slot,
@@ -2798,12 +2859,17 @@ end
 
 function EmpireManager:CountDEItems(results)
     local count = 0
+    local links = {}
     for _, r in ipairs(results) do
         if r.action and r.action:find("disenchant") then
             count = count + 1
+            local link = r.item and r.item.itemLink
+            if link then
+                links[#links + 1] = link
+            end
         end
     end
-    return count
+    return count, links
 end
 
 function EmpireManager:OnMerchantShow()
@@ -2821,9 +2887,15 @@ function EmpireManager:OnMerchantShow()
             )
         end
 
-        local deCount = self:CountDEItems(results)
+        local deCount, deLinks = self:CountDEItems(results)
         if deCount > 0 then
-            self:ChatMsg(string.format("|cff9966ff[Triage]|r %d items kept for disenchanting", deCount))
+            self:ChatMsg(
+                string.format(
+                    "|cff9966ff[Triage]|r %d items kept for disenchanting: %s",
+                    deCount,
+                    table.concat(deLinks, " ")
+                )
+            )
         end
 
         if self.db.global.options.popupOnVendor and not triageOpen then
@@ -2864,9 +2936,15 @@ function EmpireManager:OnMailShow()
             self:ChatMsg(string.format("|cffffcc00[Triage]|r %d items to route", counts[CAT_ROUTE]))
         end
 
-        local deCount = self:CountDEItems(results)
+        local deCount, deLinks = self:CountDEItems(results)
         if deCount > 0 then
-            self:ChatMsg(string.format("|cff9966ff[Triage]|r %d items kept for disenchanting", deCount))
+            self:ChatMsg(
+                string.format(
+                    "|cff9966ff[Triage]|r %d items kept for disenchanting: %s",
+                    deCount,
+                    table.concat(deLinks, " ")
+                )
+            )
         end
 
         if self.db.global.options.popupOnMailbox and not triageOpen then
@@ -2986,7 +3064,8 @@ function EmpireManager:MailTriageRoutable()
     local skippedActions = self.triageSkippedActions or {}
     local byRecipient = {}
     for _, r in ipairs(self.triageResults) do
-        if r.category == CAT_ROUTE and not skippedItems[r.item.itemID] and not skippedActions[r.action] then
+        local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
+        if r.category == CAT_ROUTE and not skippedItems[rowKey] and not skippedActions[r.action] then
             local recipient = r.action:match("^Mail to ([^<%(]+)")
             if recipient then
                 recipient = strtrim(recipient)
@@ -3409,10 +3488,11 @@ function EmpireManager:CountDepositableStash()
     local skippedActions = self.triageSkippedActions or {}
     local count = 0
     for _, r in ipairs(results) do
+        local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_STASH
             and r.routing
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[r.action]
         then
             local dt = r.routing.destType
@@ -3654,10 +3734,11 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     -- (one entry per (bag, slot, itemID); itemLink kept for chat output).
     local attemptedMoves = {}
     for _, r in ipairs(self.triageResults) do
+        local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_STASH
             and r.routing
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[r.action]
         then
             local dType = r.routing.destType
@@ -3699,6 +3780,45 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     end
     if totalItems == 0 then
         self:ChatMsg("|cff4d99ff[Triage]|r No depositable stash items found")
+        self._triageBulkOperating = false
+        self:RestoreDepositBtn()
+        return
+    end
+
+    -- Preflight: if every destination type we have moves for has zero capacity
+    -- (e.g. visiting warband bank with no tabs purchased), bail with one line
+    -- instead of attempting 24 doomed moves and dumping a per-item failure list.
+    local function bagsHaveSlots(firstBag, lastBag)
+        for bag = firstBag, lastBag do
+            if (C_Container.GetContainerNumSlots(bag) or 0) > 0 then
+                return true
+            end
+        end
+        return false
+    end
+    local destHasCapacity = {
+        charbank = regularBankOpen and not warbandOnly and bagsHaveSlots(6, 11),
+        warbandbank = warbandAccessible and bagsHaveSlots(12, 16),
+        -- Trust guild-bank-open: if it's open at all there's at least one tab.
+        guildbank = guildBankOpen,
+    }
+    local anyCapacity = false
+    for dt, moves in pairs(movesByType) do
+        if #moves > 0 and destHasCapacity[dt] then
+            anyCapacity = true
+            break
+        end
+    end
+    if not anyCapacity then
+        local missing = {}
+        if #movesByType.warbandbank > 0 and not destHasCapacity.warbandbank then
+            missing[#missing + 1] = "Warband Bank (no tabs purchased)"
+        end
+        if #movesByType.charbank > 0 and not destHasCapacity.charbank then
+            missing[#missing + 1] = "Character Bank (no tabs purchased)"
+        end
+        local detail = #missing > 0 and (" - " .. table.concat(missing, ", ")) or ""
+        self:ChatMsg("|cff4d99ff[Triage]|r No accessible storage" .. detail)
         self._triageBulkOperating = false
         self:RestoreDepositBtn()
         return
@@ -3935,7 +4055,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                     elseif reasonKey == "fulltab" then
                         reasonText = "destination full"
                     else
-                        reasonText = "unique limit / locked / unknown"
+                        reasonText = "unknown"
                     end
                     local nameLabel = m.itemLink or m.itemName or ("Item " .. m.itemID)
                     local key = nameLabel .. "|" .. reasonText
@@ -3949,12 +4069,17 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         end
         if #namedFailOrder > 0 then
             self:ChatMsg("|cff4d99ff[Triage]|r   Failed:")
-            for _, key in ipairs(namedFailOrder) do
-                local f = namedFails[key]
+            local maxLines = 5
+            local shown = math.min(#namedFailOrder, maxLines)
+            for i = 1, shown do
+                local f = namedFails[namedFailOrder[i]]
                 local qty = f.count > 1 and string.format(" x%d", f.count) or ""
                 -- Explicit |r after the item link: WoW chat occasionally lets the
                 -- link's quality color bleed onto trailing text; force reset.
                 self:ChatMsg(string.format("|cff4d99ff[Triage]|r     %s|r%s - %s", f.name, qty, f.reason))
+            end
+            if #namedFailOrder > shown then
+                self:ChatMsg(string.format("|cff4d99ff[Triage]|r     ... and %d more", #namedFailOrder - shown))
             end
         end
         self._triageBulkOperating = false
@@ -4032,11 +4157,12 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
             self:RunTriage()
             moveList = {}
             for _, r in ipairs(self.triageResults) do
+                local rowKey = (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
                 if
                     r.category == CAT_STASH
                     and r.routing
                     and r.routing.destType == destType
-                    and not skippedItems[r.item.itemID]
+                    and not skippedItems[rowKey]
                     and not skippedActions[r.action]
                 then
                     moveList[#moveList + 1] = {
@@ -4770,11 +4896,12 @@ function EmpireManager:ReorganizeBankItems()
     local candidateItems = {}
     for _, r in ipairs(results) do
         local actionKey = r.item.bankType and (r.item.bankType .. ":" .. r.action) or r.action
+        local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_STASH
             and r.destTabs
             and (not bankTypeFilter or r.item.bankType == bankTypeFilter)
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[actionKey]
         then
             local destAddrs = {}
@@ -5075,11 +5202,12 @@ function EmpireManager:ReorganizeGuildBankItems()
     local candidateItems = {}
     for _, r in ipairs(results) do
         local actionKey = r.item.bankType and (r.item.bankType .. ":" .. r.action) or r.action
+        local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_STASH
             and r.destTabs
             and r.item.bankType == "guildbank"
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[actionKey]
         then
             candidateItems[#candidateItems + 1] = {
@@ -5625,10 +5753,11 @@ function EmpireManager:TakeOutBankItems()
     local takeItems = {}
     for _, r in ipairs(results) do
         local actionKey = r.item.bankType and (r.item.bankType .. ":" .. r.action) or r.action
+        local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_TAKEOUT
             and (not bankTypeFilter or r.item.bankType == bankTypeFilter)
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[actionKey]
         then
             takeItems[#takeItems + 1] = r.item
@@ -5814,10 +5943,11 @@ function EmpireManager:TakeOutGuildBankItems()
     local takeItems = {}
     for _, r in ipairs(results) do
         local actionKey = r.item.bankType and (r.item.bankType .. ":" .. r.action) or r.action
+        local rowKey = (r.item.bankType or "") .. ":" .. (r.item.bag or 0) .. ":" .. (r.item.slot or 0)
         if
             r.category == CAT_TAKEOUT
             and r.item.bankType == "guildbank"
-            and not skippedItems[r.item.itemID]
+            and not skippedItems[rowKey]
             and not skippedActions[actionKey]
         then
             takeItems[#takeItems + 1] = r.item

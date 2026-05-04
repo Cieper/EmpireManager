@@ -751,7 +751,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         GameTooltip:AddLine("Sort Order", 1, 0.82, 0)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(
-            "Characters with a sort number appear first in the dashboard, sorted lowest to highest. 0 or empty = default alphabetical order.",
+            "Sets this character's sort position when the dashboard is sorted by #. Leave blank or 0 to remove.",
             1,
             1,
             1,

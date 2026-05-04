@@ -3240,7 +3240,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
                 local charList = BuildCharList()
                 f.CharDD:OverrideText(charList[st.char] or st.char)
             else
-                f.CharDD:OverrideText("Select character")
+                f.CharDD:OverrideText("Select Character")
             end
         end
 
@@ -3260,10 +3260,8 @@ function EmpireManager:OpenStorageDialog(editIdx)
             end
             local total = #expIcons
             local text
-            if total == 0 then
+            if total == 0 or total == #self.EXPANSION_DISPLAY then
                 text = "Any Expansion"
-            elseif total == #self.EXPANSION_DISPLAY then
-                text = "All Expansions"
             elseif total > 4 then
                 text = table.concat(expIcons, " ", 1, 4) .. string.format(" +%d", total - 4)
             else
@@ -3346,11 +3344,11 @@ function EmpireManager:OpenStorageDialog(editIdx)
         if count == 0 then
             local msg
             if not st.bankType then
-                msg = "Select a bank type first"
+                msg = "Select a Bank Type first"
             elseif st.bankType == "guildbank" and not st.guild then
-                msg = "Select a guild first"
+                msg = "Select a Guild first"
             elseif st.bankType == "charbank" and not st.char then
-                msg = "Select a character first"
+                msg = "Select a Character first"
             else
                 msg = "No tabs found (open bank first)"
             end

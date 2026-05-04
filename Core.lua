@@ -41,6 +41,7 @@ local DB_DEFAULTS = {
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
             vendorBopIlvl = false, -- vendor soulbound gear with lower ilvl than equipped
+            vendorIlvlCeiling = 0, -- iLvl ceiling for BoP vendor checks; gear at or above is kept (0 = disabled)
             confirmVendorQuality = true, -- show confirmation dialog before vendoring uncommon+ gear
             disenchantRouting = false, -- route low-value BoE to enchanter instead of AH
             disenchantThreshold = 0, -- copper; fallback threshold when TSM unavailable
@@ -340,7 +341,7 @@ function EmpireManager:OnInitialize()
     end
 
     -- Helper: register a numeric slider backed by db.global.options
-    local function AddSlider(cat, key, name, tooltip, minVal, maxVal, step, formatter)
+    local function AddSlider(cat, key, name, tooltip, minVal, maxVal, step, formatter, onChange)
         local setting = Settings.RegisterProxySetting(
             cat,
             "EM_" .. key,
@@ -352,6 +353,9 @@ function EmpireManager:OnInitialize()
             end,
             function(val)
                 self.db.global.options[key] = val
+                if onChange then
+                    onChange(val)
+                end
             end
         )
         local options = Settings.CreateSliderOptions(minVal, maxVal, step)
@@ -456,6 +460,13 @@ function EmpireManager:OnInitialize()
     ---------------------------------------------------------------------------
     local triageCat, triageLayout = Settings.RegisterVerticalLayoutSubcategory(category, "Triage")
 
+    -- Live-refresh the triage window when classification-affecting options change.
+    local function triageRefresh()
+        if self.OnTriageOptionChanged then
+            self:OnTriageOptionChanged()
+        end
+    end
+
     -- Section: Rules
     triageLayout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Rules"))
 
@@ -482,14 +493,16 @@ function EmpireManager:OnInitialize()
                 parts[#parts + 1] = c .. "c"
             end
             return table.concat(parts, " ")
-        end
+        end,
+        triageRefresh
     )
 
     AddCheckbox(
         triageCat,
         "disenchantRouting",
         "Disenchant Routing",
-        "Route BoE gear to your Enchanting Artisan when disenchanting is more profitable than selling on the AH. Uses TSM price data when available."
+        "Route BoE gear to your Enchanting Artisan when disenchanting is more profitable than selling on the AH. Uses TSM price data when available.",
+        triageRefresh
     )
 
     AddSlider(
@@ -515,7 +528,8 @@ function EmpireManager:OnInitialize()
                 parts[#parts + 1] = c .. "c"
             end
             return table.concat(parts, " ")
-        end
+        end,
+        triageRefresh
     )
 
     -- Section: Equipment
@@ -525,21 +539,41 @@ function EmpireManager:OnInitialize()
         triageCat,
         "skipEquipmentSets",
         "Protect 'Equipment Set' Items",
-        "Skip vendoring soulbound gear that belongs to any saved equipment set."
+        "Skip vendoring soulbound gear that belongs to any saved equipment set.",
+        triageRefresh
     )
 
     AddCheckbox(
         triageCat,
         "pawnVendorBop",
         "BoP Non-Upgrades (Pawn)",
-        "Flag soulbound gear that Pawn considers not an upgrade as vendorable. Requires the Pawn addon."
+        "Flag soulbound gear that Pawn considers not an upgrade as vendorable. Requires the Pawn addon.",
+        triageRefresh
     )
 
     AddCheckbox(
         triageCat,
         "vendorBopIlvl",
         "BoP Lower iLvl",
-        "Flag soulbound equippable gear as vendorable when its item level is lower than the equipped item in the same slot. Pawn takes priority when both are enabled."
+        "Flag soulbound equippable gear as vendorable when its item level is lower than the equipped item in the same slot. Pawn takes priority when both are enabled.",
+        triageRefresh
+    )
+
+    AddSlider(
+        triageCat,
+        "vendorIlvlCeiling",
+        "Keep Above iLvl",
+        "Soulbound equippable gear at or above this item level is kept regardless of Pawn/iLvl vendor checks. Set to 0 to disable.",
+        0,
+        300,
+        1,
+        function(val)
+            if val == 0 then
+                return "Disabled"
+            end
+            return tostring(val)
+        end,
+        triageRefresh
     )
 
     AddCheckbox(
@@ -820,8 +854,9 @@ function EmpireManager:OnEnable()
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
     self:RegisterEvent("PLAYER_MONEY")
 
-    -- Request playtime (async → triggers TIME_PLAYED_MSG)
-    RequestTimePlayed()
+    -- Request playtime (async → triggers TIME_PLAYED_MSG). Silent variant suppresses
+    -- Blizzard's chat output for our request; user-typed /played still prints normally.
+    self:RequestTimePlayedSilent()
 
     -- Apply saved clamp preference to any XML frames that already exist
     self:UpdateClampToScreen()
@@ -1919,10 +1954,19 @@ function EmpireManager:PLAYER_EQUIPMENT_CHANGED()
 end
 
 function EmpireManager:PLAYER_ENTERING_WORLD()
-    -- Snapshot location for global registry
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
-    if entry and not entry.mapPinned then
+    if not entry then return end
+
+    -- Trust the game over imported/edited values: level can be wrong (typo, post-import
+    -- ding, or out-of-date import). Overwrite unconditionally, even if smaller.
+    local liveLevel = UnitLevel("player")
+    if liveLevel and liveLevel > 0 then
+        entry.level = liveLevel
+    end
+
+    -- Snapshot location for global registry
+    if not entry.mapPinned then
         entry.zone = GetRealZoneText()
         entry.subZone = GetSubZoneText()
         local mapID = C_Map.GetBestMapForUnit("player")
@@ -1978,6 +2022,36 @@ function EmpireManager:TIME_PLAYED_MSG(_, totalTime, levelTime)
         entry.playedTotal = totalTime -- seconds
         entry.playedLevel = levelTime -- seconds
     end
+    -- Re-register TIME_PLAYED_MSG on chat frames we silenced for this request.
+    self:RestoreTimePlayedChatFrames()
+end
+
+-- Suppress chat output for RequestTimePlayed(). Blizzard's chat handler writes the
+-- "Total time played" lines directly via TIME_PLAYED_MSG (bypassing CHAT_MSG_SYSTEM),
+-- so a chat filter does nothing. Instead, temporarily unregister the event from each
+-- chat frame around our request and re-register after our own handler runs.
+function EmpireManager:RequestTimePlayedSilent()
+    local frames = {}
+    for i = 1, NUM_CHAT_WINDOWS do
+        local f = _G["ChatFrame" .. i]
+        if f and f.IsEventRegistered and f:IsEventRegistered("TIME_PLAYED_MSG") then
+            f:UnregisterEvent("TIME_PLAYED_MSG")
+            frames[#frames + 1] = f
+        end
+    end
+    self._silentTimePlayedFrames = frames
+    RequestTimePlayed()
+end
+
+function EmpireManager:RestoreTimePlayedChatFrames()
+    local frames = self._silentTimePlayedFrames
+    if not frames then return end
+    for _, f in ipairs(frames) do
+        if f and f.RegisterEvent then
+            f:RegisterEvent("TIME_PLAYED_MSG")
+        end
+    end
+    self._silentTimePlayedFrames = nil
 end
 
 function EmpireManager:SnapshotProfessions(entry)

@@ -700,7 +700,7 @@
                 </Anchors>
                 <Layers><Layer level="OVERLAY">
                     <FontString parentKey="Label" inherits="GameFontHighlight"
-                                justifyH="LEFT" text="Tabs:">
+                                justifyH="LEFT" text="Tab:">
                         <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
                         <Size x="90"/>
                     </FontString>
@@ -748,7 +748,7 @@
                 </Anchors>
                 <Layers><Layer level="OVERLAY">
                     <FontString parentKey="Label" inherits="GameFontHighlight"
-                                justifyH="LEFT" text="Expansions:">
+                                justifyH="LEFT" text="Expansion:">
                         <Anchors><Anchor point="LEFT" x="0" y="0"/></Anchors>
                         <Size x="90"/>
                     </FontString>

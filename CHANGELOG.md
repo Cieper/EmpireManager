@@ -1,6 +1,26 @@
 # Changelog
 
-All notable changes to EmpireManager are documented here.
+## [0.3.4] - 2026-05-04
+
+### Added
+
+- Triage: "Keep Above iLvl" option (Options -> Triage -> Vendor) protects soulbound gear at or above the configured iLvl from Pawn/iLvl vendor checks.
+- Triage: classification-affecting options now trigger a debounced rescan when the triage window is open.
+- Triage: disenchant chat notice now appends item links.
+
+### Changed
+
+- Triage: right-click skip on the left column now keys per-row (bag:slot) instead of per-itemID, so non-stacking duplicates (e.g. caged pets) skip independently.
+- Triage: failed-deposit list capped at 5 entries with "... and N more" tail to keep chat readable.
+- Storage UI: collapsed "All Expansions" into "Any Expansion" and singularised "Tabs:"/"Expansions:" labels for consistency.
+- Tooltip wording: refined Ctrl+click hints, sort-order tooltip, and failed-deposit reasons.
+
+### Fixed
+
+- Triage: rescan button and option changes now invalidate the cached classification, so new settings actually apply instead of returning stale results.
+- Triage: skip the deposit pass entirely when no destination has accessible capacity (e.g. warband bank with no tabs purchased) instead of dumping a per-item failure list.
+- Core: corrects character level on `PLAYER_ENTERING_WORLD` even when the imported value is higher than the current level.
+- Core: `/played` request no longer prints to chat.
 
 ## [0.3.3] - 2026-04-30
 
