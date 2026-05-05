@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.5] - 2026-05-05
+
+### Changed
+
+- Triage controls lock during mail and vendor operations; closing the mailbox or merchant cancels cleanly.
+- "Default Vendor Threshold" tooltip rewritten to reflect what it actually does.
+- Storage tab help tooltip clarifies that the first matching rule wins.
+
+### Fixed
+
+- Disabled action buttons (Mail/Vendor/Deposit/Reorganize) now show their reason tooltip on hover.
+- Row hovers and Right-click half-highlight no longer draw on disabled rows.
+- Vendor cooking ingredients (Mild/Soothing/Hot/Holiday Spices, Simple Flour) no longer false-match alchemy.
+
 ## [0.3.4] - 2026-05-04
 
 ### Added

@@ -462,6 +462,10 @@ EmpireManager:RegisterMessage("EM_MERCHANT_SHOW", function()
 end)
 
 EmpireManager:RegisterMessage("EM_MERCHANT_CLOSED", function()
+    -- Abort any running bulk vendor operation (closing the merchant cancels everything)
+    if EmpireManager._triageBulkOperating then
+        EmpireManager:AbortBulkOperation()
+    end
     -- Close the vendor confirmation dialog if open (merchant is gone, can't sell)
     if EmpireManager.vendorConfirmFrame then
         EmpireManager.vendorConfirmFrame:Hide()
@@ -477,6 +481,10 @@ EmpireManager:RegisterMessage("EM_MAIL_SHOW", function()
 end)
 
 EmpireManager:RegisterMessage("EM_MAIL_CLOSED", function()
+    -- Abort any running bulk mail operation (closing the mailbox cancels everything)
+    if EmpireManager._triageBulkOperating then
+        EmpireManager:AbortBulkOperation()
+    end
     -- Close the per-character mail confirmation dialog if open
     if EmpireManager.mailConfirmFrame then
         EmpireManager.mailConfirmFrame:Hide()
@@ -1075,7 +1083,11 @@ function EmpireManager:CreateTriageOverlay()
     self._triageRescanBtn = refreshBtn
 
     -- Tooltip installer: shows btn._disabledReason on hover when the button is disabled.
+    -- SetMotionScriptsWhileDisabled is required so OnEnter still fires while the
+    -- button is in the disabled state - otherwise no tooltip would ever appear
+    -- on a disabled button (this matches Blizzard's UIButtonTemplate behaviour).
     local function AttachDisabledTooltip(btn)
+        btn:SetMotionScriptsWhileDisabled(true)
         btn:SetScript("OnEnter", function(b)
             local reason = b._disabledReason
             if reason and not b:IsEnabled() then
@@ -1262,11 +1274,28 @@ function EmpireManager:_SetAllTriageActionsLocked(locked)
     end
     -- Lock row click/tooltip interaction during bulk ops so the user can't race
     -- the classifier by skipping/adding items while moves are in flight.
+    -- When disabling mouse on a hovered row, OnLeave does not fire, so the
+    -- left/right hover highlights, divider, and tooltip get stuck. Force-hide
+    -- them here to clear that state.
     if self._triagePooledRows then
         for _, entry in ipairs(self._triagePooledRows) do
             if entry and entry.frame then
                 entry.frame:EnableMouse(not locked)
+                if locked then
+                    if entry.hlLeft then
+                        entry.hlLeft:Hide()
+                    end
+                    if entry.hlRight then
+                        entry.hlRight:Hide()
+                    end
+                    if entry.divider then
+                        entry.divider:Hide()
+                    end
+                end
             end
+        end
+        if locked then
+            GameTooltip:Hide()
         end
     end
     local f = self.triageFrame
@@ -2016,6 +2045,11 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
         if not self:IsMouseOver() then
             return
         end
+        -- Skip the half-highlight while controls are locked (bulk op in progress).
+        -- Showing only one side looks broken; the lock UI already conveys "disabled".
+        if not self:IsMouseEnabled() then
+            return
+        end
         if divider then
             divider:Show()
         end
@@ -2602,6 +2636,7 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
         end
         addon._vendorSelling = false
         addon._triageBulkOperating = false
+        addon:_SetAllTriageActionsLocked(false)
         addon:UpdateVendorBtnState()
         addon:RefreshTriageDisplay(true)
         CheckBagsFull()
@@ -3092,6 +3127,9 @@ function EmpireManager:MailTriageRoutable()
     end
     table.sort(recipients)
 
+    -- Lock all triage controls; user closes the mailbox or per-recipient dialog to cancel.
+    self:StartBulkOperation()
+
     self:ShowMailPerCharDialog(byRecipient, recipients, 1, 0)
 end
 
@@ -3107,6 +3145,10 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     end
 
     local function reportMailed()
+        -- Release the bulk lock applied by MailTriageRoutable. Safe to call when
+        -- _triageBulkOperating is already false (e.g. EM_MAIL_CLOSED aborted).
+        self._triageBulkOperating = false
+        self:_SetAllTriageActionsLocked(false)
         if totalSent > 0 then
             self:ChatMsg(string.format("|cffffcc00[Triage]|r Mailed %d items", totalSent))
             C_Timer.After(0, function()

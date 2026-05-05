@@ -485,6 +485,12 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [265800] = { "cooking" },                  -- Earthy Garnish
     [265801] = { "cooking" },                  -- Savory Anomaly
     [265803] = { "cooking" },                  -- Bazaar Bites
+    -- Vendor cooking ingredients that report Trade Goods 7/11 (Other) and falsely match alchemy:
+    [2678] = { "cooking" },                    -- Mild Spices
+    [3713] = { "cooking" },                    -- Soothing Spices
+    [2692] = { "cooking" },                    -- Hot Spices
+    [17194] = { "cooking" },                   -- Holiday Spices
+    [30817] = { "cooking" },                   -- Simple Flour
 }
 
 -- Profession display: crafting, gathering, and secondary professions

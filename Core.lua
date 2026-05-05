@@ -474,7 +474,7 @@ function EmpireManager:OnInitialize()
         triageCat,
         "defaultVendorThreshold",
         "Default Vendor Threshold",
-        "Per-unit sell price below which white (Common) items are flagged as vendor junk. Applied to new characters.",
+        "Common-quality items with a per-item vendor price at or below this value are flagged as junk. Crafting materials, trade goods, consumables, and recipes are excluded. Set to 0 to disable.",
         0,
         1000000,
         1000,
