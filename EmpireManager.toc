@@ -2,7 +2,7 @@
 ## Title: EmpireManager
 ## Notes: Command your alt army. Track inventory, professions, and storage across every character, then route everything where it belongs.
 ## Author: l0neshad0w
-## Version: 0.3.5
+## Version: 0.3.6
 ## SavedVariables: EmpireManagerDB
 ## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
 ## OptionalDeps: TradeSkillMaster, Pawn
@@ -17,3 +17,4 @@ EmpireManager.xml
 Sidecar.lua
 Triage.lua
 Tabs.lua
+Wizard.lua

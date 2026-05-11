@@ -421,7 +421,7 @@ EmpireManager.PROF_ITEM_MAP = {
 -- the resulting match set replaces the subclass-derived match set entirely
 -- (no merging) so an item misclassified by subclass can be reassigned cleanly.
 EmpireManager.PROF_ITEM_OVERRIDES = {
-    -- Midnight (expansion 11) cross-profession motes — Trade Goods 7/11.
+    -- Midnight (expansion 11) cross-profession motes - Trade Goods 7/11.
     -- Subclass 11 currently maps to alchemy only; these are cross-profession
     -- transmute/recycle reagents used by every crafting profession.
     [236949] = { "alchemy", "engineering", "tailoring", "leatherworking", "inscription", "blacksmithing", "jewelcrafting", "enchanting" }, -- Mote of Light
@@ -432,7 +432,7 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [253302] = { "engineering" }, -- Malleable Wireframe
     [253303] = { "engineering" }, -- Pile of Junk
 
-    -- Midnight universal Parts (7/1) — Aetherlume + Evercore are shared
+    -- Midnight universal Parts (7/1) - Aetherlume + Evercore are shared
     -- recycle/craft reagents across all crafting professions, not engineering-only
     -- as the 7/1 → engineering map would suggest. Multiple itemIDs per name = quality tiers.
     [243578] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Aetherlume
@@ -462,14 +462,14 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     -- The Thalassian Treatise items (245756/Tailoring, 245757/Inscription, 245758/LW) need
     -- in-game verification of their actual subclass before adding overrides.
 
-    -- Trade Goods 7/19 ("Finishing Reagent") — not in PROF_ITEM_MAP because
+    -- Trade Goods 7/19 ("Finishing Reagent") - not in PROF_ITEM_MAP because
     -- the bucket is shared across professions. Per-itemID assignment is required.
     -- TWW finishing reagents:
     [228404] = { "alchemy" },                  -- Petal Powder
     [228401] = { "alchemy" },                  -- Bubbling Mycobloom Culture
     [222882] = { "tailoring" },                -- Weavercloth Embroidery Thread
     [210814] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Acuity
-    -- Midnight finishing reagents — universal crafting helpers used across professions.
+    -- Midnight finishing reagents - universal crafting helpers used across professions.
     [225673] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Consortium Seal of Approval
     [246447] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Apprentice's Scribbles
     [246448] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Ledger
@@ -632,7 +632,7 @@ EmpireManager.ROLE_TOOLTIPS = {
     gatherer = "Gathering character. Maximum 2 professions.\n\nGathered materials are categorized and routed automatically.",
     auctioneer = "Receives BoE items for selling.\n\nTriage routes non-Warbound BoE gear to this character via mail. Only one Auctioneer per realm is typical.",
     banker = "Bank mule for guild or personal bank storage.\n\nAuto-assigned when a character is set as a storage destination. Receives mail from other characters.",
-    lockpicker = "Opens locked items (Rogue/Blacksmith).\n\nMark this character so you remember who can pick locks.",
+    lockpicker = "Opens locked items (Rogue, Mechagnome, or Blacksmith with Skeleton Keys).\n\nMark this character so you remember who can pick locks.",
     zookeeper = "Battle pet manager.\n\nTag your pet collection character for quick identification.",
     pvper = "PvP-focused character.\n\nTag for quick identification in the roster.",
 }
@@ -969,13 +969,14 @@ function EmpireManager:FormatTimeSince(timestamp)
 end
 
 function EmpireManager:CalculateGrandTotals()
-    local totalGold = 0
+    local charGold = 0
     local charCount = 0
     for _, entry in pairs(self.db.global.registry) do
         charCount = charCount + 1
-        totalGold = totalGold + (entry.gold or 0)
+        charGold = charGold + (entry.gold or 0)
     end
-    return totalGold, charCount
+    local warbandGold = self.db.global.warbandGold or 0
+    return charGold + warbandGold, charCount, warbandGold
 end
 
 -- Readable class names from engine tokens
@@ -1047,18 +1048,18 @@ function EmpireManager:FormatPlaytime(seconds)
     end
 end
 
-function EmpireManager:ShowNameTooltip(widget, entry, anchor)
-    GameTooltip:SetOwner(widget.frame, anchor or "ANCHOR_CURSOR")
-
-    -- Name (white, header size)
+function EmpireManager:AddTooltipHeader(entry)
     GameTooltip:AddLine(entry.name or "?", 1, 1, 1)
-
-    -- Guild / Realm (dim, like the game's guild line)
     local guild = (entry.guild and entry.guild ~= "") and entry.guild or nil
     if guild then
-        GameTooltip:AddLine(guild, 0.51, 0.35, 0.76) -- purple, matches game guild color
+        GameTooltip:AddLine(guild, 0.51, 0.35, 0.76)
     end
-    GameTooltip:AddLine((entry.realm or "?") .. " Realm", 1, 0.82, 0)
+    GameTooltip:AddLine(entry.realm or "?", 1, 0.82, 0)
+end
+
+function EmpireManager:ShowNameTooltip(widget, entry, anchor)
+    GameTooltip:SetOwner(widget.frame, anchor or "ANCHOR_CURSOR")
+    self:AddTooltipHeader(entry)
 
     -- Spec + Class (class-colored, like game's "Protection Paladin")
     GameTooltip:AddLine(" ")
@@ -1084,10 +1085,14 @@ function EmpireManager:ShowNameTooltip(widget, entry, anchor)
     if entry.professions and #entry.professions > 0 then
         local names = {}
         for _, p in ipairs(entry.professions) do
-            names[#names + 1] = p.name
+            if type(p.name) == "string" and p.name ~= "" then
+                names[#names + 1] = p.name
+            end
         end
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine(table.concat(names, ", "), 1, 0.82, 0)
+        if #names > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(table.concat(names, ", "), 1, 0.82, 0)
+        end
     end
 
     -- Gold (with coin icons, matching game tooltip)

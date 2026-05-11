@@ -22,11 +22,11 @@ local DB_DEFAULTS = {
         schemaVersion = 1,
         lastReset = 0,
         lastWeeklyReset = 0,
-        uiStatus = {}, -- persists dashboard frame position/size
         charBlacklist = {}, -- [guid] = "Name - Realm"; excluded from data collection
         keepList = {}, -- [itemID] = "Item Name"; protected from all triage actions (vendor, mail, stash)
         vendorWhitelist = {}, -- [itemID] = "Item Name"; always vendored regardless of rules
         stats = {}, -- cumulative operation counters (goldVendored, itemsVendored, itemsStashed, itemsMailed)
+        warbandGold = 0, -- account-level: copper held in the warband bank, snapshotted on bank open
         options = {
             defaultVendorThreshold = 0, -- copper; applied to new characters
             minimapButton = true, -- show minimap icon
@@ -108,6 +108,9 @@ function EmpireManager:OnInitialize()
             itemsStashed = 0,
             itemsMailed = 0,
         }
+    end
+    if not rawget(self.db.global, "warbandGold") then
+        self.db.global.warbandGold = 0
     end
 
     -- Migrate storage assignments: resolve stale API-stub keys to real GUIDs
@@ -287,10 +290,13 @@ function EmpireManager:OnInitialize()
             { cmd = "/em config", desc = "Configure the current character" },
             { cmd = "/em triage", desc = "Open Bag Triage overlay" },
             { cmd = "/em options", desc = "Open this settings panel" },
-            { cmd = "/em purge <name>", desc = "Remove a character from the registry" },
+            { cmd = "/em purge <name>", desc = "Remove a character from the roster" },
             { cmd = "/em keeplist", desc = "Open the Keep List window" },
             { cmd = "/em vendorw", desc = "Open the vendor whitelist window" },
+            { cmd = "/em gb", desc = "Open the guild storage blacklist window" },
             { cmd = "/em charb", desc = "Open the character blacklist window" },
+            { cmd = "/em ie", desc = "Open the Import / Export window" },
+            { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
             { cmd = "/em help", desc = "Show all commands in chat" },
         }
         for _, c in ipairs(commands) do
@@ -479,18 +485,17 @@ function EmpireManager:OnInitialize()
         1000000,
         1000,
         function(val)
+            if val == 0 then
+                return "Disabled"
+            end
             local g = math.floor(val / 10000)
             local s = math.floor((val % 10000) / 100)
-            local c = val % 100
             local parts = {}
             if g > 0 then
                 parts[#parts + 1] = g .. "g"
             end
             if s > 0 then
                 parts[#parts + 1] = s .. "s"
-            end
-            if c > 0 or #parts == 0 then
-                parts[#parts + 1] = c .. "c"
             end
             return table.concat(parts, " ")
         end,
@@ -514,18 +519,17 @@ function EmpireManager:OnInitialize()
         1000000,
         1000,
         function(val)
+            if val == 0 then
+                return "Disabled"
+            end
             local g = math.floor(val / 10000)
             local s = math.floor((val % 10000) / 100)
-            local c = val % 100
             local parts = {}
             if g > 0 then
                 parts[#parts + 1] = g .. "g"
             end
             if s > 0 then
                 parts[#parts + 1] = s .. "s"
-            end
-            if c > 0 or #parts == 0 then
-                parts[#parts + 1] = c .. "c"
             end
             return table.concat(parts, " ")
         end,
@@ -831,6 +835,9 @@ function EmpireManager:OnEnable()
     -- Lazy trigger events (only the windows we care about)
     self:RegisterEvent("BAG_UPDATE_DELAYED")
     self:RegisterEvent("TRADE_SKILL_SHOW")
+    -- Catch profession unlearn (no tradeskill window opens). Also fires on learn,
+    -- level-up, etc., so the handler is throttled.
+    self:RegisterEvent("SKILL_LINES_CHANGED")
     self:RegisterEvent("BANKFRAME_OPENED")
     self:RegisterEvent("BANKFRAME_CLOSED")
     -- Guild bank: GUILDBANKFRAME_OPENED/CLOSED are dead since 10.0.
@@ -909,6 +916,8 @@ function EmpireManager:SlashHandler(input)
         self:ToggleCharBlacklistWindow()
     elseif cmd == "ie" then
         self:ToggleIOWindow()
+    elseif cmd == "wizard" then
+        self:OpenWizard()
     elseif cmd == "wipe" then
         local _, sub = self:GetArgs(input, 2)
         if sub == "chars" or sub == "rules" or sub == "all" then
@@ -963,7 +972,11 @@ function EmpireManager:SlashHandler(input)
                 for _, line in ipairs(td.lines) do
                     local txt = line.leftText
                     if txt then
-                        if txt == ITEM_ACCOUNTBOUND or txt == ITEM_BIND_TO_ACCOUNT or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP then
+                        if
+                            txt == ITEM_ACCOUNTBOUND
+                            or txt == ITEM_BIND_TO_ACCOUNT
+                            or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP
+                        then
                             isWarbound = true
                         elseif txt == ITEM_SOULBOUND then
                             isSoulbound = true
@@ -971,7 +984,9 @@ function EmpireManager:SlashHandler(input)
                     end
                 end
             end
-            if isSoulbound then isWarbound = false end
+            if isSoulbound then
+                isWarbound = false
+            end
             self:ChatMsg(
                 string.format("  tooltip: isWarbound=%s  isSoulbound=%s", tostring(isWarbound), tostring(isSoulbound)),
                 true
@@ -1037,12 +1052,13 @@ function EmpireManager:SlashHandler(input)
         self:ChatMsg("  /em config Open the Assignment Panel for this character", true)
         self:ChatMsg("  /em triage Open the Bag Triage overlay", true)
         self:ChatMsg("  /em options Open the Options panel", true)
-        self:ChatMsg("  /em purge <name> Remove a character from the registry", true)
+        self:ChatMsg("  /em purge <name> Remove a character from the roster", true)
         self:ChatMsg("  /em keeplist Open the Keep List window", true)
         self:ChatMsg("  /em vendorw Open the vendor whitelist window", true)
         self:ChatMsg("  /em gb Open the guild storage blacklist window", true)
         self:ChatMsg("  /em charb Open the character blacklist window", true)
         self:ChatMsg("  /em ie Open the Import/Export window", true)
+        self:ChatMsg("  /em wizard Open the Storage Setup Wizard", true)
         self:ChatMsg("  /em help Show this list", true)
     else
         self:ToggleDashboard()
@@ -1059,6 +1075,7 @@ function EmpireManager:UpdateEscBehavior()
         "EmpireManagerVendorlistWindow",
         "EmpireManagerGuildBlacklistWindow",
         "EmpireManagerCharBlacklistWindow",
+        "EmpireManagerWizardFrame",
     }
     local enabled = self.db.global.options.escToClose
     if enabled then
@@ -1335,6 +1352,7 @@ EmpireManager.CLAMPED_FRAMES = {
     "EmpireManagerSidecar",
     "EmpireManagerStorageDialog",
     "EmpireManagerIOFrame",
+    "EmpireManagerWizardFrame",
     "EmpireManagerTriageFrame",
     "EmpireManagerMailDialog",
     "EmpireManagerKeeplistWindow",
@@ -1387,7 +1405,7 @@ function EmpireManager:HintOpenableContainers()
 end
 
 function EmpireManager:BAG_UPDATE_DELAYED()
-    -- Mark bag scan cache stale — RunTriageAsync will re-scan on next call.
+    -- Mark bag scan cache stale - RunTriageAsync will re-scan on next call.
     self._bagsDirty = true
 
     -- Re-check openable containers so freshly looted chests get announced.
@@ -1420,6 +1438,13 @@ function EmpireManager:BAG_UPDATE_DELAYED()
         self._bagRefreshTimer = nil
         self:SendMessage("EM_TRIAGE_REFRESH")
     end)
+
+    -- While the bank is open, rescan capacity so the Storage tab tracks
+    -- deposits/withdrawals live. Cheap (~600 reads), runs at most once per
+    -- BAG_UPDATE_DELAYED event (already coalesced by the client).
+    if self.bankIsOpen then
+        self:RefreshBankCapacity()
+    end
 end
 
 function EmpireManager:PLAYER_GUILD_UPDATE()
@@ -1442,10 +1467,85 @@ function EmpireManager:TRADE_SKILL_SHOW()
 
     -- Snapshot per-expansion skill breakdown for the open profession
     self:SnapshotExpansionSkills(entry)
+
+    self:RefreshAfterProfessionChange(guid)
+end
+
+-- Build a stable signature of the current GetProfessions() result.
+-- Used to skip redundant snapshots when SKILL_LINES_CHANGED fires spuriously.
+local function ProfessionSignature()
+    local parts = {}
+    local prof1, prof2 = GetProfessions()
+    for _, idx in pairs({ prof1, prof2 }) do
+        if idx then
+            local name = GetProfessionInfo(idx)
+            if name then
+                parts[#parts + 1] = name
+            end
+        end
+    end
+    table.sort(parts)
+    return table.concat(parts, "|")
+end
+
+-- SKILL_LINES_CHANGED catches profession unlearn (no tradeskill window opens).
+-- The event also fires on learn, level-up, and other skill changes, so we cheap-
+-- compare a profession-name signature to skip redundant work.
+function EmpireManager:SKILL_LINES_CHANGED()
+    local guid = self.playerGUID
+    local entry = self.db.global.registry[guid]
+    if not entry then
+        return
+    end
+    local sig = ProfessionSignature()
+    if sig == self._lastProfSignature then
+        return
+    end
+    self._lastProfSignature = sig
+
+    self:SnapshotProfessions(entry)
+    self:RefreshAfterProfessionChange(guid)
+end
+
+-- Refresh UIs that depend on entry.professions. Called from TRADE_SKILL_SHOW
+-- and SKILL_LINES_CHANGED so the Auto button + dashboard prof tags update
+-- without a /reload.
+function EmpireManager:RefreshAfterProfessionChange(guid)
+    if EmpireManagerSidecar and EmpireManagerSidecar:IsShown() and self.sidecarGUID == guid then
+        EmpireManagerSidecar:Populate(guid)
+    end
+    if self.RefreshVisibleRows then
+        self:RefreshVisibleRows()
+    end
 end
 
 function EmpireManager:BANKFRAME_OPENED()
     self.bankIsOpen = true
+
+    -- Snapshot warband bank gold (account-level, shared across all alts).
+    -- Only snapshot when the warband bank is actually accessible: any warband
+    -- container (12-16) with slots, or an explicit AccountBanker interaction.
+    local warbandAccessible = false
+    if
+        C_PlayerInteractionManager
+        and C_PlayerInteractionManager.IsInteractingWithNpcOfType
+        and C_PlayerInteractionManager.IsInteractingWithNpcOfType(Enum.PlayerInteractionType.AccountBanker)
+    then
+        warbandAccessible = true
+    else
+        for bag = 12, 16 do
+            if (C_Container.GetContainerNumSlots(bag) or 0) > 0 then
+                warbandAccessible = true
+                break
+            end
+        end
+    end
+    if warbandAccessible and C_Bank and C_Bank.FetchDepositedMoney and Enum and Enum.BankType then
+        local wbGold = C_Bank.FetchDepositedMoney(Enum.BankType.Account)
+        if wbGold then
+            self.db.global.warbandGold = wbGold
+        end
+    end
 
     -- Refresh triage tab visibility + deposit button immediately so the UI
     -- reacts without waiting for the capacity snapshot chain to finish.
@@ -1537,7 +1637,7 @@ function EmpireManager:BANKFRAME_OPENED()
             return
         end
 
-        -- All slots scanned — write results
+        -- All slots scanned - write results
         for _, data in pairs(accum) do
             if data.type == "charbank" then
                 cap.charbank[guid][data.tabIdx] = { total = data.total, used = data.used }
@@ -1585,7 +1685,7 @@ function EmpireManager:BANKFRAME_OPENED()
         if not selfRef._bankUpgradeHintShown then
             selfRef._bankUpgradeHintShown = true
             local hints = {}
-            -- Character bank tabs (containers 6-11) — skip in warband-only mode
+            -- Character bank tabs (containers 6-11) - skip in warband-only mode
             if not selfRef:IsWarbandBankOnly() then
                 local unpurchasedChar = 0
                 for tabIdx = 1, 6 do
@@ -1622,6 +1722,71 @@ function EmpireManager:BANKFRAME_OPENED()
     end
 
     ProcessChunk()
+end
+
+-- Lightweight live rescan of character + warband bank capacity. Synchronous;
+-- runs only while the bank is open. ~600 cheap C_Container reads, sub-ms.
+-- Used to keep Storage tab fill levels in sync with deposits/withdrawals
+-- without waiting for the next bank open.
+function EmpireManager:RefreshBankCapacity()
+    if not self.bankIsOpen then
+        return
+    end
+    local guid = self.playerGUID
+    local cap = self.db.global.storageCapacity
+    if not cap.charbank[guid] then
+        cap.charbank[guid] = {}
+    end
+
+    -- Character bank tabs (container IDs 6-11)
+    for tabIdx = 1, 6 do
+        local bag = tabIdx + 5
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        if numSlots > 0 then
+            local used = 0
+            for slot = 1, numSlots do
+                if C_Container.GetContainerItemInfo(bag, slot) then
+                    used = used + 1
+                end
+            end
+            cap.charbank[guid][tabIdx] = { total = numSlots, used = used }
+        end
+    end
+
+    -- Warband bank tabs (container IDs 12-16)
+    local wbIdx = 0
+    for bag = 12, 16 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        if numSlots > 0 then
+            wbIdx = wbIdx + 1
+            local used = 0
+            for slot = 1, numSlots do
+                if C_Container.GetContainerItemInfo(bag, slot) then
+                    used = used + 1
+                end
+            end
+            cap.warbandbank[wbIdx] = { total = numSlots, used = used }
+        end
+    end
+
+    -- Roll up totals onto the registry entry (used by dashboard "free/total").
+    local freeBank, totalBank = 0, 0
+    for _, tabData in pairs(cap.charbank[guid] or {}) do
+        local t = tabData.total or 0
+        freeBank = freeBank + t - (tabData.used or 0)
+        totalBank = totalBank + t
+    end
+    local entry = self.db.global.registry[guid]
+    if entry then
+        entry.freeBankSlots = freeBank
+        entry.totalBankSlots = totalBank
+    end
+
+    -- Repaint the Storage tab if it's the active page.
+    local frame = EmpireManagerFrame
+    if frame and frame.StoragePage and frame.StoragePage:IsShown() and frame.StoragePage.Refresh then
+        frame.StoragePage:Refresh()
+    end
 end
 
 function EmpireManager:BANKFRAME_CLOSED()
@@ -1698,7 +1863,7 @@ function EmpireManager:GUILDBANK_UPDATE_TABS()
     self:SnapshotGuildBank()
 end
 
--- Idempotent guild bank snapshot — only runs once per open.
+-- Idempotent guild bank snapshot - only runs once per open.
 -- Queries each tab sequentially (waiting for GUILDBANKBAGSLOTS_CHANGED) so
 -- item links are actually loaded before we count used slots. Without the
 -- query, only the currently-visible tab reports data and all others read 0%.
@@ -1727,7 +1892,7 @@ function EmpireManager:SnapshotGuildBank()
     -- Build the list of viewable purchased tabs. A tab is purchased only when it has
     -- a non-empty name (numSlots is unreliable: returns bogus 100000 for purchased
     -- tabs and sometimes non-zero for unpurchased ones). isViewable filters out tabs
-    -- this character lacks permission to see — querying those triggers "You don't
+    -- this character lacks permission to see - querying those triggers "You don't
     -- have permission" spam and yields bogus 0/98 capacity data that would overwrite
     -- a valid snapshot taken from a character with full access.
     local purchasedTabs = {}
@@ -1956,13 +2121,25 @@ end
 function EmpireManager:PLAYER_ENTERING_WORLD()
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
-    if not entry then return end
+    if not entry then
+        return
+    end
 
     -- Trust the game over imported/edited values: level can be wrong (typo, post-import
     -- ding, or out-of-date import). Overwrite unconditionally, even if smaller.
     local liveLevel = UnitLevel("player")
     if liveLevel and liveLevel > 0 then
         entry.level = liveLevel
+    end
+
+    -- One-time hint: registry has chars but no storage rules yet.
+    if not self.db.global.wizardHintSeen and not self.db.global.wizardSeen then
+        local hasRules = (#(self.db.global.storageAssignments or {})) > 0
+        local hasChars = next(self.db.global.registry) ~= nil
+        if hasChars and not hasRules then
+            self:ChatMsg("|cffffd100[EmpireManager]|r No storage rules yet. Run |cffffd100/em wizard|r to get started.", true)
+            self.db.global.wizardHintSeen = true
+        end
     end
 
     -- Snapshot location for global registry
@@ -2045,7 +2222,9 @@ end
 
 function EmpireManager:RestoreTimePlayedChatFrames()
     local frames = self._silentTimePlayedFrames
-    if not frames then return end
+    if not frames then
+        return
+    end
     for _, f in ipairs(frames) do
         if f and f.RegisterEvent then
             f:RegisterEvent("TIME_PLAYED_MSG")
@@ -2235,11 +2414,11 @@ StaticPopupDialogs["EM_WIPE_CONFIRM"] = {
 function EmpireManager:ConfirmWipe(target)
     local text
     if target == "chars" then
-        text = "Wipe the entire character registry?\n\n|cffff4444This cannot be undone.|r"
+        text = "Wipe the entire character roster?\n\n|cffff4444This cannot be undone.|r"
     elseif target == "rules" then
-        text = "Wipe all storage rules?\n\n|cffff4444This cannot be undone.|r"
+        text = "Wipe all Storage Rules?\n\n|cffff4444This cannot be undone.|r"
     elseif target == "all" then
-        text = "Wipe |cffff4444both|r storage rules and the character registry?\n\n|cffff4444This cannot be undone.|r"
+        text = "Wipe |cffff4444both|r Storage Rules and the Character Roster?\n\n|cffff4444This cannot be undone.|r"
     else
         return
     end
@@ -2252,11 +2431,11 @@ end
 function EmpireManager:PerformWipe(target)
     if target == "chars" then
         self.db.global.registry = {}
-        self:ChatMsg("|cffff4444Wiped character registry.|r", true)
+        self:ChatMsg("|cffff4444Wiped Character Roster.|r", true)
         self:SendMessage("EM_DASHBOARD_REFRESH")
     elseif target == "rules" then
         self.db.global.storageAssignments = {}
-        self:ChatMsg("|cffff4444Wiped storage rules.|r", true)
+        self:ChatMsg("|cffff4444Wiped Storage Rules.|r", true)
         self:InvalidateStorageCache()
         if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
             EmpireManagerFrame.StoragePage:Refresh()
@@ -2264,7 +2443,7 @@ function EmpireManager:PerformWipe(target)
     elseif target == "all" then
         self.db.global.storageAssignments = {}
         self.db.global.registry = {}
-        self:ChatMsg("|cffff4444Wiped all storage rules and character registry.|r", true)
+        self:ChatMsg("|cffff4444Wiped all Storage Rules and Character Roster.|r", true)
         self:InvalidateStorageCache()
         self:SendMessage("EM_DASHBOARD_REFRESH")
         if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
@@ -2283,10 +2462,10 @@ function EmpireManager:BuildPurgeConfirmText(guid)
     local realm = entry.realm or "?"
     local deps = self:GetDependentAssignments(guid)
     local depCount = #deps
-    local lines = { string.format("Remove %s - %s from roster?", coloredName, realm) }
+    local lines = { string.format("Remove %s - %s from Character Roster?", coloredName, realm) }
     if depCount > 0 then
         lines[#lines + 1] = string.format(
-            "\n|cffff8800%d storage rule%s|r reference this character and will be |cffff4444DELETED|r:",
+            "\n|cffff8800%d Storage Rule%s|r reference this character and will be |cffff4444DELETED|r:",
             depCount,
             depCount == 1 and "" or "s"
         )
@@ -2334,7 +2513,7 @@ function EmpireManager:PurgeCharacter(charName)
     end
 
     if #found == 0 then
-        self:ChatMsg(string.format("No character named '%s' found in registry.", charName), true)
+        self:ChatMsg(string.format("No character named '%s' found in roster.", charName), true)
         return
     end
 
@@ -2415,7 +2594,7 @@ end
 --   Zarenna;Silvermoon;Mage;Blood Elf;Horde;80;MyGuild;620;Arcane;Alchemy:300/300[Classic=75/300|Midnight=150/150],Herbalism:150/300
 --
 -- Only seeds fields that are missing or outdated. Never overwrites gold, bags,
--- assignments — those only come from in-game snapshots.
+-- assignments - those only come from in-game snapshots.
 function EmpireManager:ImportRegistryFromText(text, autoAssign)
     if not text or text:match("^%s*$") then
         return 0, "No text to import"
@@ -2494,6 +2673,12 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
             if ilvl and (ilvl < 0 or ilvl > 999) then
                 ilvl = nil
             end
+            -- Cap free-text fields to prevent UI breakage from oversized imports
+            if #name > 32 then name = name:sub(1, 32) end
+            if #realm > 64 then realm = realm:sub(1, 64) end
+            if #race > 32 then race = race:sub(1, 32) end
+            if #spec > 32 then spec = spec:sub(1, 32) end
+            if #guild > 64 then guild = guild:sub(1, 64) end
 
             if name ~= "" and realm ~= "" then
                 -- Parse professions: "Alchemy:150/300[Classic=75/300|Midnight=150/150],Herbalism:100/300"
@@ -2529,10 +2714,15 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                             skillStr, maxStr = "", ""
                         end
                         if profName and profName ~= "" then
+                            if #profName > 32 then profName = profName:sub(1, 32) end
+                            local pSkill = tonumber(skillStr) or 0
+                            local pMax = tonumber(maxStr) or 0
+                            if pSkill < 0 or pSkill > 1000 then pSkill = 0 end
+                            if pMax < 0 or pMax > 1000 then pMax = 0 end
                             local profEntry = {
                                 name = profName,
-                                skill = tonumber(skillStr) or 0,
-                                maxSkill = tonumber(maxStr) or 0,
+                                skill = pSkill,
+                                maxSkill = pMax,
                             }
                             -- Parse per-expansion tiers from bracket: [TierName=skill/max,...]
                             -- Accepts ',' (current), ';' and '|' (backward compatibility).
@@ -2565,11 +2755,15 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                                             end
                                             local expID = expLookup[tName:lower()]
                                             if tName ~= "" and expID then
+                                                local tSkillN = tonumber(tSkill) or 0
+                                                local tMaxN = tonumber(tMax) or 0
+                                                if tSkillN < 0 or tSkillN > 1000 then tSkillN = 0 end
+                                                if tMaxN < 0 or tMaxN > 1000 then tMaxN = 0 end
                                                 expSkills[#expSkills + 1] = {
                                                     expansionID = expID,
                                                     expansionName = tName,
-                                                    skill = tonumber(tSkill) or 0,
-                                                    maxSkill = tonumber(tMax) or 0,
+                                                    skill = tSkillN,
+                                                    maxSkill = tMaxN,
                                                 }
                                             end
                                         end

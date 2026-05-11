@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.6] - 2026-05-11
+
+### Added
+
+- Storage Setup Wizard: new guided flow to bulk-create storage rules from templates (self banker, guild bank, warband bank, stash for gear and recipes). Includes per-template Review summary, Clear-existing toggle, and an option to route shared professions to the highest-skill character.
+- Roster: warband bank gold is now tracked and folded into the Roster Info total.
+
+### Changed
+
+- Options panel slash-command list synced with the About tab and `/em help`.
+- Vendor and Disenchant threshold sliders show "Disabled" at 0 and drop the always-zero copper unit at other values.
+- Storage tab preserves scroll position across rebuilds and jumps to the first imported rule.
+- Storage tab capacity refreshes live as banks are visited.
+- Sidecar refreshes on profession learn/unlearn; Auto button simplified.
+
+### Fixed
+
+- Import/Export hardened against malformed data.
+- Triage tooltip cache no longer stores empty results.
+
 ## [0.3.5] - 2026-05-05
 
 ### Changed

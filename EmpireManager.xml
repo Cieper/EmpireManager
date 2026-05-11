@@ -277,11 +277,24 @@
                             <Color r="0.7" g="0.7" b="0.7"/>
                         </PushedTexture>
                     </Button>
-                    <!-- Add Rule icon button (left of IO) -->
-                    <Button parentKey="AddButton">
+                    <!-- Wand icon button (left of IO) -->
+                    <Button parentKey="WandButton">
                         <Size x="24" y="24"/>
                         <Anchors>
                             <Anchor point="RIGHT" relativeKey="$parent.IEButton"
+                                    relativePoint="LEFT" x="-8" y="0"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\wand"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\wand" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\wand">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+                    <!-- Add Rule icon button (left of Wand) -->
+                    <Button parentKey="AddButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="RIGHT" relativeKey="$parent.WandButton"
                                     relativePoint="LEFT" x="-8" y="0"/>
                         </Anchors>
                         <NormalTexture file="Interface\AddOns\EmpireManager\Textures\add"/>
@@ -854,6 +867,71 @@
             <OnDragStart>self:StartMoving()</OnDragStart>
             <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
         </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Storage Setup Wizard (PortraitFrame style, mirrors Sidecar)        -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerWizardFrame"
+           inherits="PortraitFrameTemplate"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true">
+        <Size x="540" y="500"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Frames>
+            <!-- Step name (under the title bar) -->
+            <Frame parentKey="StepBar">
+                <Size y="20"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="8" y="-26"/>
+                    <Anchor point="TOPRIGHT" x="-8" y="-26"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString parentKey="StepText" inherits="GameFontNormalMed1"
+                                    justifyH="CENTER" maxLines="1">
+                            <Anchors>
+                                <Anchor point="LEFT"/>
+                                <Anchor point="RIGHT"/>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+
+            <!-- Inset border around body content (Collections-style) -->
+            <Frame parentKey="Inset" useParentLevel="true" inherits="CollectionsBackgroundTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-50"/>
+                    <Anchor point="BOTTOMRIGHT" x="-4" y="40"/>
+                </Anchors>
+            </Frame>
+
+            <!-- Body: where each step renders its widgets (sits inside the inset) -->
+            <Frame parentKey="Body">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="20" y="-62"/>
+                    <Anchor point="BOTTOMRIGHT" x="-20" y="48"/>
+                </Anchors>
+            </Frame>
+
+            <!-- Bottom buttons: [Back]   [Cancel]  [Next/Finish] -->
+            <Button parentKey="BackButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="24"/>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" x="14" y="10"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="NextButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="24"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-14" y="10"/>
+                </Anchors>
+            </Button>
+        </Frames>
     </Frame>
 
     <!-- ================================================================== -->

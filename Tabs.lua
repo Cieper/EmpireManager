@@ -27,46 +27,52 @@ function EmpireManager:ExportStorageAssignments()
         "# category;type;tabs;char;guild;expansions;subcategories",
     }
     for _, asn in ipairs(assignments) do
-        local tabStr = ""
-        if asn.tabs and #asn.tabs > 0 then
-            local parts = {}
-            for _, t in ipairs(asn.tabs) do
-                parts[#parts + 1] = tostring(t)
+        if type(asn) == "table" then
+            local tabStr = ""
+            if type(asn.tabs) == "table" and #asn.tabs > 0 then
+                local parts = {}
+                for _, t in ipairs(asn.tabs) do
+                    parts[#parts + 1] = tostring(t)
+                end
+                tabStr = table.concat(parts, ",")
             end
-            tabStr = table.concat(parts, ",")
-        end
 
-        local charStr = ""
-        if asn.type ~= "guildbank" and asn.char and asn.char ~= "" then
-            charStr = guidToName[asn.char] or asn.char
-        end
-
-        local guildStr = asn.guild or ""
-
-        local expStr = ""
-        if asn.expansions and #asn.expansions > 0 then
-            local parts = {}
-            for _, eid in ipairs(asn.expansions) do
-                parts[#parts + 1] = tostring(eid)
+            local charStr = ""
+            if asn.type ~= "guildbank" and asn.char and asn.char ~= "" then
+                charStr = guidToName[asn.char] or tostring(asn.char)
             end
-            expStr = table.concat(parts, ",")
-        end
 
-        local subcatStr = ""
-        if asn.subcategories and #asn.subcategories > 0 then
-            subcatStr = table.concat(asn.subcategories, ",")
-        end
+            local guildStr = type(asn.guild) == "string" and asn.guild or ""
 
-        lines[#lines + 1] = string.format(
-            "%s;%s;%s;%s;%s;%s;%s",
-            asn.profession or "",
-            asn.type or "",
-            tabStr,
-            charStr,
-            guildStr,
-            expStr,
-            subcatStr
-        )
+            local expStr = ""
+            if type(asn.expansions) == "table" and #asn.expansions > 0 then
+                local parts = {}
+                for _, eid in ipairs(asn.expansions) do
+                    parts[#parts + 1] = tostring(eid)
+                end
+                expStr = table.concat(parts, ",")
+            end
+
+            local subcatStr = ""
+            if type(asn.subcategories) == "table" and #asn.subcategories > 0 then
+                local parts = {}
+                for _, sc in ipairs(asn.subcategories) do
+                    parts[#parts + 1] = tostring(sc)
+                end
+                subcatStr = table.concat(parts, ",")
+            end
+
+            lines[#lines + 1] = string.format(
+                "%s;%s;%s;%s;%s;%s;%s",
+                tostring(asn.profession or ""),
+                tostring(asn.type or ""),
+                tabStr,
+                charStr,
+                guildStr,
+                expStr,
+                subcatStr
+            )
+        end
     end
     return table.concat(lines, "\n") .. "\n"
 end
@@ -87,7 +93,7 @@ function EmpireManager:ImportStorageAssignments(text)
 
     local readyRules = {}
     local unresolvedRules = {}
-    local errors = {}
+    local skippedCount = 0
 
     for line in text:gmatch("[^\r\n]+") do
         -- Skip comments and blanks
@@ -106,36 +112,120 @@ function EmpireManager:ImportStorageAssignments(text)
             local expStr = parts[6] or ""
             local subcatStr = parts[7] or ""
 
+            -- Cap free-text fields so a malformed export can't break the UI / chat
+            if #category > 32 then category = category:sub(1, 32) end
+            if #bankType > 32 then bankType = bankType:sub(1, 32) end
+            if #charStr > 96 then charStr = charStr:sub(1, 96) end
+            if #guildStr > 64 then guildStr = guildStr:sub(1, 64) end
+            if #tabStr > 64 then tabStr = tabStr:sub(1, 64) end
+            if #expStr > 128 then expStr = expStr:sub(1, 128) end
+            if #subcatStr > 256 then subcatStr = subcatStr:sub(1, 256) end
+
             -- Validate category (professions + storage categories)
             if not self.PROF_INFO_BY_KEY[category] then
-                errors[#errors + 1] = "Skipped unknown category: " .. category
+                skippedCount = skippedCount + 1
+                self:ChatMsg("Import warning: skipped unknown category '" .. category .. "'.", true)
             -- Validate bank type
             elseif bankType ~= "warbandbank" and bankType ~= "guildbank" and bankType ~= "charbank" then
-                errors[#errors + 1] = "Unknown bank type: " .. bankType
+                skippedCount = skippedCount + 1
+                self:ChatMsg(string.format(
+                    "Import warning: skipped rule '%s' - unknown bank type '%s'.",
+                    category, bankType
+                ), true)
             else
                 -- Parse tabs (valid: 1-7 for guild, 1-6 for charbank, 1-5 for warband)
                 local tabs = nil
                 if tabStr ~= "" then
                     tabs = {}
+                    local invalid = {}
                     local maxTab = (bankType == "charbank") and 6 or (bankType == "warbandbank") and 5 or 7
                     for t in tabStr:gmatch("[^,]+") do
                         local n = tonumber(t)
                         if n and n >= 1 and n <= maxTab then
                             tabs[#tabs + 1] = n
+                        else
+                            invalid[#invalid + 1] = t
                         end
                     end
-                    if #tabs == 0 then
+
+                    -- Drop tabs that don't exist on the destination (only when we
+                    -- have a capacity snapshot; absence of snapshot just means the
+                    -- bank hasn't been opened on this machine yet).
+                    local missing = {}
+                    if #tabs > 0 then
+                        local cap = self.db.global.storageCapacity or {}
+                        local capSection
+                        if bankType == "warbandbank" then
+                            capSection = cap.warbandbank
+                        elseif bankType == "guildbank" and guildStr ~= "" then
+                            capSection = cap.guildbank and cap.guildbank[guildStr]
+                        elseif bankType == "charbank" and charStr ~= "" then
+                            local guid = nameToGUID[charStr] or nameToGUID[charStr:lower()]
+                            if guid then
+                                capSection = cap.charbank and cap.charbank[guid]
+                            end
+                        end
+                        if capSection and next(capSection) then
+                            local kept = {}
+                            for _, n in ipairs(tabs) do
+                                if capSection[n] then
+                                    kept[#kept + 1] = n
+                                else
+                                    missing[#missing + 1] = tostring(n)
+                                end
+                            end
+                            tabs = kept
+                        end
+                    end
+
+                    if #invalid > 0 or #missing > 0 then
+                        local bankLabel = (bankType == "charbank") and "Character Bank"
+                            or (bankType == "warbandbank") and "Warband Bank"
+                            or "Guild Bank"
+                        local dest
+                        if bankType == "guildbank" and guildStr ~= "" then
+                            dest = bankLabel .. " <" .. guildStr .. ">"
+                        elseif bankType == "charbank" and charStr ~= "" then
+                            dest = bankLabel .. " (" .. charStr .. ")"
+                        else
+                            dest = bankLabel
+                        end
+                        local dropped = {}
+                        if #invalid > 0 then
+                            dropped[#dropped + 1] = "invalid: " .. table.concat(invalid, ",")
+                        end
+                        if #missing > 0 then
+                            dropped[#dropped + 1] = "not purchased: " .. table.concat(missing, ",")
+                        end
+                        if #tabs == 0 then
+                            tabs = nil
+                            self:ChatMsg(string.format(
+                                "Import warning: %s rule '%s' had no usable tabs (%s); using AnyTab.",
+                                dest, category, table.concat(dropped, "; ")
+                            ), true)
+                        else
+                            local nDropped = #invalid + #missing
+                            self:ChatMsg(string.format(
+                                "Import warning: %s rule '%s' dropped %d tab%s (%s).",
+                                dest, category, nDropped, nDropped == 1 and "" or "s", table.concat(dropped, "; ")
+                            ), true)
+                        end
+                    elseif #tabs == 0 then
                         tabs = nil
                     end
                 end
 
-                -- Parse expansions (valid: 0-11 matching EXPANSION_DISPLAY)
+                -- Parse expansions (validate against EXPANSION_DISPLAY)
                 local expansions = nil
                 if expStr ~= "" then
+                    local validExpIDs = {}
+                    for _, exp in ipairs(self.EXPANSION_DISPLAY) do
+                        validExpIDs[exp.expansionID] = true
+                    end
                     expansions = {}
                     for e in expStr:gmatch("[^,]+") do
                         local n = tonumber(e)
-                        if n and n >= 0 and n <= 11 then
+                        if n and validExpIDs[n] then
                             expansions[#expansions + 1] = n
                         end
                     end
@@ -197,7 +287,11 @@ function EmpireManager:ImportStorageAssignments(text)
                         end
                         readyRules[#readyRules + 1] = rule
                     else
-                        unresolvedRules[#unresolvedRules + 1] = rule
+                        skippedCount = skippedCount + 1
+                        self:ChatMsg(string.format(
+                            "Import warning: skipped guildbank rule '%s' - unknown guild <%s>.",
+                            category, guildStr ~= "" and guildStr or "?"
+                        ), true)
                     end
                 elseif charStr == "" then
                     unresolvedRules[#unresolvedRules + 1] = rule
@@ -207,21 +301,25 @@ function EmpireManager:ImportStorageAssignments(text)
                         rule.char = guid
                         readyRules[#readyRules + 1] = rule
                     else
-                        unresolvedRules[#unresolvedRules + 1] = rule
+                        skippedCount = skippedCount + 1
+                        self:ChatMsg(string.format(
+                            "Import warning: skipped charbank rule '%s' - unknown character (%s).",
+                            category, charStr
+                        ), true)
                     end
                 end
             end
         end
     end
 
-    return readyRules, unresolvedRules, (#errors > 0 and table.concat(errors, "\n") or nil)
+    return readyRules, unresolvedRules, nil, skippedCount
 end
 
 -- Order-insensitive set comparison for expansions/subcategories.
 -- Matches the UI dedup behaviour (OpenStorageDialog).
 local function setsEqual(a, b)
-    a = a or {}
-    b = b or {}
+    if type(a) ~= "table" then a = {} end
+    if type(b) ~= "table" then b = {} end
     if #a ~= #b then
         return false
     end
@@ -250,7 +348,7 @@ function EmpireManager:ApplyImportedRules(rules)
         rule._origChar = nil
         rule._origGuild = nil
 
-        -- Duplicate check — matches the UI rule: same category + destination = dup,
+        -- Duplicate check - matches the UI rule: same category + destination = dup,
         -- regardless of tab list (set-based for expansions/subcategories).
         local isDupe = false
         for _, existing in ipairs(assignments) do
@@ -566,8 +664,9 @@ function EMAboutPageMixin:Refresh()
         { cmd = "/em config", desc = "Configure the current character" },
         { cmd = "/em triage", desc = "Open Bag Triage overlay" },
         { cmd = "/em ie", desc = "Open the Import / Export window" },
+        { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
         { cmd = "/em options", desc = "Open the Options panel" },
-        { cmd = "/em purge <name>", desc = "Remove a character from the registry" },
+        { cmd = "/em purge <name>", desc = "Remove a character from the roster" },
         { cmd = "/em keeplist", desc = "Open the Keep List window" },
         { cmd = "/em vendorw", desc = "Open the vendor whitelist window" },
         { cmd = "/em gb", desc = "Open the guild storage blacklist window" },
@@ -597,18 +696,39 @@ end
 -- MAP PAGE MIXIN
 -------------------------------------------------------------------------------
 
--- Map column definitions
+-- Map column definitions. `sortKey` enables clickable header sort.
 local MAP_COLUMNS = {
-    { key = "name", width = 130, label = "Name", justify = "LEFT", padLeft = 8 },
-    { key = "zone", width = 170, label = "Zone", justify = "LEFT", padLeft = 8 },
-    { key = "subZone", width = 200, label = "SubZone", justify = "LEFT", padLeft = 8 },
-    { key = "seen", width = 100, label = "Last Seen", justify = "RIGHT", padRight = 16 },
+    { key = "name", width = 130, label = "Name", justify = "LEFT", padLeft = 8, sortKey = "name" },
+    { key = "zone", width = 170, label = "Zone", justify = "LEFT", padLeft = 8, sortKey = "zone" },
+    { key = "subZone", width = 200, label = "SubZone", justify = "LEFT", padLeft = 8, sortKey = "subZone" },
+    { key = "seen", width = 100, label = "Last Seen", justify = "RIGHT", padRight = 16, sortKey = "seen" },
     { key = "coords", width = 110, label = "Coords", justify = "CENTER" },
+}
+
+-- Sort key functions per column. Tiebreak handled by caller (name asc).
+local MAP_SORT_KEYS = {
+    name = function(e)
+        return (e.name or ""):lower()
+    end,
+    zone = function(e)
+        return (e.zone or ""):lower()
+    end,
+    subZone = function(e)
+        return (e.subZone or ""):lower()
+    end,
+    seen = function(e)
+        return e.lastSeen or 0
+    end,
 }
 
 function EMMapPageMixin:OnLoad()
     self.ScrollBox = self.Inset.ScrollBox
     self.ScrollBar = self.Inset.ScrollBar
+
+    -- Default sort: first column (name), ascending
+    self.sortColumn = "name"
+    self.sortAscending = true
+    self.headerButtons = {}
 
     local view = CreateScrollBoxListLinearView()
     view:SetElementInitializer("EMMapRowTemplate", function(frame, elementData)
@@ -636,8 +756,52 @@ function EMMapPageMixin:InitMapHeaders()
         btn:SetText(col.label)
         btn:SetNormalFontObject(GameFontHighlightSmall)
         btn:GetFontString():SetJustifyH(col.justify)
-        btn:SetEnabled(false)
+        btn._text = btn:GetFontString()
+
+        if col.sortKey then
+            local arrow = btn:CreateTexture(nil, "OVERLAY")
+            arrow:SetAtlas("auctionhouse-ui-sortarrow", true)
+            arrow:SetPoint("LEFT", btn._text, "RIGHT", 1, 0)
+            arrow:Hide()
+            btn._arrow = arrow
+
+            local page = self
+            btn:SetScript("OnClick", function()
+                if page.sortColumn == col.sortKey then
+                    page.sortAscending = not page.sortAscending
+                else
+                    page.sortColumn = col.sortKey
+                    page.sortAscending = true
+                end
+                page:UpdateHeaderArrows()
+                page:Refresh()
+            end)
+
+            self.headerButtons[#self.headerButtons + 1] = { btn = btn, sortKey = col.sortKey }
+        else
+            btn:SetEnabled(false)
+        end
+
         xOffset = xOffset + col.width
+    end
+
+    self:UpdateHeaderArrows()
+end
+
+function EMMapPageMixin:UpdateHeaderArrows()
+    for _, h in ipairs(self.headerButtons) do
+        if self.sortColumn == h.sortKey then
+            h.btn._arrow:Show()
+            if self.sortAscending then
+                h.btn._arrow:SetTexCoord(0, 1, 1, 0)
+            else
+                h.btn._arrow:SetTexCoord(0, 1, 0, 1)
+            end
+            h.btn:SetNormalFontObject(GameFontHighlight)
+        else
+            h.btn._arrow:Hide()
+            h.btn:SetNormalFontObject(GameFontHighlightSmall)
+        end
     end
 end
 
@@ -646,20 +810,27 @@ function EMMapPageMixin:OnShow()
 end
 
 function EMMapPageMixin:Refresh()
-    -- Flat list of all characters sorted by zone then name
+    -- Flat list of all characters with a known zone
     local data = {}
     for guid, entry in pairs(EmpireManager.db.global.registry) do
         if entry.zone and entry.zone ~= "" then
             data[#data + 1] = { guid = guid, entry = entry }
         end
     end
+
+    local keyFn = MAP_SORT_KEYS[self.sortColumn] or MAP_SORT_KEYS.name
+    local asc = self.sortAscending
     table.sort(data, function(a, b)
-        local zA = (a.entry.zone or "Unknown"):lower()
-        local zB = (b.entry.zone or "Unknown"):lower()
-        if zA ~= zB then
-            return zA < zB
+        local kA = keyFn(a.entry)
+        local kB = keyFn(b.entry)
+        if kA == kB then
+            return (a.entry.name or ""):lower() < (b.entry.name or ""):lower()
         end
-        return (a.entry.name or ""):lower() < (b.entry.name or ""):lower()
+        if asc then
+            return kA < kB
+        else
+            return kA > kB
+        end
     end)
 
     -- Add index for row tracking
@@ -1215,7 +1386,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
     y = self:AddHeading(content, y, "Roster Overview", true)
 
     -- Row 1: Total | Max Level | Gold
-    local totalGold = EmpireManager:CalculateGrandTotals()
+    local totalGold, _, warbandGold = EmpireManager:CalculateGrandTotals()
     local playedText = EmpireManager:FormatPlaytime(totalPlayed) or "0h 0m"
     local colW = 220
 
@@ -1232,12 +1403,21 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         "no_level"
     )
     self._flowX = colW * 2
-    self:AddClickLabel(
-        content,
-        y,
-        string.format("|cffe8d9a8Gold:|r  |cffffff00%s|r", EmpireManager:FormatGold(totalGold)),
-        colW
-    )
+    local goldText = string.format("|cffe8d9a8Gold:|r  |cffffff00%s|r", EmpireManager:FormatGold(totalGold))
+    local goldBtn = self:AddClickLabel(content, y, goldText, colW)
+    if warbandGold and warbandGold > 0 then
+        local charGold = totalGold - warbandGold
+        goldBtn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+            GameTooltip:AddLine("Gold", 1, 0.82, 0)
+            GameTooltip:AddDoubleLine("Characters", EmpireManager:FormatGold(charGold), 1, 1, 1, 1, 1, 0)
+            GameTooltip:AddDoubleLine("Warband Bank", EmpireManager:FormatGold(warbandGold), 1, 1, 1, 1, 1, 0)
+            GameTooltip:Show()
+        end)
+        goldBtn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+    end
     self._flowX = nil
     y = y + LINE_HEIGHT
 
@@ -1686,7 +1866,7 @@ function EMRosterPageMixin:RenderStorageSection(content, y, profAssignments)
     row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
     row:SetSize(totalW, ROW_H)
 
-    local labelFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormalMed1")
+    local labelFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
     labelFS:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -TEXT_TOP_PAD)
     labelFS:SetWidth(LABEL_COL_W)
     labelFS:SetJustifyH("RIGHT")
@@ -1806,7 +1986,7 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                     GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
                     local cc = RAID_CLASS_COLORS[cEntry.class or ""] or NORMAL_FONT_COLOR
                     GameTooltip:AddLine(
-                        string.format("%s (%s) - %d", cEntry.name or "?", cEntry.realm or "?", cEntry.level or 0),
+                        string.format("%s - %s (%d)", cEntry.name or "?", cEntry.realm or "?", cEntry.level or 0),
                         cc.r,
                         cc.g,
                         cc.b
@@ -2110,6 +2290,19 @@ function EMRosterPageMixin:BuildBankContent(content, y)
     local cap = EmpireManager.db.global.storageCapacity or {}
     local guildBL = EmpireManager.db.global.guildBlacklist or {}
 
+    local function CharBankLabel(charEntry)
+        local base = EmpireManager:ClassColoredName(charEntry)
+        local realm = charEntry.realm
+        if not realm or realm == "" then
+            return base
+        end
+        local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[charEntry.class]
+        if color then
+            return string.format("%s|cff%02x%02x%02x - %s|r", base, color.r * 255, color.g * 255, color.b * 255, realm)
+        end
+        return base .. " - " .. realm
+    end
+
     -- Group assignments by bank destination
     local bankOrder, bankMap = {}, {}
     for _, asn in ipairs(assignments) do
@@ -2131,7 +2324,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             local charEntry = asn.char and EmpireManager.db.global.registry[asn.char]
             if charEntry then
                 bankKey = "charbank:" .. asn.char
-                bankLabel = EmpireManager:ClassColoredName(charEntry)
+                bankLabel = CharBankLabel(charEntry)
                 capSection = cap.charbank and cap.charbank[asn.char]
             end
         end
@@ -2162,7 +2355,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
                 local charEntry = EmpireManager.db.global.registry[charGuid]
                 if charEntry then
                     bankMap[key] = {
-                        label = EmpireManager:ClassColoredName(charEntry),
+                        label = CharBankLabel(charEntry),
                         assignments = {},
                         capSection = section,
                         charGuid = charGuid,
@@ -2260,15 +2453,9 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         if bank.charGuid and bank.charEntry then
             local btn = self:Track(CreateFrame("Button", nil, content))
             btn:SetAllPoints(headingFS)
-            local cGuid, cEntry = bank.charGuid, bank.charEntry
+            local cGuid = bank.charGuid
             btn:SetScript("OnClick", function()
                 EmpireManager:OpenSidecar(cGuid)
-            end)
-            btn:SetScript("OnEnter", function(self)
-                EmpireManager:ShowNameTooltip({ frame = self }, cEntry, "ANCHOR_CURSOR_RIGHT")
-            end)
-            btn:SetScript("OnLeave", function()
-                GameTooltip:Hide()
             end)
         end
 
@@ -2303,7 +2490,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             end
         end
 
-        local function renderTabRow(labelText, cats)
+        local function renderTabRow(labelText, cats, tabCap)
             local parts = {}
             for _, cat in ipairs(cats) do
                 local text
@@ -2331,8 +2518,8 @@ function EMRosterPageMixin:BuildBankContent(content, y)
                 parts[#parts + 1] = text
             end
             local ROW_H = 24
-            local LABEL_COL_W = 64 -- fixed column so "Any Tab:" / "Tab N:" colons line up
-            local TEXT_TOP_PAD = 5 -- align label baseline with first wrapped line
+            local LABEL_COL_W = 64
+            local TEXT_TOP_PAD = 5
             local cw = content:GetWidth()
             local totalW = (cw > 20 and cw or 740) - 20
 
@@ -2340,13 +2527,42 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
             row:SetSize(totalW, ROW_H)
 
-            local labelFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormalMed1")
+            local labelFS = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
             labelFS:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -TEXT_TOP_PAD)
             labelFS:SetWidth(LABEL_COL_W)
             labelFS:SetJustifyH("RIGHT")
             labelFS:SetJustifyV("TOP")
             labelFS:SetWordWrap(false)
             labelFS:SetText(labelText)
+
+            if tabCap and tabCap.total and tabCap.total > 0 then
+                local pct = math.floor((tabCap.used / tabCap.total) * 100)
+                local r, g, b
+                if pct >= 85 then
+                    r, g, b = 1.0, 0.2, 0.2
+                elseif pct >= 60 then
+                    r, g, b = 1.0, 0.8, 0.0
+                else
+                    r, g, b = 0.0, 0.8, 0.0
+                end
+                row:EnableMouse(true)
+                local tabLabelClean = labelText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub(":%s*$", "")
+                local catsText = table.concat(parts, ", ")
+                local slotsText = string.format("Slots: %d/%d (%d%%), %d free", tabCap.used, tabCap.total, pct, tabCap.total - tabCap.used)
+                row:SetScript("OnEnter", function(self)
+                    GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+                    GameTooltip:AddLine(bank.label, 1, 0.82, 0)
+                    GameTooltip:AddLine(tabLabelClean, 1, 1, 1)
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddLine(catsText, 1, 1, 1, true)
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddLine(slotsText, r, g, b)
+                    GameTooltip:Show()
+                end)
+                row:SetScript("OnLeave", function()
+                    GameTooltip:Hide()
+                end)
+            end
 
             local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
             fs:SetPoint("TOPLEFT", labelFS, "TOPRIGHT", 6, 0)
@@ -2356,7 +2572,6 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             fs:SetWordWrap(true)
             fs:SetText(table.concat(parts, ", "))
 
-            -- Grow row to fit wrapped text height (+ padding top & bottom).
             local contentH = math.max(fs:GetStringHeight(), labelFS:GetStringHeight())
             local finalH = math.max(ROW_H, contentH + TEXT_TOP_PAD + 2)
             row:SetHeight(finalH)
@@ -2364,7 +2579,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         end
 
         if #anyTab > 0 then
-            renderTabRow("|cffdaa520Any Tab:|r", anyTab)
+            renderTabRow("|cffdaa520Any Tab:|r", anyTab, nil)
         end
         local tabNums = {}
         for t in pairs(tabMap) do
@@ -2372,7 +2587,8 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         end
         table.sort(tabNums)
         for _, tabNum in ipairs(tabNums) do
-            renderTabRow("|cffdaa520Tab " .. tabNum .. ":|r", tabMap[tabNum])
+            local tabCap = bank.capSection and bank.capSection[tabNum]
+            renderTabRow("|cffdaa520Tab " .. tabNum .. ":|r", tabMap[tabNum], tabCap)
         end
     end
 
@@ -2714,7 +2930,11 @@ function EMStorageRowMixin:OnLoad()
         GameTooltip:AddLine(destText, 1, 1, 1, true)
         local fillText = f.FillFs:GetText()
         if fillText and fillText ~= "" and fillText ~= "No data" then
-            GameTooltip:AddLine("Slots: " .. fillText, f.FillFs:GetTextColor())
+            local suffix = ""
+            if d.tabData and d.tabData.total then
+                suffix = string.format(", %d free", d.tabData.total - (d.tabData.used or 0))
+            end
+            GameTooltip:AddLine("Slots: " .. fillText .. suffix, f.FillFs:GetTextColor())
         end
         if d.isOrphan then
             GameTooltip:AddLine(" ")
@@ -2870,7 +3090,7 @@ function EMStoragePageMixin:OnLoad()
                 frame.Text:SetWordWrap(true)
                 frame.Text:SetNonSpaceWrap(true)
                 if data.type == "empty_notice" then
-                    frame.Text:SetText("\nNo storage assignments configured yet. Click 'Add Rule' to create one.")
+                    frame.Text:SetText("\nNo storage assignments configured yet. Click 'Add Rule' to create one, or click the wand icon to use the Setup Wizard.")
                     frame.Text:SetTextColor(1, 1, 1)
                 else
                     frame.Text:SetText(data.text)
@@ -2908,7 +3128,7 @@ function EMStoragePageMixin:OnLoad()
         GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
         GameTooltip:AddLine("Import / Export", 1, 0.82, 0)
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("Import or export storage rules and character registry.", 1, 1, 1, true)
+        GameTooltip:AddLine("Import or export storage rules and character roster.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     ieBtn:SetScript("OnLeave", function()
@@ -2938,6 +3158,32 @@ function EMStoragePageMixin:OnLoad()
     self.AddButton:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+
+    -- Wand icon button: opens the Storage Setup Wizard (texture set in XML)
+    if self.WandButton then
+        EmpireManager:StyleIconButton(self.WandButton, 0.5)
+        self.WandButton:SetScript("OnClick", function()
+            local sd = EmpireManagerStorageDialog
+            if sd and sd:IsShown() then
+                sd:Hide()
+            end
+            local ie = EmpireManagerIOFrame
+            if ie and ie:IsShown() then
+                ie:Hide()
+            end
+            EmpireManager:OpenWizard()
+        end)
+        self.WandButton:SetScript("OnEnter", function(btn)
+            GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Storage Setup Wizard", 1, 0.82, 0)
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Quickly create Storage Rules from a template.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        self.WandButton:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+    end
 
     -- Column headers
     self:InitStorageHeaders()
@@ -3017,10 +3263,14 @@ function EMStoragePageMixin:Refresh()
         data[#data + 1] = { type = "notice", text = noticeText, height = noticeHeight }
     end
 
+    -- Preserve scroll position across rebuilds (live capacity refresh in
+    -- particular replaces the data provider without changing the rule list).
+    local savedOffset = self.ScrollBox:GetScrollPercentage()
+
     local dataProvider = CreateDataProvider(data)
     self.ScrollBox:SetDataProvider(dataProvider)
 
-    -- Scroll-follow after reorder
+    -- Scroll-follow after reorder wins over saved-offset restore.
     local scrollTo = EmpireManager._storageScrollToIdx
     EmpireManager._storageScrollToIdx = nil
     if scrollTo and scrollTo > 0 then
@@ -3036,11 +3286,17 @@ function EMStoragePageMixin:Refresh()
                 end
             end
         end)
+    elseif savedOffset and savedOffset >= 0 then
+        C_Timer.After(0, function()
+            if self.ScrollBox:GetDataProvider() then
+                self.ScrollBox:SetScrollPercentage(savedOffset)
+            end
+        end)
     end
 end
 
 -------------------------------------------------------------------------------
--- Storage Dialog (Modal — Add/Edit)
+-- Storage Dialog (Modal - Add/Edit)
 -------------------------------------------------------------------------------
 
 function EmpireManager:InitStorageDialog()
@@ -3901,29 +4157,36 @@ function EmpireManager:InitIOFrame()
                     statusParts[#statusParts + 1] = msg
                 end
             elseif section.type == "storage" then
-                local readyRules, unresolvedRules, errMsg = self:ImportStorageAssignments(section.text)
+                local readyRules, unresolvedRules, errMsg, parseSkipped =
+                    self:ImportStorageAssignments(section.text)
                 if errMsg and not readyRules then
-                    statusParts[#statusParts + 1] = "|cffff4444Storage: " .. errMsg .. "|r"
+                    self:ChatMsg("Storage import error: " .. errMsg, true)
+                    statusParts[#statusParts + 1] = "|cff88ccffStorage:|r |cffff4444failed|r"
                 else
                     if doReplace then
                         self.db.global.storageAssignments = {}
                     end
-                    local imp, skip = 0, 0
+                    local lenBefore = #(self.db.global.storageAssignments or {})
+                    local imp, dup = 0, 0
                     if readyRules and #readyRules > 0 then
-                        imp, skip = self:ApplyImportedRules(readyRules)
+                        imp, dup = self:ApplyImportedRules(readyRules)
                     end
+                    -- After a bulk import the prior scroll offset maps to a
+                    -- different region of the new list; jump to the first
+                    -- imported rule so the user lands on the new content.
+                    if imp > 0 then
+                        self._storageScrollToIdx = lenBefore + 1
+                    end
+                    local totalSkipped = (parseSkipped or 0) + dup
                     local parts = {}
                     if imp > 0 then
                         parts[#parts + 1] = string.format("|cff00cc00%d imported|r", imp)
                     end
-                    if skip > 0 then
-                        parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", skip)
+                    if totalSkipped > 0 then
+                        parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
                     end
                     if unresolvedRules and #unresolvedRules > 0 then
                         parts[#parts + 1] = string.format("|cffff8800%d unresolved|r", #unresolvedRules)
-                    end
-                    if errMsg then
-                        parts[#parts + 1] = "|cffff4444" .. errMsg .. "|r"
                     end
                     statusParts[#statusParts + 1] = "|cff88ccffStorage:|r "
                         .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")

@@ -285,7 +285,9 @@ end
 function EMCharacterRowMixin:ShowStorageTooltip()
     local entry = self._entry
     GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
-    GameTooltip:AddLine((entry.name or "?") .. " - Storage", 1, 1, 1)
+    EmpireManager:AddTooltipHeader(entry)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Storage", 1, 0.82, 0)
 
     local function colorForPct(pct)
         if pct >= 0.85 then
@@ -303,7 +305,7 @@ function EMCharacterRowMixin:ShowStorageTooltip()
         local pct = used / entry.totalBagSlots
         local r, g, b = colorForPct(pct)
         GameTooltip:AddDoubleLine(
-            "Bags",
+            "Bag",
             string.format("%d / %d  (%d%%)", used, entry.totalBagSlots, math.floor(pct * 100 + 0.5)),
             1,
             1,
@@ -313,19 +315,19 @@ function EMCharacterRowMixin:ShowStorageTooltip()
             b
         )
     else
-        GameTooltip:AddDoubleLine("Bags", "No data", 1, 1, 1, 0.5, 0.5, 0.5)
+        GameTooltip:AddDoubleLine("Bag", "No data", 1, 1, 1, 0.5, 0.5, 0.5)
     end
 
     if entry.totalBankSlots ~= nil then
         if entry.totalBankSlots == 0 then
-            GameTooltip:AddDoubleLine("Bank", "No tabs purchased", 1, 1, 1, 0.7, 0.7, 0.7)
+            GameTooltip:AddDoubleLine("Banks", "No tabs purchased", 1, 1, 1, 0.7, 0.7, 0.7)
         else
             local free = entry.freeBankSlots or 0
             local used = entry.totalBankSlots - free
             local pct = used / entry.totalBankSlots
             local r, g, b = colorForPct(pct)
             GameTooltip:AddDoubleLine(
-                "Bank",
+                "Banks",
                 string.format("%d / %d  (%d%%)", used, entry.totalBankSlots, math.floor(pct * 100 + 0.5)),
                 1,
                 1,
@@ -336,7 +338,7 @@ function EMCharacterRowMixin:ShowStorageTooltip()
             )
         end
     else
-        GameTooltip:AddDoubleLine("Bank", "No data (open bank)", 1, 1, 1, 0.5, 0.5, 0.5)
+        GameTooltip:AddDoubleLine("Banks", "No data (open bank)", 1, 1, 1, 0.5, 0.5, 0.5)
     end
 
     GameTooltip:Show()
@@ -357,7 +359,9 @@ function EMCharacterRowMixin:ShowProfTooltip()
     end
 
     GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
-    GameTooltip:AddLine((entry.name or "?") .. " - Professions", 1, 1, 1)
+    EmpireManager:AddTooltipHeader(entry)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Professions", 1, 0.82, 0)
     local profByName = {}
     if entry.professions then
         for _, p in ipairs(entry.professions) do
@@ -385,7 +389,9 @@ function EMCharacterRowMixin:ShowRoleTooltip()
     end
 
     GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
-    GameTooltip:AddLine((entry.name or "?") .. " - Roles", 1, 1, 1)
+    EmpireManager:AddTooltipHeader(entry)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Roles", 1, 0.82, 0)
     for _, display in ipairs(EmpireManager.ROLE_DISPLAY) do
         if entry.assignments[display.key] then
             GameTooltip:AddLine(
@@ -412,16 +418,7 @@ function EmpireManagerFrameMixin:OnLoad()
     -- Make draggable
     self:RegisterForDrag("LeftButton")
     self:SetScript("OnDragStart", self.StartMoving)
-    self:SetScript("OnDragStop", function(f)
-        f:StopMovingOrSizing()
-        if EmpireManager.db then
-            local left, top = f:GetLeft(), f:GetTop()
-            if left and top then
-                EmpireManager.db.global.uiStatus.left = left
-                EmpireManager.db.global.uiStatus.top = top
-            end
-        end
-    end)
+    self:SetScript("OnDragStop", self.StopMovingOrSizing)
 
     -- Tab system
     Mixin(self, TabSystemOwnerMixin)
@@ -442,7 +439,7 @@ function EmpireManagerFrameMixin:OnLoad()
             "Characters",
             "Your alt roster at a glance.",
             " ",
-            "Click a row to open the character config panel (roles, options, notes).",
+            "Click a row to open the Character config panel (roles, options, notes).",
             "Click column headers to sort. Click again to reverse.",
             "Hover Profession or Roles columns for details.",
             "Use the search box to filter by name, realm, guild, class, or profession. Separate words with spaces to AND them (e.g. 'eternal steam').",
@@ -497,7 +494,7 @@ function EmpireManagerFrameMixin:OnLoad()
                 "Characters grouped by assigned role.",
                 " ",
                 "Roles: Artisan, Auctioneer, Gatherer, Banker, Lockpicker, Zookeeper, PvPer.",
-                "Assign roles in the character config panel. Storage destinations require a Banker.",
+                "Assign roles in the Character config panel. Storage destinations require a Banker.",
             },
         },
     }
@@ -594,13 +591,7 @@ function EmpireManagerFrameMixin:OnLoad()
 end
 
 function EmpireManagerFrameMixin:OnShow()
-    -- Restore saved position
     if EmpireManager.db then
-        local pos = EmpireManager.db.global.uiStatus
-        if pos and pos.left and pos.top then
-            self:ClearAllPoints()
-            self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", pos.left, pos.top)
-        end
         -- ESC to close (db not available during OnLoad, so sync here every show)
         local idx = tIndexOf(UISpecialFrames, "EmpireManagerDashboard")
         if EmpireManager.db.global.options.escToClose then
@@ -614,14 +605,6 @@ function EmpireManagerFrameMixin:OnShow()
 end
 
 function EmpireManagerFrameMixin:OnHide()
-    -- Save position
-    if EmpireManager.db then
-        local left, top = self:GetLeft(), self:GetTop()
-        if left and top then
-            EmpireManager.db.global.uiStatus.left = left
-            EmpireManager.db.global.uiStatus.top = top
-        end
-    end
     if EmpireManagerSidecar and EmpireManagerSidecar:IsShown() then
         EmpireManager:CloseSidecar()
     end

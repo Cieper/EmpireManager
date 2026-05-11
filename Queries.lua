@@ -48,7 +48,7 @@ end
 -------------------------------------------------------------------------------
 
 -- Pure filter: returns a table of { [guid] = entry } matching filterState.
--- No UI calls — caller decides what to do with the result.
+-- No UI calls - caller decides what to do with the result.
 function EmpireManager:FilterRegistry(filterState)
     local filtered = {}
     local state = filterState
@@ -267,7 +267,7 @@ function EmpireManager:AutoAssignRoles(entry, guid)
 end
 
 -------------------------------------------------------------------------------
--- Banker Role Sync — auto-assign/remove Banker based on storage assignments
+-- Banker Role Sync - auto-assign/remove Banker based on storage assignments
 -------------------------------------------------------------------------------
 
 -- Sync Banker role for a character GUID based on whether any charbank or

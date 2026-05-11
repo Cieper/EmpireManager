@@ -24,7 +24,7 @@ function EmpireManager:OpenSidecar(guid)
 
     local entry = self.db.global.registry[guid]
     if not entry then
-        self:ChatMsg("Character not found in registry", true)
+        self:ChatMsg("Character not found in roster", true)
         return
     end
 
@@ -34,7 +34,7 @@ function EmpireManager:OpenSidecar(guid)
         f:Init()
         f._initialized = true
     end
-    -- Tab system must always re-init — XML TabSystem is fresh after /reload
+    -- Tab system must always re-init - XML TabSystem is fresh after /reload
     f:InitTabSystem()
 
     self.sidecarGUID = guid
@@ -193,12 +193,12 @@ function EMSidecarMixin:Init()
         panel:SetPoint("BOTTOMRIGHT", self.ContentArea, "BOTTOMRIGHT", -16, 12)
     end
 
-    -- Close button — PortraitFrameTemplate provides CloseButton
+    -- Close button - PortraitFrameTemplate provides CloseButton
     self.CloseButton:SetScript("OnClick", function()
         EmpireManager:CloseSidecar()
     end)
 
-    -- Notes edit box scripts — bound once; handlers resolve current entry via self._guid
+    -- Notes edit box scripts - bound once; handlers resolve current entry via self._guid
     local notesEdit = self.ContentArea.NotesEdit
     if notesEdit and notesEdit.EditBox then
         local editBox = notesEdit.EditBox
@@ -333,14 +333,14 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
     hdr:SetText("|cffffd100Select your character roles|r")
     y = y + LINE_HEIGHT + 6
 
-    -- Auto-assign button (always visible, disabled when professions unknown)
+    -- Auto button: rebuild Artisan/Gatherer prof selections to match the
+    -- character's actual professions. Always enabled - the operation is
+    -- idempotent and clicking it with no profs just clears stale selections.
     local autoBtn = self:Track(CreateFrame("Button", nil, content, "UIPanelButtonTemplate"))
     autoBtn:SetSize(80, 22)
     autoBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     autoBtn:SetText("Auto")
     local hasProfs = entry.professions and #entry.professions > 0
-    autoBtn:SetEnabled(hasProfs)
-    autoBtn:SetMotionScriptsWhileDisabled(true)
     autoBtn:SetScript("OnClick", function()
         EmpireManager:AutoAssignRoles(entry, guid)
         self:DeferredRefresh(entry, guid, isCurrentChar, "assignments")
@@ -352,7 +352,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
         if hasProfs then
             GameTooltip:AddLine("Detects professions and assigns Artisan/Gatherer roles.", 1, 1, 1, true)
         else
-            GameTooltip:AddLine("Log in on this character to detect professions.", 1, 0.5, 0.5, true)
+            GameTooltip:AddLine("No professions detected - clears any stale profession role selections.", 1, 1, 1, true)
         end
         GameTooltip:Show()
     end)

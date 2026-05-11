@@ -43,7 +43,7 @@ function EmpireManager:OnTriageOptionChanged()
 end
 
 -------------------------------------------------------------------------------
--- Frame Pool — reuse hidden frames instead of creating new ones each rebuild.
+-- Frame Pool - reuse hidden frames instead of creating new ones each rebuild.
 -- WoW frames cannot be garbage-collected; without pooling, every triage tab
 -- switch or refresh leaks frame objects and drives memory up over time.
 -------------------------------------------------------------------------------
@@ -880,7 +880,7 @@ end
 function EmpireManager:CreateTriageOverlay()
     local f = EmpireManagerTriageFrame
 
-    -- Tabs must always (re-)init — XML children are fresh after /reload
+    -- Tabs must always (re-)init - XML children are fresh after /reload
     self:InitTriageTabs(f)
 
     -- Guard: only create buttons/backdrop once (survives /reload)
@@ -1048,7 +1048,7 @@ function EmpireManager:CreateTriageOverlay()
     local btnW, btnH = 170, 24
 
     ---------------------------------------------------------------------------
-    -- Shared refresh button (AH-style icon) — dispatches to the active tab.
+    -- Shared refresh button (AH-style icon) - dispatches to the active tab.
     ---------------------------------------------------------------------------
     local refreshBtn = CreateFrame("Button", nil, f, "RefreshButtonTemplate")
     refreshBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -26)
@@ -1351,7 +1351,7 @@ function EmpireManager:GetDefaultTriageTab()
         return "guildbank"
     end
     if self.bankIsOpen then
-        -- Default to bags tab on bank open — bag triage is fast.
+        -- Default to bags tab on bank open - bag triage is fast.
         -- User can switch to bank/warband tab manually (avoids 770+ slot scan on open).
         return "bags"
     end
@@ -1367,7 +1367,7 @@ function EmpireManager:UpdateTriageTabButtons()
     local ids = f._triageTabIDs
     -- All 4 tabs are always visible. Each is enabled/disabled per context.
     -- Tab1 = Bags (always enabled)
-    -- Tab2 = Bank (char bank — enabled when a regular banker is open)
+    -- Tab2 = Bank (char bank - enabled when a regular banker is open)
     -- Tab3 = Warband Bank (enabled when a bank is open)
     -- Tab4 = Guild Bank (enabled when a guild bank is open)
 
@@ -1385,7 +1385,7 @@ function EmpireManager:UpdateTriageTabButtons()
         f.TabSystem:SetTabEnabled(tabID, enabled, nil)
         local tabBtn = f.TabSystem.tabs and f.TabSystem.tabs[tabID]
         if tabBtn and tabBtn.SetTooltipText then
-            -- NB: not `enabled and nil or reason` — that ternary returns reason in both branches.
+            -- NB: not `enabled and nil or reason` - that ternary returns reason in both branches.
             if enabled then
                 tabBtn:SetTooltipText(nil)
             else
@@ -1482,7 +1482,7 @@ function EmpireManager:SwitchTriageTab(tab)
         return
     end
 
-    -- First visit to this tab — trigger build
+    -- First visit to this tab - trigger build
     if isBags then
         self:RefreshTriageDisplay()
     else
@@ -1589,16 +1589,24 @@ function EmpireManager:_BuildBagTriageUI(results, savedOffset)
     local counts, vendorValue = self:GetTriageSummary(visibleResults)
 
     -- Cheap gate: count mismatch → definitely changed, skip the O(N) string build.
-    -- On count match, do the full fingerprint compare.
+    -- On count match, do the full fingerprint compare. Including itemName here
+    -- so a "" -> populated transition (uncached item names from a cold scan)
+    -- still forces a rebuild on the deferred 1.5s rescan.
     local nVisible = #visibleResults
     if nVisible == self._triageFingerprintCount then
         local fp = {}
         for i, r in ipairs(visibleResults) do
-            fp[i] = (r.item.itemID or 0) .. ":" .. (r.category or "") .. ":" .. (r.item.stackCount or 0)
+            fp[i] = (r.item.itemID or 0)
+                .. ":"
+                .. (r.category or "")
+                .. ":"
+                .. (r.item.stackCount or 0)
+                .. ":"
+                .. (r.item.itemName or "")
         end
         local fingerprint = table.concat(fp, "|")
         if fingerprint == self._triageFingerprint then
-            -- Results unchanged — just update button states without rebuilding UI
+            -- Results unchanged - just update button states without rebuilding UI
             if self.triageVendorBtn then
                 self.triageVendorBtn._hasVendor = counts[CAT_VENDOR] > 0
                 self.triageVendorBtn._vendorCount = counts[CAT_VENDOR]
@@ -1788,7 +1796,7 @@ function EmpireManager:_BuildBagTriageUI(results, savedOffset)
         local fs = TrackFs(AcquireFs(content))
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
-        fs:SetText("|cff00cc00Nothing to Route, Stash, or Vendor.|r")
+        fs:SetText("|cff00cc00Nothing to Route, Stash or Vendor.|r")
         y = y + 30
     end
 
@@ -1914,7 +1922,7 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     end
     row._clickBias = CLICK_BIAS
 
-    -- Item name (left) — cut before midpoint so there's a visible gap before the action text
+    -- Item name (left) - cut before midpoint so there's a visible gap before the action text
     nameFs:SetWidth(contentW * 0.5 - 12)
     local qc = ITEM_QUALITY_COLORS[result.item.quality]
     local nr, ng, nb = qc and qc.r or catInfo.r, qc and qc.g or catInfo.g, qc and qc.b or catInfo.b
@@ -2222,6 +2230,8 @@ function EmpireManager:_BuildBankTriageUI(results, savedOffset)
     end
 
     -- Cheap gate: count mismatch → definitely changed, skip the O(N) string build.
+    -- Includes itemName so a "" -> populated transition forces a rebuild on the
+    -- deferred 1.5s rescan after a cold open.
     local nVisible = #visibleResults
     if nVisible == self._bankTriageFingerprintCount then
         local fp = {}
@@ -2233,6 +2243,8 @@ function EmpireManager:_BuildBankTriageUI(results, savedOffset)
                 .. (r.item.srcTab or 0)
                 .. ":"
                 .. (r.item.slot or 0)
+                .. ":"
+                .. (r.item.itemName or "")
         end
         local fingerprint = table.concat(fp, "|")
         if fingerprint == self._bankTriageFingerprint then
@@ -2251,7 +2263,7 @@ function EmpireManager:_BuildBankTriageUI(results, savedOffset)
     -- Release previous bank widgets
     self:_ReleaseTabWidgets("bank")
 
-    -- Collect actionable rows (no display cap — native ScrollFrame handles any count)
+    -- Collect actionable rows (no display cap - native ScrollFrame handles any count)
     local showKeep = EmpireManager._debugShowKeep
     local actionableRows = {}
     for _, r in ipairs(visibleResults) do
@@ -2435,11 +2447,11 @@ function EmpireManager:UpdateBankBtnState(counts)
         return
     end
 
-    -- Detect remote bank open (e.g. Distance Inhibitor spell) — item moves won't work
+    -- Detect remote bank open (e.g. Distance Inhibitor spell) - item moves won't work
     local remoteBankOpen = self:IsRemoteBankOpen()
 
     -- For guild bank: check which tabs have withdrawals available.
-    -- Items on depleted tabs can't be moved — adjust actionable counts.
+    -- Items on depleted tabs can't be moved - adjust actionable counts.
     local stashCount = counts[CAT_STASH] or 0
     local takeoutCount = counts[CAT_TAKEOUT] or 0
     local withdrawalWarning = false
@@ -2707,7 +2719,7 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
                 if soldThisRound == 0 then
                     finishSelling(totalSold == 0 and "This merchant doesn't buy items" or nil)
                 elseif soldThisRound < #remaining and attempt < maxRetries then
-                    -- Some items were busy — retry the rest
+                    -- Some items were busy - retry the rest
                     sellBatch()
                 else
                     finishSelling()
@@ -2954,7 +2966,7 @@ function EmpireManager:OnMerchantShow()
         end
     end
 
-    -- Always run a fresh scan on merchant open — cached results may miss
+    -- Always run a fresh scan on merchant open - cached results may miss
     -- items picked up since the last scan, causing the popup to not appear.
     self:RunTriageAsync(function(results)
         notify(results)
@@ -3768,7 +3780,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     self:RunTriage()
 
     -- Split move lists by bank type (respect session skips).
-    -- Unique items are no longer pre-skipped — they're attempted like anything
+    -- Unique items are no longer pre-skipped - they're attempted like anything
     -- else; if the bank rejects them (already at limit), the move silently
     -- fails and the per-path verification counts it toward the final "(N failed)"
     -- chat line. The item then remains in bags and re-appears in the next scan.
@@ -4078,7 +4090,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         -- "unknown" (likely unique limit, locked slot, or guild bank rejection
         -- with no tab signal). Grouped by item name so duplicates collapse.
         -- Skip moves whose destType wasn't accessible this run (e.g. guild-bank
-        -- targets when only the character bank was open) — those weren't
+        -- targets when only the character bank was open) - those weren't
         -- attempted, so they aren't failures.
         local accessibleType = {
             charbank = regularBankOpen and not warbandOnly,
@@ -4532,7 +4544,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                 -- Verify the item actually left the source slot
                 local srcInfo = C_Container.GetContainerItemInfo(firedMove.srcBag, firedMove.srcSlot)
                 if srcInfo and srcInfo.itemID == firedMove.itemID then
-                    -- Move failed silently — put it back in list
+                    -- Move failed silently - put it back in list
                     firedMove._failCount = (firedMove._failCount or 0) + 1
                     if firedMove._failCount < 3 then
                         table.insert(moves, 1, firedMove)
@@ -4639,7 +4651,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     ---------------------------------------------------------------------------
     -- Chain phases: charbank → warband → guildbank → finish
     -- When only the guild bank is open (not the regular bank), skip
-    -- charbank/warbandbank phases — those containers aren't accessible.
+    -- charbank/warbandbank phases - those containers aren't accessible.
     ---------------------------------------------------------------------------
     if regularBankOpen then
         RunMovePhase("charbank", movesByType.charbank, function()
@@ -5051,7 +5063,7 @@ function EmpireManager:ReorganizeBankItems()
     local totalMoves = #queue0 + #queue1
 
     if totalMoves == 0 then
-        self:ChatMsg("|cff4d99ff[Bank]|r Nothing to reorganize — all destination tabs are full")
+        self:ChatMsg("|cff4d99ff[Bank]|r Nothing to reorganize - all destination tabs are full")
         return
     end
 
@@ -5111,7 +5123,7 @@ function EmpireManager:ReorganizeBankItems()
         if movedCount > 0 and remaining > 0 then
             self:ChatMsg(
                 string.format(
-                    "|cff4d99ff[Bank]|r Reorganized %d item%s. %d remaining — destination tabs need more space.",
+                    "|cff4d99ff[Bank]|r Reorganized %d item%s. %d remaining - destination tabs need more space.",
                     movedCount,
                     movedCount == 1 and "" or "s",
                     remaining
@@ -5122,11 +5134,11 @@ function EmpireManager:ReorganizeBankItems()
                 string.format("|cff4d99ff[Bank]|r Reorganized %d item%s.", movedCount, movedCount == 1 and "" or "s")
             )
         else
-            self:ChatMsg("|cff4d99ff[Bank]|r Could not reorganize — destination tabs are full.")
+            self:ChatMsg("|cff4d99ff[Bank]|r Could not reorganize - destination tabs are full.")
         end
         C_Timer.After(0.3, function()
             self._bankTriageFingerprint = nil
-            self.bankTriageResults = nil -- invalidate cache — bank contents changed
+            self.bankTriageResults = nil -- invalidate cache - bank contents changed
             self:RefreshBankTriageDisplay(true)
         end)
     end
@@ -5301,7 +5313,7 @@ function EmpireManager:ReorganizeGuildBankItems()
         end
         self:ChatMsg(
             string.format(
-                "|cff4d99ff[Bank]|r Skipping tab%s %s — no withdrawals remaining today",
+                "|cff4d99ff[Bank]|r Skipping tab%s %s - no withdrawals remaining today",
                 #tabList == 1 and "" or "s",
                 table.concat(tabStrs, ", ")
             )
@@ -5358,7 +5370,7 @@ function EmpireManager:ReorganizeGuildBankItems()
         if movedCount > 0 and remaining > 0 then
             self:ChatMsg(
                 string.format(
-                    "|cff4d99ff[Bank]|r Reorganized %d item%s. %d remaining — destination tabs need more space.",
+                    "|cff4d99ff[Bank]|r Reorganized %d item%s. %d remaining - destination tabs need more space.",
                     movedCount,
                     movedCount == 1 and "" or "s",
                     remaining
@@ -5369,11 +5381,11 @@ function EmpireManager:ReorganizeGuildBankItems()
                 string.format("|cff4d99ff[Bank]|r Reorganized %d item%s.", movedCount, movedCount == 1 and "" or "s")
             )
         else
-            self:ChatMsg("|cff4d99ff[Bank]|r Could not reorganize — destination tabs are full.")
+            self:ChatMsg("|cff4d99ff[Bank]|r Could not reorganize - destination tabs are full.")
         end
         C_Timer.After(0.3, function()
             self._bankTriageFingerprint = nil
-            self.bankTriageResults = nil -- invalidate cache — bank contents changed
+            self.bankTriageResults = nil -- invalidate cache - bank contents changed
             self:RefreshBankTriageDisplay(true)
         end)
     end
@@ -5646,7 +5658,7 @@ function EmpireManager:ReorganizeGuildBankItems()
             return
         end
         if destIdx > #candidate.destTabs then
-            -- All dest tabs full — try bag-staged swap on the first dest tab
+            -- All dest tabs full - try bag-staged swap on the first dest tab
             -- that has a misplaced item we can extract
             for _, dTab in ipairs(candidate.destTabs) do
                 if not swappedTabs[dTab] then
@@ -5701,7 +5713,7 @@ function EmpireManager:ReorganizeGuildBankItems()
                 WaitForGuild(function()
                     QueryTab(candidate.srcTab, function()
                         if not VerifySource(candidate.srcTab, candidate.srcSlot, candidate.itemID) then
-                            -- Item left source — success
+                            -- Item left source - success
                             movedCount = movedCount + 1
                             fullTabs[candidate.srcTab] = nil
                             -- Track withdrawal from source tab
@@ -5710,7 +5722,7 @@ function EmpireManager:ReorganizeGuildBankItems()
                                 withdrawalsLeft[srcTab] = withdrawalsLeft[srcTab] - 1
                             end
                         end
-                        -- (if still there, move failed silently — don't count it)
+                        -- (if still there, move failed silently - don't count it)
                         UpdateBtn()
                         DoNextCandidate()
                     end)
@@ -5764,7 +5776,7 @@ function EmpireManager:ReorganizeGuildBankItems()
 end
 
 -------------------------------------------------------------------------------
--- Bank Triage: Take Out — charbank / warbandbank (C_Container API, reliable)
+-- Bank Triage: Take Out - charbank / warbandbank (C_Container API, reliable)
 -------------------------------------------------------------------------------
 
 function EmpireManager:TakeOutBankItems()
@@ -5777,7 +5789,7 @@ function EmpireManager:TakeOutBankItems()
         return
     end
 
-    -- Guild bank uses a completely different API — delegate
+    -- Guild bank uses a completely different API - delegate
     if self._triageActiveTab == "guildbank" then
         self:TakeOutGuildBankItems()
         return
@@ -5864,7 +5876,7 @@ function EmpireManager:TakeOutBankItems()
         CheckBagsFull()
         C_Timer.After(0.3, function()
             self._bankTriageFingerprint = nil
-            self.bankTriageResults = nil -- invalidate cache — bank contents changed
+            self.bankTriageResults = nil -- invalidate cache - bank contents changed
             self:RefreshBankTriageDisplay(true)
         end)
     end
@@ -5940,7 +5952,7 @@ function EmpireManager:TakeOutBankItems()
             pollCount = pollCount + 1
             local info = C_Container.GetContainerItemInfo(freeBag, freeSlot)
             if info then
-                -- Item arrived in the bag slot — success
+                -- Item arrived in the bag slot - success
                 movedCount = movedCount + 1
                 remaining = remaining - 1
                 UpdateProgress()
@@ -5950,7 +5962,7 @@ function EmpireManager:TakeOutBankItems()
                     end
                 end)
             elseif pollCount >= maxPolls then
-                -- Timed out — item never arrived
+                -- Timed out - item never arrived
                 failCount = failCount + 1
                 remaining = remaining - 1
                 UpdateProgress()
@@ -5972,7 +5984,7 @@ function EmpireManager:TakeOutBankItems()
 end
 
 -------------------------------------------------------------------------------
--- Guild Bank Take Out — cursor-based API, one item at a time, verified moves
+-- Guild Bank Take Out - cursor-based API, one item at a time, verified moves
 -------------------------------------------------------------------------------
 
 function EmpireManager:TakeOutGuildBankItems()
@@ -6042,7 +6054,7 @@ function EmpireManager:TakeOutGuildBankItems()
         end
         self:ChatMsg(
             string.format(
-                "|cff4d99ff[Bank]|r Skipping tab%s %s — no withdrawals remaining today",
+                "|cff4d99ff[Bank]|r Skipping tab%s %s - no withdrawals remaining today",
                 #tabList == 1 and "" or "s",
                 table.concat(tabStrs, ", ")
             )
@@ -6130,7 +6142,7 @@ function EmpireManager:TakeOutGuildBankItems()
         end
         local function RefreshAfterRequery()
             self._bankTriageFingerprint = nil
-            self.bankTriageResults = nil -- invalidate cache — bank contents changed
+            self.bankTriageResults = nil -- invalidate cache - bank contents changed
             self:RefreshBankTriageDisplay(true)
         end
         if #tabsToQuery == 0 then
@@ -6247,7 +6259,7 @@ function EmpireManager:TakeOutGuildBankItems()
         local _, stackCount = GetGuildBankItemInfo(item.srcTab, item.slot)
         stackCount = stackCount or 1
 
-        -- Use SplitGuildBankItem (like TSM) — more reliable than PickupGuildBankItem
+        -- Use SplitGuildBankItem (like TSM) - more reliable than PickupGuildBankItem
         SplitGuildBankItem(item.srcTab, item.slot, stackCount)
 
         -- Verify cursor actually grabbed the item before placing
@@ -6285,7 +6297,7 @@ function EmpireManager:TakeOutGuildBankItems()
             pollCount = pollCount + 1
             local info = C_Container.GetContainerItemInfo(freeBag, freeSlot)
             if info then
-                -- Item arrived in the bag slot — success
+                -- Item arrived in the bag slot - success
                 movedCount = movedCount + 1
                 remaining = remaining - 1
                 -- Track withdrawal limit
@@ -6307,7 +6319,7 @@ function EmpireManager:TakeOutGuildBankItems()
                     DoNext()
                 end)
             elseif pollCount >= maxPolls then
-                -- Timed out — item never arrived
+                -- Timed out - item never arrived
                 failCount = failCount + 1
                 remaining = remaining - 1
                 UpdateProgress()
@@ -6888,7 +6900,7 @@ function EmpireManager:CreateGuildBlacklistWindow()
         end
         self.db.global.guildBlacklist[selectedGuild] = true
         self:ChatMsg(
-            string.format("Blacklisted guild |cffffcc00%s|r — hidden from storage options.", selectedGuild),
+            string.format("Blacklisted guild |cffffcc00%s|r - hidden from storage options.", selectedGuild),
             true
         )
         selectedGuild = nil

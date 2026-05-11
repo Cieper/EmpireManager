@@ -42,7 +42,7 @@ end
 -------------------------------------------------------------------------------
 
 -- Time budget per frame in milliseconds. Scanning yields when this is exceeded.
-local ASYNC_BUDGET_MS = 1 -- ~1ms per frame — very conservative to prevent any stutter
+local ASYNC_BUDGET_MS = 1 -- ~1ms per frame - very conservative to prevent any stutter
 
 -- Active async scan state (only one scan at a time)
 local asyncCoroutine = nil
@@ -72,7 +72,7 @@ local function AsyncTick()
     local startMs = debugprofilestop()
     local ok, result = coroutine.resume(asyncCoroutine, startMs)
     if not ok then
-        -- Coroutine errored — abort
+        -- Coroutine errored - abort
         local err = result
         asyncCoroutine = nil
         if asyncTickerFrame then
@@ -90,7 +90,7 @@ local function AsyncTick()
         return
     end
     if coroutine.status(asyncCoroutine) == "dead" then
-        -- Coroutine finished — defer callback to next frame
+        -- Coroutine finished - defer callback to next frame
         local cb = asyncOnComplete
         local res = result
         asyncCoroutine = nil
@@ -105,7 +105,7 @@ local function AsyncTick()
         end
         return
     end
-    -- Coroutine yielded — always return, resume next frame.
+    -- Coroutine yielded - always return, resume next frame.
     -- No budget loop: one resume per frame keeps each frame fast.
 end
 
@@ -195,7 +195,7 @@ EmpireManager.triageLastScan = 0
 EmpireManager._bagsDirty = true
 
 -------------------------------------------------------------------------------
--- Move Contexts — bank-type-specific API strategies
+-- Move Contexts - bank-type-specific API strategies
 --
 -- Each context provides a uniform interface so the move engine works
 -- identically for character bank, warband bank, and guild bank.
@@ -661,7 +661,13 @@ local function CachedTooltipBind(itemID, tooltipDataFn)
         -- Per-slot soulbound from the live tooltip; static flags from the cache.
         return cached[1], isSoulbound, cached[2], cached[3], cached[4]
     end
-    tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport }
+    -- Only cache when the tooltip actually returned data; an empty `lines`
+    -- table means the client hasn't fetched item data yet and parsing returned
+    -- all-false flags. Caching that would lock in a wrong answer for the
+    -- session.
+    if tooltipData and tooltipData.lines and #tooltipData.lines > 0 then
+        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport }
+    end
     return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport
 end
 
@@ -680,7 +686,7 @@ local function ScanBagSlot(items, bag, slot)
     local _, _, _, _, _, _, _, _, _, _, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
         C_Item.GetItemInfo(info.hyperlink or info.itemID)
 
-    -- Use C_Item.IsBound (live API) as primary bound check — more reliable than
+    -- Use C_Item.IsBound (live API) as primary bound check - more reliable than
     -- info.isBound which can return false for soulbound items when data isn't cached.
     local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
@@ -1021,7 +1027,7 @@ ITEM_CATEGORY_MAP = {
     [116423] = "pets", -- Undead Battle-Training Stone
     [116424] = "pets", -- Aquatic Battle-Training Stone
     [127755] = "pets", -- Fel-Touched Battle-Training Stone
-    -- Archaeology keystones (no clean subclass match — itemID routing)
+    -- Archaeology keystones (no clean subclass match - itemID routing)
     [52843] = "archaeology", -- Dwarf Rune Stone
     [63127] = "archaeology", -- Highborne Scroll
     [63128] = "archaeology", -- Troll Tablet
@@ -1131,7 +1137,7 @@ end
 -- ilvl Comparison (fallback when Pawn is not installed)
 -------------------------------------------------------------------------------
 
--- Returns the lowest equipped ilvl across the slot(s) matching an itemEquipLoc.
+-- Returns the lowest equipped ilvl across the slots matching an itemEquipLoc.
 -- For dual slots (rings, trinkets), returns the min of the two equipped items.
 -- Returns nil if no item is equipped in any matching slot.
 function EmpireManager:GetEquippedIlvlForSlot(itemEquipLoc)
@@ -1263,7 +1269,7 @@ local function PrepareClassificationContext(addon)
     ctx.equippedTypeCache = {}
 
     -- Cache smallest equipped bag size per container subtype (Rule D.2a-bag).
-    -- Regular bags: bag IDs 1-4 (backpack 0 excluded — it can't be replaced).
+    -- Regular bags: bag IDs 1-4 (backpack 0 excluded - it can't be replaced).
     -- Reagent bag: bag ID 5 (single slot, only one can ever be equipped).
     local smallestRegular
     for bag = 1, 4 do
@@ -1287,6 +1293,14 @@ function EmpireManager:ClassifyItem(item, entry)
         return CAT_KEEP, "Keep List"
     end
 
+    -- Teleport guard: trinkets/rings/cloaks with "Use: Teleport" effects are
+    -- irreplaceable utility (Cloak of Coordination, Runed Signet of the Kirin
+    -- Tor, Time-Lost Artifact). Wins over vendor whitelist and gear-vendor
+    -- rules so a stale whitelist entry can't burn a teleport.
+    if item.isTeleport then
+        return CAT_KEEP, "Teleport item"
+    end
+
     -- Vendor whitelist: force specific items to VENDOR
     if ctx and ctx.vendorWhitelist[item.itemID] and item.sellPrice > 0 then
         return CAT_VENDOR, "Vendor (whitelisted)"
@@ -1299,7 +1313,7 @@ function EmpireManager:ClassifyItem(item, entry)
 
     -- Rule D.2a-bag: Soulbound container smaller than smallest equipped → VENDOR.
     -- classID 1 = Container. Subclass 0 = regular bag (bags 1-4), subclass 11 =
-    -- reagent bag (bag 5). Profession bags (1-10) are situational — left alone.
+    -- reagent bag (bag 5). Profession bags (1-10) are situational - left alone.
     if
         item.isBound
         and not item.isWarbound
@@ -1320,8 +1334,8 @@ function EmpireManager:ClassifyItem(item, entry)
     end
 
     -- Rule D.2a: Soulbound equippable gear → Pawn/iLvl vendor check
-    -- Only actual gear (Weapon=2, Armor=4) qualifies — recipes, consumables, etc. skip.
-    -- Warbound gear skips this — it can be routed to other characters.
+    -- Only actual gear (Weapon=2, Armor=4) qualifies - recipes, consumables, etc. skip.
+    -- Warbound gear skips this - it can be routed to other characters.
     -- Enchanter override: if the character has Enchanting and enchanterKeepDE is on,
     -- gear that would be vendored is kept for disenchanting instead.
     if item.isBound and not item.isWarbound then
@@ -1331,12 +1345,6 @@ function EmpireManager:ClassifyItem(item, entry)
             -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup)
             if self._equipSetItems and self._equipSetItems[item.itemID] then
                 return CAT_KEEP, "Equipment set: " .. self._equipSetItems[item.itemID]
-            end
-            -- Teleport guard: trinkets/rings with "Use: Teleport" effects are
-            -- irreplaceable utility. Never vendor (e.g. Runed Signet of the
-            -- Kirin Tor, Time-Lost Artifact).
-            if item.isTeleport then
-                return CAT_KEEP, "Teleport item"
             end
             -- iLvl ceiling: gear at or above the configured ceiling is preserved
             -- regardless of Pawn/iLvl checks. Guards against vendoring upgrades
@@ -1390,13 +1398,13 @@ function EmpireManager:ClassifyItem(item, entry)
                     -- keep it if ilvl >= lowest equipped (could replace the weaker one).
                     -- Guard: GetDetailedItemLevelInfo returns pre-squish ilvl for old
                     -- expansion items (e.g. 554 instead of 79). Detect by checking if
-                    -- itemIlvl is more than 2x equippedIlvl — trust Pawn in that case.
+                    -- itemIlvl is more than 2x equippedIlvl - trust Pawn in that case.
                     if
                         not (equippedIlvl and itemIlvl and itemIlvl >= equippedIlvl and itemIlvl <= equippedIlvl * 2)
                     then
                         vendorReason = "Soulbound non-upgrade (Pawn)"
                     end
-                    -- pawnResult == true: Pawn says upgrade — skip ilvl check, keep
+                    -- pawnResult == true: Pawn says upgrade - skip ilvl check, keep
                 end
             end
             -- ilvl fallback: runs when Pawn is unavailable, uncertain (nil), or not enabled
@@ -1419,7 +1427,7 @@ function EmpireManager:ClassifyItem(item, entry)
     local assignments = entry.assignments or {}
 
     -- ItemID-based category matching (lumber, archaeology, PvP tokens, etc.)
-    -- Checked before soulbound — these are known categories that route by itemID
+    -- Checked before soulbound - these are known categories that route by itemID
     -- regardless of bind status (WoW reports warbound reagents as isBound=true).
     local itemCategory = ITEM_CATEGORY_MAP[item.itemID]
     if itemCategory then
@@ -1437,7 +1445,7 @@ function EmpireManager:ClassifyItem(item, entry)
                 end
             end
         end
-        -- No storage assignment matched — fall through to remaining rules
+        -- No storage assignment matched - fall through to remaining rules
     end
 
     -- Rule D.2b-quest: Quest items (classID 12) and Keys (classID 13) → check storage assignment with bind restrictions
@@ -1554,9 +1562,9 @@ function EmpireManager:ClassifyItem(item, entry)
         return CAT_KEEP, "Soulbound"
     end
 
-    -- Rule B.1: Lockpicker — mail lockboxes to designated lockpicker,
+    -- Rule B.1: Lockpicker - mail lockboxes to designated lockpicker,
     -- or if this alt IS the lockpicker, keep as own-role item.
-    -- Guard: never route a soulbound (non-warbound) lockbox — mail and warband deposit will fail.
+    -- Guard: never route a soulbound (non-warbound) lockbox - mail and warband deposit will fail.
     if item.isLockbox and not (item.isBound and not item.isWarbound) then
         if assignments.lockpicker then
             return CAT_KEEP, "Own role item (Lockbox)"
@@ -1578,10 +1586,10 @@ function EmpireManager:ClassifyItem(item, entry)
         -- crafting reagents (isCraftingReagent == false) are not actual profession
         -- materials despite sharing a subclass with reagents. Subclass 11 ("Other")
         -- especially is a dumping ground for PvP currencies, tokens, Heraldries,
-        -- flavor items — none of which should route by profession tag.
+        -- flavor items - none of which should route by profession tag.
         -- Note: this is distinct from nil, which means the cache isn't populated yet;
         -- only `== false` is a definitive "not a reagent" signal.
-        -- Itemid overrides bypass this guard — they're explicit reagent declarations.
+        -- Itemid overrides bypass this guard - they're explicit reagent declarations.
         if matchSet and item.itemClassID == 7 and item.isCraftingReagent == false and not profOverrideCache[item.itemID or 0] then
             matchSet = nil
         end
@@ -1612,7 +1620,7 @@ function EmpireManager:ClassifyItem(item, entry)
                     -- Equipment (BoE): only match unbound BoE gear (not bound, not warbound).
                     -- Guild bank items: bindType is unreliable (Blizzard returns BoP for
                     -- Warbound Until Equipped items). If it's in the guild bank, treat all
-                    -- equipment as eligible — the guild bank enforced bind rules on deposit.
+                    -- equipment as eligible - the guild bank enforced bind rules on deposit.
                     if assignment.profession == "equipment_boe" then
                         local eligible = false
                         if item.bankType == "guildbank" then
@@ -1621,7 +1629,7 @@ function EmpireManager:ClassifyItem(item, entry)
                         elseif item.bindType == 2 and not item.isBound and not item.isWarbound then
                             -- Unbound BoE in bags/other bank
                             if not item.bankType and assignments.auctioneer and entry.auctioneerKeepBOE ~= false then
-                                -- Auctioneer keeps BoE equipment in bags — skip storage routing
+                                -- Auctioneer keeps BoE equipment in bags - skip storage routing
                                 eligible = false
                             else
                                 eligible = true
@@ -1647,8 +1655,8 @@ function EmpireManager:ClassifyItem(item, entry)
         end
     end
 
-    -- Rule B.2: Zookeeper fallback — pet items with no storage assignment configured.
-    -- Guard: never route a soulbound (non-warbound) pet item — the destination will reject it.
+    -- Rule B.2: Zookeeper fallback - pet items with no storage assignment configured.
+    -- Guard: never route a soulbound (non-warbound) pet item - the destination will reject it.
     if not assignments.zookeeper and not (item.isBound and not item.isWarbound) then
         local isPetItem = (item.itemClassID == ITEM_CLASS_MISC and item.itemSubClassID == ITEM_SUBCLASS_COMPANION)
             or ZOOKEEPER_ITEMS[item.itemID]
@@ -1664,8 +1672,8 @@ function EmpireManager:ClassifyItem(item, entry)
         end
     end
 
-    -- Rule B.3: PvPer fallback — PvP tokens with no storage assignment configured.
-    -- Guard: never route a soulbound (non-warbound) PvP token — it can't be mailed or
+    -- Rule B.3: PvPer fallback - PvP tokens with no storage assignment configured.
+    -- Guard: never route a soulbound (non-warbound) PvP token - it can't be mailed or
     -- deposited to warband bank. If the item is truly soulbound, keep it here.
     if not assignments.pvper and PVPER_ITEMS[item.itemID] and not (item.isBound and not item.isWarbound) then
         local method, name = self:CachedFindRecipient("pvper", item.isWarbound)
@@ -1678,16 +1686,16 @@ function EmpireManager:ClassifyItem(item, entry)
         return CAT_KEEP, "PvPer unreachable"
     end
 
-    -- Rule B.4: Auctioneer / Disenchant — any unbound BoE item
-    -- Covers weapons, armor, recipes, containers, etc. — anything sellable on the AH.
-    -- Excludes warbound (account-bound) items — they can't be sold on the AH.
+    -- Rule B.4: Auctioneer / Disenchant - any unbound BoE item
+    -- Covers weapons, armor, recipes, containers, etc. - anything sellable on the AH.
+    -- Excludes warbound (account-bound) items - they can't be sold on the AH.
     -- When disenchant routing is enabled, low-value equippable BoE goes to the
     -- Enchanting Artisan instead (TSM: DBDisenchant > DBMarket, or threshold fallback).
-    -- Guild bank equippable gear: skip bind check — bindType is unreliable for GB items.
+    -- Guild bank equippable gear: skip bind check - bindType is unreliable for GB items.
     -- "Warbound Until Equipped" gear has isWarbound=true AND itemEquipLoc set; permanently
     -- warbound consumables/gems have isWarbound=true but itemEquipLoc="".
     -- Also covers bindType=0 equippable gear (vintage "no bind" items like Cubic Zirconia Ring,
-    -- Shiny Silver Necklace) — they have a sell price and valid equip loc, so they're AH-eligible.
+    -- Shiny Silver Necklace) - they have a sell price and valid equip loc, so they're AH-eligible.
     local loc = item.itemEquipLoc or ""
     local isRealEquip = loc ~= "" and loc ~= "INVTYPE_NON_EQUIP" and loc ~= "INVTYPE_NON_EQUIP_IGNORE"
     local isGuildBankEquip = item.bankType == "guildbank" and isRealEquip and not (item.isBound and not item.isWarbound) -- exclude truly soulbound gear
@@ -1731,7 +1739,7 @@ function EmpireManager:ClassifyItem(item, entry)
                 elseif method == "stash" then
                     return CAT_STASH, "Stash in Warband for " .. name .. " (DE)", { destType = "warbandbank" }
                 end
-                -- No enchanter found — fall through to auctioneer
+                -- No enchanter found - fall through to auctioneer
             end
 
             -- Default: route to auctioneer
@@ -1814,7 +1822,7 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                     ruleIndex = ruleIndex,
                 }
         end
-        -- Different guild — find a banker in that guild to mail to, or stash in warband
+        -- Different guild - find a banker in that guild to mail to, or stash in warband
         local bankerEntry
         if assignment.char then
             bankerEntry = self.db.global.registry[assignment.char]
@@ -1833,7 +1841,7 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                     { profKey = profKey, ruleIndex = ruleIndex }
             else
                 -- Cross-realm: item must transit via warband bank. Warband bank rejects
-                -- truly soulbound items, so there's no physical path — keep in place.
+                -- truly soulbound items, so there's no physical path - keep in place.
                 if item.isBound and not item.isWarbound then
                     return CAT_KEEP, "Soulbound (cross-realm, no path)"
                 end
@@ -1853,7 +1861,7 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                 "Move to Bank" .. tabSuffix .. " (" .. profLabel .. ")",
                 { destType = "charbank", destTabs = assignment.tabs, profKey = profKey, ruleIndex = ruleIndex }
         end
-        -- Not the banker — mail or warband-stash
+        -- Not the banker - mail or warband-stash
         if assignment.char then
             local bankerEntry = self.db.global.registry[assignment.char]
             if bankerEntry and bankerEntry.name then
@@ -1863,7 +1871,7 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                         { profKey = profKey, ruleIndex = ruleIndex }
                 else
                     -- Cross-realm: item must transit via warband bank. Warband bank
-                    -- rejects truly soulbound items, so there's no physical path — keep.
+                    -- rejects truly soulbound items, so there's no physical path - keep.
                     if item.isBound and not item.isWarbound then
                         return CAT_KEEP, "Soulbound (cross-realm, no path)"
                     end
@@ -2048,7 +2056,7 @@ local function FindIntraBankDests(item, routing)
     if item.bankType ~= routing.destType then
         return nil
     end
-    -- Same bank type, different tab(s) → reorganize candidates
+    -- Same bank type, different tabs -> reorganize candidates
     local tabs = {}
     for _, tab in ipairs(routing.destTabs) do
         if item.srcTab ~= tab then
@@ -2083,7 +2091,7 @@ function EmpireManager:ClassifyBankItem(item, entry)
     local category, action, routing = self:ClassifyItem(item, entry)
 
     if category == CAT_STASH then
-        -- Item wants to be stashed somewhere — check if it's already there
+        -- Item wants to be stashed somewhere - check if it's already there
         if IsItemInDestination(item, routing) then
             return CAT_KEEP, "Correct storage", routing
         end
@@ -2176,7 +2184,7 @@ function EmpireManager:RunTriageAsync(callback)
             end
             -- Within VENDOR rows, sort by quality ASC (junk first, quality last).
             -- This is intentional for vendor buyback: WoW's merchant buyback queue
-            -- holds only the last 12 items sold and is FIFO — when the queue fills,
+            -- holds only the last 12 items sold and is FIFO - when the queue fills,
             -- the oldest items drop off and become unrecoverable. Selling junk first
             -- means uncommon+ items are the *last* things sold, so they sit at the
             -- top of the buyback list and are still recoverable if the user
