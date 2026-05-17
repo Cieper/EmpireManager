@@ -12,6 +12,28 @@ local ICON16_FMT = EmpireManager.ICON16_FMT
 local FONT_NORMAL = "GameFontHighlight"
 local LINE_HEIGHT = 20
 
+-- Toggle a checkbox when its label hit-rect is clicked. Mirrors native
+-- UICheckButtonTemplate behaviour: respects disabled state, plays the
+-- right sound, and fires the box's existing OnClick handler so persistence
+-- logic stays in one place.
+local function WireLabelClick(hit, cb)
+    hit:EnableMouse(true)
+    hit:SetScript("OnMouseUp", function(_, button)
+        if button ~= "LeftButton" then
+            return
+        end
+        if not cb:IsEnabled() then
+            return
+        end
+        cb:SetChecked(not cb:GetChecked())
+        PlaySound(cb:GetChecked() and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF)
+        local onClick = cb:GetScript("OnClick")
+        if onClick then
+            onClick(cb, "LeftButton")
+        end
+    end)
+end
+
 -------------------------------------------------------------------------------
 -- Sidecar: Open / Close
 -------------------------------------------------------------------------------
@@ -198,6 +220,11 @@ function EMSidecarMixin:Init()
         EmpireManager:CloseSidecar()
     end)
 
+    -- Drag by the title bar (PortraitFrameTemplate doesn't wire this for us).
+    self:RegisterForDrag("LeftButton")
+    self:SetScript("OnDragStart", self.StartMoving)
+    self:SetScript("OnDragStop", self.StopMovingOrSizing)
+
     -- Notes edit box scripts - bound once; handlers resolve current entry via self._guid
     local notesEdit = self.ContentArea.NotesEdit
     if notesEdit and notesEdit.EditBox then
@@ -315,6 +342,7 @@ function EMSidecarMixin:DeferredRefresh(entry, guid, isCurrentChar, syncType)
         if syncType == "assignments" or syncType == "both" then
             self:SyncAssignments(entry, guid, isCurrentChar)
             EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         end
         self:Populate(guid)
     end)
@@ -415,6 +443,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
                 showTip(f)
             end)
             hitRect:SetScript("OnLeave", hideTip)
+            WireLabelClick(hitRect, cb)
         end
 
         if hasProfType then
@@ -862,9 +891,11 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showAhTip(f)
     end)
     ahHit:SetScript("OnLeave", hideAhTip)
+    WireLabelClick(ahHit, ahCB)
     ahCB:SetScript("OnClick", function(self)
         entry.auctioneerKeepBOE = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.auctioneerKeepBOE = entry.auctioneerKeepBOE
         else
@@ -914,9 +945,11 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showDeTip(f)
     end)
     deHit:SetScript("OnLeave", hideDeTip)
+    WireLabelClick(deHit, deCB)
     deCB:SetScript("OnClick", function(self)
         entry.enchanterKeepDE = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.enchanterKeepDE = entry.enchanterKeepDE
         else
@@ -966,9 +999,11 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showProfMatTip(f)
     end)
     profMatHit:SetScript("OnLeave", hideProfMatTip)
+    WireLabelClick(profMatHit, profMatCB)
     profMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBank = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBank = entry.keepOwnProfMatsInBank
         else
@@ -1014,11 +1049,13 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showBagMatTip(f)
     end)
     bagMatHit:SetScript("OnLeave", hideProfMatTip)
+    WireLabelClick(bagMatHit, bagMatCB)
     -- Forward declaration: parent OnClick toggles the sub-checkbox enabled state.
     local bagMatLatestCB, bagMatLatestLabel
     bagMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBags = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBags = entry.keepOwnProfMatsInBags
         else
@@ -1082,9 +1119,11 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     bagMatLatestHit:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+    WireLabelClick(bagMatLatestHit, bagMatLatestCB)
     bagMatLatestCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBagsLatestOnly = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBagsLatestOnly = entry.keepOwnProfMatsInBagsLatestOnly
         else
@@ -1126,9 +1165,11 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         showQuestTip(f)
     end)
     questHit:SetScript("OnLeave", hideQuestTip)
+    WireLabelClick(questHit, questCB)
     questCB:SetScript("OnClick", function(self)
         entry.stashOldQuestItems = self:GetChecked()
         EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.stashOldQuestItems = entry.stashOldQuestItems
         else
@@ -1160,8 +1201,8 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     deleteBtn:SetScript("OnEnter", function(btn)
         GameTooltip:SetOwner(btn, "ANCHOR_CURSOR_RIGHT")
         GameTooltip:AddLine("Remove from Roster", 1, 0.3, 0.3)
-        GameTooltip:AddLine("Removes this character and adds it to the character blacklist.", 1, 1, 1, true)
-        GameTooltip:AddLine("Use /em charb to restore.", 0.7, 0.7, 0.7, true)
+        GameTooltip:AddLine("Removes this Character and adds it to the Character Blacklist.", 1, 1, 1, true)
+        GameTooltip:AddLine("Use /em charb to restore.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     deleteBtn:SetScript("OnLeave", function()

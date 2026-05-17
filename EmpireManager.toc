@@ -1,8 +1,8 @@
-## Interface: 120005
+## Interface: 120007
 ## Title: EmpireManager
-## Notes: Command your alt army. Track inventory, professions, and storage across every character, then route everything where it belongs.
+## Notes: One addon to manage every alt, every bag, every bank.
 ## Author: l0neshad0w
-## Version: 0.3.6
+## Version: 0.4.0
 ## SavedVariables: EmpireManagerDB
 ## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
 ## OptionalDeps: TradeSkillMaster, Pawn

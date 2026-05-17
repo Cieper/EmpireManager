@@ -158,7 +158,18 @@ function EmpireManager:ImportStorageAssignments(text)
                         if bankType == "warbandbank" then
                             capSection = cap.warbandbank
                         elseif bankType == "guildbank" and guildStr ~= "" then
-                            capSection = cap.guildbank and cap.guildbank[guildStr]
+                            -- Without a realm on the import, we can't deterministically
+                            -- pick a snapshot - skip tab pruning. The runtime read sites
+                            -- still resolve via the rule's backfilled realm.
+                            local realm
+                            for _, entry in pairs(self.db.global.registry) do
+                                if entry.guild == guildStr and entry.realm and entry.realm ~= "" then
+                                    realm = entry.realm
+                                    break
+                                end
+                            end
+                            local key = realm and self:GuildKey(guildStr, realm)
+                            capSection = key and cap.guildbank and cap.guildbank[key]
                         elseif bankType == "charbank" and charStr ~= "" then
                             local guid = nameToGUID[charStr] or nameToGUID[charStr:lower()]
                             if guid then
@@ -270,28 +281,29 @@ function EmpireManager:ImportStorageAssignments(text)
                 if bankType == "warbandbank" then
                     readyRules[#readyRules + 1] = rule
                 elseif bankType == "guildbank" then
-                    -- Check if guild exists locally
-                    local guildFound = false
+                    -- Check if guild exists locally; backfill realm from the first
+                    -- matching character. The import format has no realm, so when
+                    -- the user has same-named guilds on multiple realms, this
+                    -- picks one - they can correct via Edit afterwards.
+                    local resolvedRealm
                     if guildStr ~= "" then
                         for _, entry in pairs(self.db.global.registry) do
-                            if entry.guild == guildStr then
-                                guildFound = true
+                            if entry.guild == guildStr and entry.realm and entry.realm ~= "" then
+                                resolvedRealm = entry.realm
                                 break
                             end
                         end
                     end
-                    if guildFound then
-                        local bankerGuid = self:FindCharInGuild(guildStr)
+                    if resolvedRealm then
+                        rule.realm = resolvedRealm
+                        local bankerGuid = self:FindCharInGuild(guildStr, nil, resolvedRealm)
                         if bankerGuid then
                             rule.char = bankerGuid
                         end
                         readyRules[#readyRules + 1] = rule
                     else
-                        skippedCount = skippedCount + 1
-                        self:ChatMsg(string.format(
-                            "Import warning: skipped guildbank rule '%s' - unknown guild <%s>.",
-                            category, guildStr ~= "" and guildStr or "?"
-                        ), true)
+                        -- Unknown / missing guild - surface in remap dialog
+                        unresolvedRules[#unresolvedRules + 1] = rule
                     end
                 elseif charStr == "" then
                     unresolvedRules[#unresolvedRules + 1] = rule
@@ -301,11 +313,7 @@ function EmpireManager:ImportStorageAssignments(text)
                         rule.char = guid
                         readyRules[#readyRules + 1] = rule
                     else
-                        skippedCount = skippedCount + 1
-                        self:ChatMsg(string.format(
-                            "Import warning: skipped charbank rule '%s' - unknown character (%s).",
-                            category, charStr
-                        ), true)
+                        unresolvedRules[#unresolvedRules + 1] = rule
                     end
                 end
             end
@@ -333,6 +341,582 @@ local function setsEqual(a, b)
         end
     end
     return true
+end
+
+-- Pure dup-count helper. Mirrors the dedup check in ApplyImportedRules so the
+-- remap dialog's Summary can pre-warn the user how many rules would collapse
+-- to duplicates against the current storage list. Does NOT mutate anything.
+local function CountDuplicatesAgainst(self, rules, existingList)
+    if not rules or #rules == 0 then
+        return 0
+    end
+    existingList = existingList or self.db.global.storageAssignments or {}
+    local dup = 0
+    for _, rule in ipairs(rules) do
+        for _, existing in ipairs(existingList) do
+            if
+                existing.profession == rule.profession
+                and existing.type == rule.type
+                and existing.char == rule.char
+                and existing.guild == rule.guild
+                and setsEqual(existing.expansions, rule.expansions)
+                and setsEqual(existing.subcategories, rule.subcategories)
+            then
+                dup = dup + 1
+                break
+            end
+        end
+    end
+    return dup
+end
+
+-- ----------------------------------------------------------------------------
+-- Import Remap Dialog
+-- Stepper that walks one unknown-char group at a time. Apply remaps every rule
+-- in the group to a chosen local GUID; Skip drops the group; Cancel aborts the
+-- whole import. After the last group, a Summary step shows totals and offers
+-- [Import] / [Cancel].
+-- ----------------------------------------------------------------------------
+
+-- Class-colored "Name - Realm" label for the remap dropdown.
+local function RemapCharLabel(entry)
+    if not entry then
+        return "?"
+    end
+    local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
+    local name = entry.name or "?"
+    local realm = entry.realm or ""
+    local text = realm == "" and name or (name .. " - " .. realm)
+    if color then
+        return string.format("|cff%02x%02x%02x%s|r", color.r * 255, color.g * 255, color.b * 255, text)
+    end
+    return text
+end
+
+-- Group unresolvedRules by their unresolved identity. Charbank rules group by
+-- _origChar; guildbank rules group by _origGuild. Char groups first (sorted),
+-- then guild groups (sorted) so the dialog has a stable order.
+-- Returns: array of
+--   { type = "char",  origChar  = "Name-Realm",  rules = {...} }
+--   { type = "guild", origGuild = "GuildName",   rules = {...} }
+local function GroupUnresolved(unresolvedRules)
+    local byChar = {}
+    local charOrder = {}
+    local byGuild = {}
+    local guildOrder = {}
+    for _, rule in ipairs(unresolvedRules) do
+        if rule.type == "guildbank" then
+            local key = (rule._origGuild and rule._origGuild ~= "") and rule._origGuild or "<unspecified>"
+            if not byGuild[key] then
+                byGuild[key] = { type = "guild", origGuild = key, rules = {} }
+                guildOrder[#guildOrder + 1] = key
+            end
+            table.insert(byGuild[key].rules, rule)
+        else
+            local key = (rule._origChar and rule._origChar ~= "") and rule._origChar or "<unspecified>"
+            if not byChar[key] then
+                byChar[key] = { type = "char", origChar = key, rules = {} }
+                charOrder[#charOrder + 1] = key
+            end
+            table.insert(byChar[key].rules, rule)
+        end
+    end
+    table.sort(charOrder, function(a, b) return a:lower() < b:lower() end)
+    table.sort(guildOrder, function(a, b) return a:lower() < b:lower() end)
+    local groups = {}
+    for _, key in ipairs(charOrder) do groups[#groups + 1] = byChar[key] end
+    for _, key in ipairs(guildOrder) do groups[#groups + 1] = byGuild[key] end
+    return groups
+end
+
+-- Sorted, deduped list of guild names from the registry (excluding blacklist).
+local function RemapCandidateGuilds(self)
+    local seen, list = {}, {}
+    local bl = self.db.global.guildBlacklist or {}
+    for _, entry in pairs(self.db.global.registry or {}) do
+        local g = entry.guild
+        if g and g ~= "" and not seen[g] and not bl[g] then
+            seen[g] = true
+            list[#list + 1] = g
+        end
+    end
+    table.sort(list, function(a, b) return a:lower() < b:lower() end)
+    return list
+end
+
+-- Sorted list of registry chars (excluding blacklist) for the remap dropdown.
+local function RemapCandidateChars(self)
+    local chars = {}
+    local blacklist = self.db.global.charBlacklist or {}
+    for guid, entry in pairs(self.db.global.registry or {}) do
+        if not blacklist[guid] and entry.name then
+            chars[#chars + 1] = { guid = guid, entry = entry }
+        end
+    end
+    table.sort(chars, function(a, b)
+        local an = ((a.entry.name or "") .. "-" .. (a.entry.realm or "")):lower()
+        local bn = ((b.entry.name or "") .. "-" .. (b.entry.realm or "")):lower()
+        return an < bn
+    end)
+    return chars
+end
+
+-- Human label for a rule's destination (profession + bank type + optional tab/guild).
+local function RemapRuleDescription(rule)
+    local profKey = rule.profession or "?"
+    local profLabel = profKey
+    for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
+        if info.key == profKey then
+            profLabel = info.label
+            break
+        end
+    end
+    if profLabel == profKey then
+        for _, info in ipairs(EmpireManager.STORAGE_CATEGORY_DISPLAY) do
+            if info.key == profKey then
+                profLabel = info.label
+                break
+            end
+        end
+    end
+    local destText
+    if rule.type == "warbandbank" then
+        destText = "Warband Bank"
+    elseif rule.type == "guildbank" then
+        destText = "Guild Bank (" .. (rule.guild or "?") .. ")"
+    elseif rule.type == "charbank" then
+        destText = "Character Bank"
+    else
+        destText = rule.type or "?"
+    end
+    if rule.tabs and #rule.tabs > 0 then
+        destText = destText .. " Tab " .. table.concat(rule.tabs, ", ")
+    end
+    return profLabel, destText
+end
+
+function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
+    local f = EmpireManagerRemapDialog
+    if not f._initialized then
+        f:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true,
+            tileSize = 32,
+            edgeSize = 32,
+            insets = { left = 8, right = 8, top = 8, bottom = 8 },
+        })
+        f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
+        f:RegisterForDrag("LeftButton")
+        f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._initialized = true
+    end
+    f.TitleText:SetText("EmpireManager - Remap Import")
+
+    -- Decisions[origChar] = { action = "remap"|"skip", guid = "Player-..." }
+    local decisions = {}
+    local index = 1
+    local self_ = self
+
+    local function ClearBody()
+        if f._widgets then
+            for _, w in ipairs(f._widgets) do
+                if w.Hide then w:Hide() end
+                if w.SetScript and w.HasScript then
+                    if w:HasScript("OnClick") then w:SetScript("OnClick", nil) end
+                    if w:HasScript("OnEnter") then w:SetScript("OnEnter", nil) end
+                    if w:HasScript("OnLeave") then w:SetScript("OnLeave", nil) end
+                end
+            end
+        end
+        f._widgets = {}
+        if f._btns then
+            for _, b in ipairs(f._btns) do b:Hide() end
+        end
+        f._btns = {}
+    end
+    local function Track(obj)
+        f._widgets[#f._widgets + 1] = obj
+        return obj
+    end
+
+    -- Build the final rule list from decisions + readyRules.
+    local function BuildFinalRules()
+        local finalRules = {}
+        for _, r in ipairs(readyRules) do
+            finalRules[#finalRules + 1] = r
+        end
+        local remappedCount = 0
+        for _, group in ipairs(groups) do
+            local key = group.type == "guild" and group.origGuild or group.origChar
+            local d = decisions[key]
+            if d and d.action == "remap" then
+                if group.type == "guild" and d.guild then
+                    -- Guildbank rules: replace guild + auto-resolve a banker char
+                    -- the same way the parser's resolved-guild path does.
+                    local bankerGuid = self_:FindCharInGuild(d.guild)
+                    for _, r in ipairs(group.rules) do
+                        r.guild = d.guild
+                        if bankerGuid then
+                            r.char = bankerGuid
+                        end
+                        finalRules[#finalRules + 1] = r
+                        remappedCount = remappedCount + 1
+                    end
+                elseif group.type ~= "guild" and d.guid then
+                    -- Charbank rules: replace target char.
+                    for _, r in ipairs(group.rules) do
+                        r.char = d.guid
+                        finalRules[#finalRules + 1] = r
+                        remappedCount = remappedCount + 1
+                    end
+                end
+            end
+        end
+        return finalRules, remappedCount
+    end
+
+    -- Set by every explicit close path (Cancel/Import/X). OnHide checks it so
+    -- that ESC (or any other implicit hide) still fires the cancel callback.
+    local intentionalClose = false
+    local function CloseDialog()
+        intentionalClose = true
+        f:Hide()
+        self_.remapDialogFrame = nil
+    end
+    f:SetScript("OnHide", function()
+        -- Re-enable the IE window's Import button (which we disabled at open
+        -- to prevent re-entry while the user is mid-remap).
+        local ie = EmpireManagerIOFrame
+        if ie and ie._importBtn then
+            ie._importBtn:Enable()
+        end
+        if intentionalClose then
+            return
+        end
+        self_.remapDialogFrame = nil
+        if onCommit then onCommit(false, nil, 0, 0) end
+    end)
+
+    local renderStep
+    local renderSummary
+
+    -- Per-group step renderer (handles both char and guild types).
+    renderStep = function()
+        if index > #groups then
+            renderSummary()
+            return
+        end
+        local group = groups[index]
+        ClearBody()
+        local sf = f.ScrollFrame
+        local content = sf.Content
+        content:SetWidth(sf:GetWidth())
+        local contentW = sf:GetWidth() or 400
+        local y = 8
+
+        local isGuild = group.type == "guild"
+        local groupKey = isGuild and group.origGuild or group.origChar
+        local unspecifiedLabel = isGuild and "<no guild specified>" or "<no character specified>"
+        local refLine = isGuild
+            and "%d rule%s reference this guild:"
+            or "%d rule%s reference this character:"
+
+        f.SubTitleText:SetText(string.format(
+            "|cffdaa520%s %d of %d|r",
+            isGuild and "Unknown Guild" or "Unknown Character",
+            index, #groups
+        ))
+
+        local origName = groupKey == "<unspecified>"
+            and ("|cffff8800" .. unspecifiedLabel .. "|r")
+            or ("|cffffffff" .. groupKey .. "|r")
+        local toFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+        toFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+        toFs:SetText(origName)
+        y = y + 26
+
+        local countFs = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+        countFs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+        local n = #group.rules
+        countFs:SetText(string.format(refLine, n, n == 1 and "" or "s"))
+        y = y + 18
+        y = y + 4
+
+        for _, r in ipairs(group.rules) do
+            local row = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            row:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
+            row:SetWidth(contentW - 24)
+            row:SetJustifyH("LEFT")
+            if row.SetIndentedWordWrap then
+                row:SetIndentedWordWrap(true)
+            end
+            local profLabel, destText = RemapRuleDescription(r)
+            row:SetText(string.format("%s » %s", profLabel, destText))
+            local h = row:GetStringHeight() or 14
+            y = y + math.max(16, math.ceil(h) + 2)
+        end
+        y = y + 8
+
+        local pickLabel = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        pickLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+        pickLabel:SetText("Remap to:")
+        pickLabel:SetTextColor(1, 0.82, 0)
+        y = y + 18
+
+        -- Candidates: char or guild. The renderer keeps a single `chosen` token
+        -- and dispatches to the right dropdown source.
+        local chars = (not isGuild) and RemapCandidateChars(self_) or nil
+        local guilds = isGuild and RemapCandidateGuilds(self_) or nil
+        local candidateCount = isGuild and #guilds or #chars
+
+        local existing = decisions[groupKey]
+        local chosenGUID = (not isGuild and existing and existing.action == "remap") and existing.guid or nil
+        local chosenGuild = (isGuild and existing and existing.action == "remap") and existing.guild or nil
+
+        -- Forward decl: Next button is created below; the dropdown callbacks
+        -- need to re-enable it when the user makes a pick.
+        local nextBtn
+        local function HasPick()
+            return (isGuild and chosenGuild ~= nil) or ((not isGuild) and chosenGUID ~= nil)
+        end
+        local function RefreshNextBtn()
+            if nextBtn then
+                nextBtn:SetEnabled(HasPick())
+            end
+        end
+
+        local dd = Track(CreateFrame("DropdownButton", nil, content, "WowStyle1DropdownTemplate"))
+        dd:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+        dd:SetSize(contentW - 24, 26)
+        if dd.SetDefaultText then
+            if candidateCount == 0 then
+                dd:SetDefaultText(isGuild and "(no guilds)" or "(no characters)")
+            else
+                dd:SetDefaultText(isGuild and "Pick a guild..." or "Pick a character...")
+            end
+        end
+        local selIdx
+        dd:SetupMenu(function(_, root)
+            root:SetScrollMode(20 * 20)
+            selIdx = nil
+            if isGuild then
+                if #guilds == 0 then return end
+                for i, g in ipairs(guilds) do
+                    if g == chosenGuild then selIdx = i end
+                    root:CreateRadio(g, function()
+                        return chosenGuild == g
+                    end, function()
+                        chosenGuild = g
+                        RefreshNextBtn()
+                    end)
+                end
+            else
+                if #chars == 0 then return end
+                for i, c in ipairs(chars) do
+                    if c.guid == chosenGUID then selIdx = i end
+                    root:CreateRadio(RemapCharLabel(c.entry), function()
+                        return chosenGUID == c.guid
+                    end, function()
+                        chosenGUID = c.guid
+                        RefreshNextBtn()
+                    end)
+                end
+            end
+        end)
+        self_:EnableDropdownScrollToSelected(dd, function() return selIdx end)
+        y = y + 30
+
+        if candidateCount == 0 then
+            local empty = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+            empty:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+            empty:SetWidth(contentW - 16)
+            empty:SetJustifyH("LEFT")
+            if isGuild then
+                empty:SetText("|cffff8800No guilds in your roster to remap to. Log in to a character in a guild first, then re-import.|r")
+            else
+                empty:SetText("|cffff8800No characters in your roster to remap to. Log in to your alts first, then re-import.|r")
+            end
+            y = y + 28
+        end
+
+        content:SetHeight(y + 10)
+
+        -- Bottom buttons: Cancel (left) | Skip (center) | Next (right)
+        local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        cancelBtn:SetSize(100, 22)
+        cancelBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 20)
+        cancelBtn:SetText("Cancel")
+        cancelBtn:SetScript("OnClick", function()
+            CloseDialog()
+            if onCommit then onCommit(false, nil, 0, 0) end
+        end)
+        f._btns[1] = cancelBtn
+
+        local skipBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        skipBtn:SetSize(100, 22)
+        skipBtn:SetPoint("BOTTOM", f, "BOTTOM", 0, 20)
+        skipBtn:SetText("Skip")
+        skipBtn:SetScript("OnClick", function()
+            decisions[groupKey] = { action = "skip" }
+            index = index + 1
+            renderStep()
+        end)
+        f._btns[2] = skipBtn
+
+        nextBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        nextBtn:SetSize(100, 22)
+        nextBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 20)
+        nextBtn:SetText("Next")
+        nextBtn:SetScript("OnClick", function()
+            if isGuild then
+                decisions[groupKey] = { action = "remap", guild = chosenGuild }
+            else
+                decisions[groupKey] = { action = "remap", guid = chosenGUID }
+            end
+            index = index + 1
+            renderStep()
+        end)
+        f._btns[3] = nextBtn
+        RefreshNextBtn()
+    end
+
+    -- Summary step renderer
+    renderSummary = function()
+        ClearBody()
+        local sf = f.ScrollFrame
+        local content = sf.Content
+        content:SetWidth(sf:GetWidth())
+        local contentW = sf:GetWidth() or 400
+        local y = 8
+
+        f.SubTitleText:SetText("|cffdaa520Import Summary|r")
+
+        local readyN = #readyRules
+        local remappedTotal, skippedTotal = 0, 0
+        local remapLines, skipLines = {}, {}
+        local registry = self_.db.global.registry or {}
+        for _, group in ipairs(groups) do
+            local key = group.type == "guild" and group.origGuild or group.origChar
+            local d = decisions[key]
+            if d and d.action == "remap" then
+                local label
+                if group.type == "guild" then
+                    label = d.guild or "?"
+                else
+                    local rEntry = registry[d.guid]
+                    label = rEntry and RemapCharLabel(rEntry) or d.guid
+                end
+                remapLines[#remapLines + 1] = string.format(
+                    "%s » %s  (%d)",
+                    key, label, #group.rules
+                )
+                remappedTotal = remappedTotal + #group.rules
+            else
+                skipLines[#skipLines + 1] = string.format(
+                    "%s  (%d)",
+                    key, #group.rules
+                )
+                skippedTotal = skippedTotal + #group.rules
+            end
+        end
+
+        local function AddLine(text, color, indent, font)
+            local leftPad = 8 + (indent or 0)
+            local fs = Track(content:CreateFontString(nil, "OVERLAY", font or "GameFontHighlight"))
+            fs:SetPoint("TOPLEFT", content, "TOPLEFT", leftPad, -y)
+            fs:SetWidth(contentW - leftPad - 8)
+            fs:SetJustifyH("LEFT")
+            if fs.SetIndentedWordWrap then
+                fs:SetIndentedWordWrap(true)
+            end
+            fs:SetText(text)
+            if color then fs:SetTextColor(color[1], color[2], color[3]) end
+            -- Advance y by the actual rendered height so wrapped lines (long
+            -- realm names, etc.) don't draw on top of the next row.
+            local h = fs:GetStringHeight() or 14
+            y = y + math.max(16, math.ceil(h) + 2)
+        end
+
+        AddLine(string.format("|cff00cc00%d rule%s ready to import|r", readyN, readyN == 1 and "" or "s"), nil, nil, "GameFontNormalLarge")
+        y = y + 4
+
+        if remappedTotal > 0 then
+            AddLine(string.format("|cff88ccff%d rule%s remapped:|r", remappedTotal, remappedTotal == 1 and "" or "s"), nil, nil, "GameFontNormalLarge")
+            for _, line in ipairs(remapLines) do AddLine(line) end
+            y = y + 4
+        end
+        if skippedTotal > 0 then
+            AddLine(string.format("|cffdddd00%d rule%s skipped:|r", skippedTotal, skippedTotal == 1 and "" or "s"), nil, nil, "GameFontNormalLarge")
+            for _, line in ipairs(skipLines) do AddLine(line) end
+            y = y + 4
+        end
+
+        -- Pre-commit duplicate check against the current storage list (skipped
+        -- in Replace mode since the list will be wiped before applying).
+        local previewRules, _ = BuildFinalRules()
+        local dupTotal = doReplace and 0 or CountDuplicatesAgainst(self_, previewRules)
+        if dupTotal > 0 then
+            AddLine(string.format(
+                "|cffe8d9a8%d rule%s already exist (will be skipped as duplicates)|r",
+                dupTotal, dupTotal == 1 and "" or "s"
+            ))
+            y = y + 4
+        end
+
+        local total = readyN + remappedTotal - dupTotal
+        y = y + 8
+        AddLine(string.format("|cffffd100%d total rule%s to import|r", total, total == 1 and "" or "s"), nil, nil, "GameFontNormalLarge")
+
+        if doReplace then
+            y = y + 6
+            AddLine("|cffff8800Existing storage rules will be replaced first.|r")
+        end
+
+        content:SetHeight(y + 10)
+
+        -- Buttons: Cancel (left) | Import (right)
+        local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        cancelBtn:SetSize(120, 22)
+        cancelBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 20)
+        cancelBtn:SetText("Cancel")
+        cancelBtn:SetScript("OnClick", function()
+            CloseDialog()
+            if onCommit then onCommit(false, nil, 0, 0) end
+        end)
+        f._btns[1] = cancelBtn
+
+        local importBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        importBtn:SetSize(120, 22)
+        importBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 20)
+        importBtn:SetText("Import")
+        if total == 0 then
+            importBtn:Disable()
+        end
+        importBtn:SetScript("OnClick", function()
+            local finalRules, mappedN = BuildFinalRules()
+            CloseDialog()
+            if onCommit then onCommit(true, finalRules, mappedN, skippedTotal) end
+        end)
+        f._btns[2] = importBtn
+    end
+
+    -- Closing via X = cancel
+    f.CloseButton:SetScript("OnClick", function()
+        CloseDialog()
+        if onCommit then onCommit(false, nil, 0, 0) end
+    end)
+
+    -- Block re-entry: disable the IE window's Import button while the remap
+    -- dialog is active. OnHide re-enables it via every close path.
+    local ie = EmpireManagerIOFrame
+    if ie and ie._importBtn then
+        ie._importBtn:Disable()
+    end
+
+    f:Show()
+    self.remapDialogFrame = f
+    renderStep()
 end
 
 function EmpireManager:ApplyImportedRules(rules)
@@ -421,56 +1005,41 @@ local FONT_NORMAL = "GameFontHighlight"
 local LINE_HEIGHT = 20
 local HEADING_HEIGHT = 32
 
--- Aggregate capacity across specific tabs or all tabs (used by Roster Banks and Storage page)
+-- Aggregate capacity across specific tabs or all tabs (used by Roster Banks and Storage page).
+-- Delegates to EmpireManager:AggregateCapacity (Utils.lua) - shared with triage routing.
 local function AggregateCapacity(capSection, tabs)
-    if not capSection then
-        return nil
-    end
-    if tabs and #tabs > 0 then
-        local totalSum, usedSum = 0, 0
-        for _, t in ipairs(tabs) do
-            local td = capSection[t]
-            if td and td.total then
-                totalSum = totalSum + td.total
-                usedSum = usedSum + td.used
-            end
-        end
-        return totalSum > 0 and { total = totalSum, used = usedSum } or nil
-    else
-        local totalSum, usedSum = 0, 0
-        for _, td in pairs(capSection) do
-            if td.total then
-                totalSum = totalSum + td.total
-                usedSum = usedSum + td.used
-            end
-        end
-        return totalSum > 0 and { total = totalSum, used = usedSum } or nil
-    end
-end
-
--- Create a horizontal separator line
-local function AddSeparator(content, yOffset, label)
-    yOffset = yOffset + 4 -- extra spacing above divider
-
-    local divider = content:CreateTexture(nil, "ARTWORK")
-    divider:SetAtlas("ui-journeys-renown-divider", true)
-    divider:SetPoint("TOP", content, "TOP", 0, -yOffset)
-    yOffset = yOffset + 28
-
-    if label then
-        local fs = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -yOffset)
-        fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
-        fs:SetJustifyH("LEFT")
-        fs:SetText("|cffffff88" .. label .. "|r")
-        yOffset = yOffset + HEADING_HEIGHT
-    end
-    return yOffset
+    return EmpireManager:AggregateCapacity(capSection, tabs)
 end
 
 -------------------------------------------------------------------------------
 -- ABOUT PAGE MIXIN
 -------------------------------------------------------------------------------
+
+-- Popup that lets the user copy the EmpireManager website URL.
+-- WoW cannot launch a browser; the standard pattern is a read-only edit box
+-- pre-selected for Ctrl+C.
+StaticPopupDialogs["EM_URL_SITE"] = {
+    text = "EmpireManager website (Ctrl+C to copy):",
+    button1 = OKAY,
+    hasEditBox = true,
+    editBoxWidth = 280,
+    OnShow = function(self)
+        local eb = self.editBox or self.EditBox
+        if not eb then return end
+        eb:SetText("https://wow.cyberpunk.gr/")
+        eb:HighlightText()
+        eb:SetFocus()
+    end,
+    EditBoxOnEscapePressed = function(self)
+        self:GetParent():Hide()
+    end,
+    EditBoxOnEnterPressed = function(self)
+        self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+}
 
 function EMAboutPageMixin:OnLoad()
     self.ScrollFrame = self.Inset.ScrollFrame
@@ -511,183 +1080,13 @@ function EMAboutPageMixin:Refresh()
     end
     self._lines = {}
 
-    local function Track(obj)
-        self._lines[#self._lines + 1] = obj
-        return obj
-    end
-
-    local y = 8
-
-    local LOGO_SIZE = 96
-    local TEXT_LEFT = 8 + LOGO_SIZE + 12
-
-    -- Logo
-    local logo = Track(content:CreateTexture(nil, "ARTWORK"))
-    logo:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\logo256")
-    logo:SetSize(LOGO_SIZE, LOGO_SIZE)
-    logo:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-
-    -- Push the text column slightly above the logo's top edge
-    y = y - 2
-
-    -- Title (em.tga texture)
-    local title = Track(content:CreateTexture(nil, "ARTWORK"))
-    title:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\em")
-    title:SetSize(192, 48)
-    title:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_LEFT, -(y + 4))
-    y = y + 52
-
-    -- Version
-    local ver = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-    ver:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_LEFT, -y)
-    ver:SetText("Version " .. (EmpireManager.version or "?"))
-    ver:SetTextColor(0.91, 0.85, 0.66)
-    y = y + LINE_HEIGHT
-
-    -- Author
-    local author = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-    author:SetPoint("TOPLEFT", content, "TOPLEFT", TEXT_LEFT, -y)
-    author:SetText("|cffe8d9a8Author:|r  l0neshad0w")
-    author:SetTextColor(1, 1, 1)
-    y = y + LINE_HEIGHT
-
-    -- Drop below the logo before the description block
-    if y < 8 + LOGO_SIZE then
-        y = 8 + LOGO_SIZE
-    end
-    y = y + 8 -- spacer
-
-    -- Description
-    local desc = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-    desc:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-    desc:SetPoint("RIGHT", content, "RIGHT", -8, 0)
-    desc:SetJustifyH("LEFT")
-    desc:SetText(EmpireManager.description)
-    desc:SetTextColor(1, 1, 1)
-    y = y + 36
-
-    -- Statistics heading
-    y = AddSeparator(content, y, "Statistics")
-
-    local gStats = EmpireManager.db.global.stats or {}
-    local sStats = EmpireManager._sessionStats or {}
-
-    local function FmtNum(n)
-        n = n or 0
-        local s = tostring(math.floor(n))
-        return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
-    end
-
-    local statDefs = {
-        {
-            key = "goldVendored",
-            label = "Gold from Vendors",
-            icon = "Interface\\Icons\\INV_Misc_Coin_17",
-            fmt = "gold",
-        },
-        {
-            key = "itemsVendored",
-            label = "Items Vendored",
-            icon = "Interface\\Icons\\INV_Misc_Bag_10",
-            fmt = "num",
-        },
-        {
-            key = "itemsStashed",
-            label = "Items Deposited to Bank",
-            icon = "Interface\\Icons\\INV_Misc_Bag_07",
-            fmt = "num",
-        },
-        {
-            key = "itemsMailed",
-            label = "Items Mailed",
-            icon = "Interface\\Icons\\INV_Letter_15",
-            fmt = "num",
-        },
-    }
-
-    local STAT_LABEL_X = 12
-    local STAT_LABEL_WIDTH = 220
-    local STAT_SESSION_X = STAT_LABEL_X + STAT_LABEL_WIDTH
-    local STAT_ALLTIME_X = STAT_SESSION_X + 120
-    local STAT_COL_WIDTH = 100
-
-    -- Column headers
-    local hdrSession = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-    hdrSession:SetPoint("TOPLEFT", content, "TOPLEFT", STAT_SESSION_X, -y)
-    hdrSession:SetWidth(STAT_COL_WIDTH)
-    hdrSession:SetJustifyH("RIGHT")
-    hdrSession:SetText("|cff88ccffThis Session|r")
-
-    local hdrAll = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-    hdrAll:SetPoint("TOPLEFT", content, "TOPLEFT", STAT_ALLTIME_X, -y)
-    hdrAll:SetWidth(STAT_COL_WIDTH)
-    hdrAll:SetJustifyH("RIGHT")
-    hdrAll:SetText("|cffffcc00All Time|r")
-    y = y + LINE_HEIGHT
-
-    -- Stat rows
-    for _, stat in ipairs(statDefs) do
-        local sVal = sStats[stat.key] or 0
-        local gVal = gStats[stat.key] or 0
-        local sFmt = stat.fmt == "gold" and EmpireManager:FormatGold(sVal) or FmtNum(sVal)
-        local gFmt = stat.fmt == "gold" and EmpireManager:FormatGold(gVal) or FmtNum(gVal)
-
-        local lbl = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-        lbl:SetPoint("TOPLEFT", content, "TOPLEFT", STAT_LABEL_X, -y)
-        lbl:SetWidth(STAT_LABEL_WIDTH)
-        lbl:SetJustifyH("LEFT")
-        lbl:SetText(string.format("  |T%s:14:14|t  |cffe8d9a8%s|r", stat.icon, stat.label))
-
-        local sFs = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-        sFs:SetPoint("TOPLEFT", content, "TOPLEFT", STAT_SESSION_X, -y)
-        sFs:SetWidth(STAT_COL_WIDTH)
-        sFs:SetJustifyH("RIGHT")
-        sFs:SetText("|cff88ccff" .. sFmt .. "|r")
-
-        local gFs = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-        gFs:SetPoint("TOPLEFT", content, "TOPLEFT", STAT_ALLTIME_X, -y)
-        gFs:SetWidth(STAT_COL_WIDTH)
-        gFs:SetJustifyH("RIGHT")
-        gFs:SetText("|cffffffff" .. gFmt .. "|r")
-
-        y = y + LINE_HEIGHT
-    end
-
-    y = y + 8
-
-    -- Slash Commands heading
-    y = AddSeparator(content, y, "Slash Commands")
-
-    local CMD_LABEL_WIDTH = 170
-    local commands = {
-        { cmd = "/em", desc = "Open the Dashboard" },
-        { cmd = "/em config", desc = "Configure the current character" },
-        { cmd = "/em triage", desc = "Open Bag Triage overlay" },
-        { cmd = "/em ie", desc = "Open the Import / Export window" },
-        { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
-        { cmd = "/em options", desc = "Open the Options panel" },
-        { cmd = "/em purge <name>", desc = "Remove a character from the roster" },
-        { cmd = "/em keeplist", desc = "Open the Keep List window" },
-        { cmd = "/em vendorw", desc = "Open the vendor whitelist window" },
-        { cmd = "/em gb", desc = "Open the guild storage blacklist window" },
-        { cmd = "/em charb", desc = "Open the character blacklist window" },
-        { cmd = "/em help", desc = "Show all commands in chat" },
-    }
-    for _, c in ipairs(commands) do
-        local cmdFs = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-        cmdFs:SetPoint("TOPLEFT", content, "TOPLEFT", 12, -y)
-        cmdFs:SetWidth(CMD_LABEL_WIDTH)
-        cmdFs:SetJustifyH("LEFT")
-        cmdFs:SetText("|cffffd100" .. c.cmd .. "|r")
-
-        local descFs = Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
-        descFs:SetPoint("TOPLEFT", content, "TOPLEFT", 12 + CMD_LABEL_WIDTH, -y)
-        descFs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
-        descFs:SetJustifyH("LEFT")
-        descFs:SetText(c.desc)
-        descFs:SetTextColor(1, 1, 1)
-        y = y + 18
-    end
+    local lines = self._lines
+    local y = EmpireManager:BuildAboutPanel(content, {
+        track = function(obj)
+            lines[#lines + 1] = obj
+            return obj
+        end,
+    })
 
     content:SetHeight(y + 20)
 end
@@ -1087,7 +1486,7 @@ end
 -- `anchor` is either a region (anchored "TOPLEFT" to its "BOTTOMLEFT" with -12 y-offset) or
 -- nil (anchored to `content` "TOPLEFT" at offset 8, -y).
 -- Returns new y value after the bar.
-function EMRosterPageMixin:DrawFillBar(content, anchor, y, pct, used, total, free)
+function EMRosterPageMixin:DrawFillBar(content, anchor, y, pct, used, total, free, scannedAt)
     local function colorForPct(p)
         if p >= 0.85 then
             return 1.0, 0.2, 0.2
@@ -1146,7 +1545,12 @@ function EMRosterPageMixin:DrawFillBar(content, anchor, y, pct, used, total, fre
     local freeFS = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
     freeFS:SetPoint("LEFT", row, "RIGHT", 8, 0)
     freeFS:SetTextColor(0.85, 0.85, 0.85)
-    freeFS:SetText(string.format("%s free", BreakUpLargeNumbers(free)))
+    local age = EmpireManager:FormatStaleAge(scannedAt)
+    if age then
+        freeFS:SetText(string.format("%s free, scanned %s", BreakUpLargeNumbers(free), age))
+    else
+        freeFS:SetText(string.format("%s free", BreakUpLargeNumbers(free)))
+    end
 
     return y + BAR_H + 4
 end
@@ -1895,7 +2299,8 @@ function EMRosterPageMixin:RenderStorageSection(content, y, profAssignments)
         if asn.type == "warbandbank" then
             capSection = cap.warbandbank
         elseif asn.type == "guildbank" and asn.guild then
-            capSection = cap.guildbank and cap.guildbank[asn.guild]
+            local key = EmpireManager:GuildKey(asn.guild, asn.realm)
+            capSection = key and cap.guildbank and cap.guildbank[key]
         elseif asn.type == "charbank" and asn.char then
             capSection = cap.charbank and cap.charbank[asn.char]
         end
@@ -2313,12 +2718,14 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             capSection = cap.warbandbank
         elseif asn.type == "guildbank" then
             local guild = asn.guild or "Unknown Guild"
+            local realm = asn.realm or ""
             if guildBL[guild] then
                 bankKey = nil
             else
-                bankKey = "guildbank:" .. guild
+                bankKey = "guildbank:" .. guild .. "\1" .. realm
                 bankLabel = guild .. " Guild Bank"
-                capSection = cap.guildbank and cap.guildbank[guild]
+                local key = EmpireManager:GuildKey(asn.guild, asn.realm)
+                capSection = key and cap.guildbank and cap.guildbank[key]
             end
         elseif asn.type == "charbank" then
             local charEntry = asn.char and EmpireManager.db.global.registry[asn.char]
@@ -2367,11 +2774,16 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         end
     end
     if cap.guildbank then
-        for guild, section in pairs(cap.guildbank) do
-            local key = "guildbank:" .. guild
-            if not bankMap[key] and not guildBL[guild] then
+        -- cap.guildbank keys are "GuildName-Realm" composites (realm names can't
+        -- contain hyphens, so split on the last "-").
+        for composite, section in pairs(cap.guildbank) do
+            local guildName, realm = composite:match("^(.+)-([^-]+)$")
+            guildName = guildName or composite
+            realm = realm or ""
+            local key = "guildbank:" .. guildName .. "\1" .. realm
+            if not bankMap[key] and not guildBL[guildName] then
                 bankMap[key] = {
-                    label = guild .. " Guild Bank",
+                    label = guildName .. " Guild Bank",
                     assignments = {},
                     capSection = section,
                 }
@@ -2403,19 +2815,25 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         return a < b
     end)
 
-    local drawFillBar = function(anchorFS, y, pct, used, total, free)
-        return self:DrawFillBar(content, anchorFS, y, pct, used, total, free)
+    local drawFillBar = function(anchorFS, y, pct, used, total, free, scannedAt)
+        return self:DrawFillBar(content, anchorFS, y, pct, used, total, free, scannedAt)
     end
 
     -- Pre-compute the aggregate capacity across all charbanks so we can show a summary
-    -- line above the individual charbank entries.
+    -- line above the individual charbank entries. Oldest snapshot wins (worst-case signal).
     local charTotal, charUsed = 0, 0
+    local oldestCharScannedAt
     for _, bankKey in ipairs(bankOrder) do
         if bankKey:match("^charbank") then
-            local agg = AggregateCapacity(bankMap[bankKey].capSection, nil)
+            local capSection = bankMap[bankKey].capSection
+            local agg = AggregateCapacity(capSection, nil)
             if agg then
                 charTotal = charTotal + agg.total
                 charUsed = charUsed + agg.used
+            end
+            local sa = capSection and capSection._scannedAt
+            if sa and (not oldestCharScannedAt or sa < oldestCharScannedAt) then
+                oldestCharScannedAt = sa
             end
         end
     end
@@ -2439,7 +2857,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
             if charTotal > 0 then
                 local pct = charUsed / charTotal
                 local free = charTotal - charUsed
-                y = drawFillBar(sumHeadingFS, y, pct, charUsed, charTotal, free)
+                y = drawFillBar(sumHeadingFS, y, pct, charUsed, charTotal, free, oldestCharScannedAt)
             end
             -- First charbank below still gets its own divider as a separator after the summary
             skipDivider = false
@@ -2465,7 +2883,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         if agg then
             local pct = agg.used / agg.total
             local free = agg.total - agg.used
-            y = drawFillBar(headingFS, y, pct, agg.used, agg.total, free)
+            y = drawFillBar(headingFS, y, pct, agg.used, agg.total, free, bank.capSection and bank.capSection._scannedAt)
         else
             local val = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
             val:SetPoint("TOPLEFT", headingFS, "BOTTOMLEFT", 0, -2)
@@ -2627,38 +3045,38 @@ local function IsOrphanedAssignment(asn)
 end
 
 -- Get the number of purchased tabs from capacity data
-local function GetTabCount(cap, bankType, charGUID, guildName)
+local function GetTabCount(cap, bankType, charGUID, guildName, guildRealm)
+    local section
     if bankType == "warbandbank" then
-        local n = 0
-        for _ in pairs(cap.warbandbank or {}) do
-            n = n + 1
-        end
-        return n
+        section = cap.warbandbank
     elseif bankType == "charbank" and charGUID then
-        local n = 0
-        for _ in pairs((cap.charbank or {})[charGUID] or {}) do
-            n = n + 1
-        end
-        return n
+        section = (cap.charbank or {})[charGUID]
     elseif bankType == "guildbank" and guildName then
-        local n = 0
-        for _ in pairs((cap.guildbank or {})[guildName] or {}) do
+        local key = EmpireManager:GuildKey(guildName, guildRealm)
+        section = key and (cap.guildbank or {})[key]
+    end
+    if not section then
+        return 0
+    end
+    local n = 0
+    for _, v in pairs(section) do
+        if type(v) == "table" then
             n = n + 1
         end
-        return n
     end
-    return 0
+    return n
 end
 
 -- Format a tab label with fill % from capacity data
-local function GetTabLabel(cap, bankType, charGUID, guildName, tabNum)
+local function GetTabLabel(cap, bankType, charGUID, guildName, tabNum, guildRealm)
     local capData
     if bankType == "warbandbank" then
         capData = (cap.warbandbank or {})[tabNum]
     elseif bankType == "charbank" and charGUID then
         capData = ((cap.charbank or {})[charGUID] or {})[tabNum]
     elseif bankType == "guildbank" and guildName then
-        capData = ((cap.guildbank or {})[guildName] or {})[tabNum]
+        local key = EmpireManager:GuildKey(guildName, guildRealm)
+        capData = key and (((cap.guildbank or {})[key]) or {})[tabNum]
     end
     if capData and capData.total and capData.total > 0 then
         local pct = math.floor((capData.used / capData.total) * 100)
@@ -2735,34 +3153,53 @@ function EmpireManager:FormatStorageDestText(asn)
     return FormatDestText(asn)
 end
 
--- Build sorted char list from registry
+-- Build sorted char list from registry. Labels are class-colored; sort uses a
+-- separate plain-text key so color escapes don't break alphabetical order.
 local function BuildCharList()
-    local list, order = {}, {}
+    local list, plain, order = {}, {}, {}
     for guid, entry in pairs(EmpireManager.db.global.registry) do
-        list[guid] = (entry.name or "?") .. " - " .. (entry.realm or "?")
+        list[guid] = RemapCharLabel(entry)
+        plain[guid] = (entry.name or "?") .. " - " .. (entry.realm or "?")
         order[#order + 1] = guid
     end
     table.sort(order, function(a, b)
-        return (list[a] or ""):lower() < (list[b] or ""):lower()
+        return (plain[a] or ""):lower() < (plain[b] or ""):lower()
     end)
     return list, order
 end
 
 -- Build guild list from registry, excluding blacklisted
+-- Returns a sorted list of unique (guild, realm) pairs across the roster,
+-- skipping blacklisted guild names. Display label is "Guild" when the name is
+-- unique, "Guild - Realm" when the same name appears on multiple realms.
+-- Each entry: { guild = "Vanguard", realm = "Stormrage", label = "Vanguard" }.
 local function BuildGuildList()
-    local list, order = {}, {}
-    local seen = {}
     local bl = EmpireManager.db.global.guildBlacklist or {}
+    local nameCounts, pairs_ = {}, {}
+    local seen = {}
     for _, entry in pairs(EmpireManager.db.global.registry) do
         local g = entry.guild
-        if g and g ~= "" and not seen[g] and not bl[g] then
-            seen[g] = true
-            list[g] = g
-            order[#order + 1] = g
+        local r = entry.realm
+        if g and g ~= "" and r and r ~= "" and not bl[g] then
+            local key = g .. "\1" .. r
+            if not seen[key] then
+                seen[key] = true
+                pairs_[#pairs_ + 1] = { guild = g, realm = r }
+                nameCounts[g] = (nameCounts[g] or 0) + 1
+            end
         end
     end
-    table.sort(order)
-    return list, order
+    for _, item in ipairs(pairs_) do
+        if nameCounts[item.guild] > 1 then
+            item.label = item.guild .. " - " .. item.realm
+        else
+            item.label = item.guild
+        end
+    end
+    table.sort(pairs_, function(a, b)
+        return a.label:lower() < b.label:lower()
+    end)
+    return pairs_
 end
 
 -------------------------------------------------------------------------------
@@ -2935,6 +3372,20 @@ function EMStorageRowMixin:OnLoad()
                 suffix = string.format(", %d free", d.tabData.total - (d.tabData.used or 0))
             end
             GameTooltip:AddLine("Slots: " .. fillText .. suffix, f.FillFs:GetTextColor())
+        end
+        local cap = EmpireManager.db.global.storageCapacity or {}
+        local section
+        if d.asn.type == "warbandbank" then
+            section = cap.warbandbank
+        elseif d.asn.type == "guildbank" and d.asn.guild then
+            local key = EmpireManager:GuildKey(d.asn.guild, d.asn.realm)
+            section = key and cap.guildbank and cap.guildbank[key]
+        elseif d.asn.type == "charbank" and d.asn.char then
+            section = cap.charbank and cap.charbank[d.asn.char]
+        end
+        local age = section and EmpireManager:FormatStaleAge(section._scannedAt)
+        if age then
+            GameTooltip:AddLine("Scanned: " .. age, 1, 1, 1)
         end
         if d.isOrphan then
             GameTooltip:AddLine(" ")
@@ -3235,7 +3686,8 @@ function EMStoragePageMixin:Refresh()
             if asn.type == "warbandbank" then
                 tabData = AggregateCapacity(cap.warbandbank, asn.tabs)
             elseif asn.type == "guildbank" and asn.guild then
-                tabData = AggregateCapacity(cap.guildbank and cap.guildbank[asn.guild], asn.tabs)
+                local key = EmpireManager:GuildKey(asn.guild, asn.realm)
+                tabData = AggregateCapacity(key and cap.guildbank and cap.guildbank[key], asn.tabs)
             elseif asn.type == "charbank" and asn.char then
                 tabData = AggregateCapacity(cap.charbank and cap.charbank[asn.char], asn.tabs)
             end
@@ -3377,6 +3829,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
         st.bankType = asn.type
         st.char = asn.char
         st.guild = asn.guild
+        st.guildRealm = asn.realm
         st.tabs = {}
         for _, t in ipairs(asn.tabs or {}) do
             st.tabs[tostring(t)] = true
@@ -3394,6 +3847,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
         st.bankType = nil
         st.char = nil
         st.guild = nil
+        st.guildRealm = nil
         st.tabs = {}
         st.expansions = {}
         st.subcategories = {}
@@ -3502,7 +3956,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
 
         -- Guild
         if showGuild then
-            f.GuildDD:OverrideText(st.guild or "Select guild")
+            f.GuildDD:OverrideText(st.guild or "Select Guild")
         end
 
         -- Expansions
@@ -3587,6 +4041,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
                 st.bankType = bt
                 st.char = nil
                 st.guild = nil
+                st.guildRealm = nil
                 st.tabs = {}
                 C_Timer.After(0, UpdateLayout)
             end)
@@ -3596,7 +4051,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
     -- Tabs filter dropdown
     f.TabsDD:SetupMenu(function(_, rootDescription)
         rootDescription:SetTag("EM_STORAGE_TABS")
-        local count = GetTabCount(cap, st.bankType, st.char, st.guild)
+        local count = GetTabCount(cap, st.bankType, st.char, st.guild, st.guildRealm)
         if count == 0 then
             local msg
             if not st.bankType then
@@ -3612,7 +4067,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
         else
             for t = 1, count do
                 local key = tostring(t)
-                rootDescription:CreateCheckbox(GetTabLabel(cap, st.bankType, st.char, st.guild, t), function()
+                rootDescription:CreateCheckbox(GetTabLabel(cap, st.bankType, st.char, st.guild, t, st.guildRealm), function()
                     return st.tabs[key] or false
                 end, function()
                     st.tabs[key] = not st.tabs[key] or nil
@@ -3623,9 +4078,13 @@ function EmpireManager:OpenStorageDialog(editIdx)
     end)
 
     -- Character dropdown
+    local charSelIdx
     f.CharDD:SetupMenu(function(_, rootDescription)
+        rootDescription:SetScrollMode(20 * 20)
+        charSelIdx = nil
         local charList, charOrder = BuildCharList()
-        for _, guid in ipairs(charOrder) do
+        for i, guid in ipairs(charOrder) do
+            if guid == st.char then charSelIdx = i end
             rootDescription:CreateRadio(charList[guid], function()
                 return st.char == guid
             end, function()
@@ -3635,17 +4094,23 @@ function EmpireManager:OpenStorageDialog(editIdx)
             end)
         end
     end)
+    self:EnableDropdownScrollToSelected(f.CharDD, function() return charSelIdx end)
 
     -- Guild dropdown
+    local guildSelIdx
     f.GuildDD:SetupMenu(function(_, rootDescription)
-        local guildOrder = select(2, BuildGuildList())
-        for _, g in ipairs(guildOrder) do
-            rootDescription:CreateRadio(g, function()
-                return st.guild == g
+        rootDescription:SetScrollMode(20 * 20)
+        guildSelIdx = nil
+        local guilds = BuildGuildList()
+        for i, item in ipairs(guilds) do
+            if item.guild == st.guild and item.realm == st.guildRealm then guildSelIdx = i end
+            rootDescription:CreateRadio(item.label, function()
+                return st.guild == item.guild and st.guildRealm == item.realm
             end, function()
-                st.guild = g
+                st.guild = item.guild
+                st.guildRealm = item.realm
                 st.tabs = {}
-                local banker = self:FindCharInGuild(g)
+                local banker = self:FindCharInGuild(item.guild, nil, item.realm)
                 if banker then
                     st.char = banker
                 end
@@ -3653,6 +4118,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
             end)
         end
     end)
+    self:EnableDropdownScrollToSelected(f.GuildDD, function() return guildSelIdx end)
 
     -- Expansions filter dropdown
     f.ExpDD:SetupMenu(function(_, rootDescription)
@@ -3746,7 +4212,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
             return
         end
         if st.bankType == "guildbank" and (not st.guild or st.guild == "") then
-            self:ChatMsg("Select a guild", true)
+            self:ChatMsg("Select a Guild", true)
             return
         end
 
@@ -3773,7 +4239,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
 
         -- Collapse "all selected" to "none selected": both mean "any", so clear
         -- the list to keep display/runtime consistent.
-        local tabTotal = GetTabCount(cap, st.bankType, st.char, st.guild)
+        local tabTotal = GetTabCount(cap, st.bankType, st.char, st.guild, st.guildRealm)
         if tabTotal > 0 and #tabsArray >= tabTotal then
             tabsArray = {}
         end
@@ -3794,6 +4260,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
         end
         if st.bankType == "guildbank" then
             newEntry.guild = st.guild
+            newEntry.realm = st.guildRealm
             if st.char then
                 newEntry.char = st.char
             end
@@ -3832,6 +4299,7 @@ function EmpireManager:OpenStorageDialog(editIdx)
                 and existing.type == newEntry.type
                 and existing.char == newEntry.char
                 and existing.guild == newEntry.guild
+                and (existing.realm or "") == (newEntry.realm or "")
                 and SameSet(existing.expansions, newEntry.expansions)
                 and SameSet(existing.subcategories, newEntry.subcategories)
             then
@@ -4125,6 +4593,7 @@ function EmpireManager:InitIOFrame()
     importBtn:SetSize(80, 22)
     importBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 20)
     importBtn:SetText("Import")
+    f._importBtn = importBtn
 
     -- Position checkboxes above the import button (right-aligned)
     replaceCB:ClearAllPoints()
@@ -4162,6 +4631,48 @@ function EmpireManager:InitIOFrame()
                 if errMsg and not readyRules then
                     self:ChatMsg("Storage import error: " .. errMsg, true)
                     statusParts[#statusParts + 1] = "|cff88ccffStorage:|r |cffff4444failed|r"
+                elseif unresolvedRules and #unresolvedRules > 0 then
+                    -- Unknown chars in the export. Open the remap dialog and
+                    -- apply everything atomically when the user clicks Import
+                    -- on the summary step.
+                    local groups = GroupUnresolved(unresolvedRules)
+                    statusParts[#statusParts + 1] = "|cff88ccffStorage:|r |cffffaa00awaiting remap...|r"
+                    self:ShowRemapDialog(groups, readyRules, doReplace, function(commit, finalRules, mappedN, skippedN)
+                        if not commit then
+                            self:ChatMsg("Storage import cancelled.", true)
+                            statusText:SetText("|cffff8800Storage import cancelled.|r")
+                            return
+                        end
+                        if doReplace then
+                            self.db.global.storageAssignments = {}
+                        end
+                        local lenBefore = #(self.db.global.storageAssignments or {})
+                        local imp, dup = 0, 0
+                        if finalRules and #finalRules > 0 then
+                            imp, dup = self:ApplyImportedRules(finalRules)
+                        end
+                        if imp > 0 then
+                            self._storageScrollToIdx = lenBefore + 1
+                        end
+                        local totalSkipped = (parseSkipped or 0) + dup + (skippedN or 0)
+                        local parts = {}
+                        if imp > 0 then
+                            parts[#parts + 1] = string.format("|cff00cc00%d imported|r", imp)
+                        end
+                        if mappedN and mappedN > 0 then
+                            parts[#parts + 1] = string.format("|cff88ccff%d remapped|r", mappedN)
+                        end
+                        if totalSkipped > 0 then
+                            parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
+                        end
+                        local msg2 = "|cff88ccffStorage:|r "
+                            .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")
+                        statusText:SetText(msg2)
+                        self:ChatMsg(msg2:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""), true)
+                        if self.dashboardFrame and self.dashboardFrame:IsShown() and self.activeTab then
+                            C_Timer.After(0, function() self:SelectDashboardTab(self.activeTab) end)
+                        end
+                    end)
                 else
                     if doReplace then
                         self.db.global.storageAssignments = {}
@@ -4184,9 +4695,6 @@ function EmpireManager:InitIOFrame()
                     end
                     if totalSkipped > 0 then
                         parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
-                    end
-                    if unresolvedRules and #unresolvedRules > 0 then
-                        parts[#parts + 1] = string.format("|cffff8800%d unresolved|r", #unresolvedRules)
                     end
                     statusParts[#statusParts + 1] = "|cff88ccffStorage:|r "
                         .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")

@@ -252,12 +252,14 @@ function EmpireManager:AutoAssignRoles(entry, guid)
             end
         end
     end
-    -- Auto-detect banker: check if any charbank or guildbank storage assignment targets this character
+    -- Auto-detect banker: check if any charbank or guildbank storage assignment targets this character.
+    -- For guildbank rules, realm must also match - guild names aren't unique across realms.
     for _, asn in ipairs(self.db.global.storageAssignments or {}) do
-        if
-            (asn.type == "charbank" and asn.char == guid)
-            or (asn.type == "guildbank" and (entry.guild or "") ~= "" and (entry.guild or "") == (asn.guild or ""))
-        then
+        local guildbankMatch = asn.type == "guildbank"
+            and (entry.guild or "") ~= ""
+            and (entry.guild or "") == (asn.guild or "")
+            and ((asn.realm or "") == "" or (entry.realm or "") == asn.realm)
+        if (asn.type == "charbank" and asn.char == guid) or guildbankMatch then
             if not entry.assignments.banker then
                 entry.assignments.banker = {}
             end
@@ -283,14 +285,11 @@ function EmpireManager:SyncBankerRole(guid)
     end
     local needed = false
     for _, asn in ipairs(self.db.global.storageAssignments or {}) do
-        if
-            (asn.type == "charbank" and asn.char == guid)
-            or (
-                asn.type == "guildbank"
-                and (charEntry.guild or "") ~= ""
-                and (charEntry.guild or "") == (asn.guild or "")
-            )
-        then
+        local guildbankMatch = asn.type == "guildbank"
+            and (charEntry.guild or "") ~= ""
+            and (charEntry.guild or "") == (asn.guild or "")
+            and ((asn.realm or "") == "" or (charEntry.realm or "") == asn.realm)
+        if (asn.type == "charbank" and asn.char == guid) or guildbankMatch then
             needed = true
             break
         end
@@ -312,8 +311,10 @@ end
 -------------------------------------------------------------------------------
 
 -- Find the first character in a guild (excluding a given GUID or its name+realm).
+-- If guildRealm is given, also requires the character's realm to match - needed
+-- because the same guild name can exist on different realms.
 -- Returns guid, entry or nil, nil.
-function EmpireManager:FindCharInGuild(guildName, excludeGUID)
+function EmpireManager:FindCharInGuild(guildName, excludeGUID, guildRealm)
     -- Resolve name+realm of the excluded character so stubs with a different GUID
     -- (e.g. "API-Name-Realm") are also excluded.
     local exEntry = excludeGUID and self.db.global.registry[excludeGUID]
@@ -323,7 +324,9 @@ function EmpireManager:FindCharInGuild(guildName, excludeGUID)
     local fallbackGuid, fallbackEntry
     for guid, entry in pairs(self.db.global.registry) do
         local isExcluded = guid == excludeGUID or (exName and entry.name == exName and entry.realm == exRealm)
-        if not isExcluded and (entry.guild or "") == guildName then
+        local guildMatches = (entry.guild or "") == guildName
+        local realmMatches = not guildRealm or guildRealm == "" or (entry.realm or "") == guildRealm
+        if not isExcluded and guildMatches and realmMatches then
             -- Prefer characters with the Banker role
             if entry.assignments and entry.assignments.banker then
                 return guid, entry

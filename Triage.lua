@@ -52,6 +52,7 @@ local rowPool = {} -- pool of { frame, hl, nameFs, actionFs }
 local sepPool = {} -- pool of separator Texture objects
 local hdrPool = {} -- pool of header FontString objects
 local fsPool = {} -- pool of generic FontString objects
+local allRowFrames = {} -- every row Button, for drag-time mouse suppression
 
 local function AcquireRow(content)
     local entry = table.remove(rowPool)
@@ -84,6 +85,7 @@ local function AcquireRow(content)
     local hl = row:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(1, 1, 1, 0.04)
+    allRowFrames[#allRowFrames + 1] = row
     local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     nameFs:SetPoint("LEFT", 2, 0)
     nameFs:SetJustifyH("LEFT")
@@ -927,9 +929,20 @@ function EmpireManager:CreateTriageOverlay()
     end
 
     f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStart", function(frame)
+        frame:StartMoving()
+        if GameTooltip then
+            GameTooltip:Hide()
+        end
+        for _, row in ipairs(allRowFrames) do
+            row:EnableMouse(false)
+        end
+    end)
     f:SetScript("OnDragStop", function(frame)
         frame:StopMovingOrSizing()
+        for _, row in ipairs(allRowFrames) do
+            row:EnableMouse(true)
+        end
     end)
 
     -- OnHide cleanup: any close path (ESC, X button, /em triage, dashboard T)
@@ -3511,7 +3524,7 @@ end
 -------------------------------------------------------------------------------
 
 function EmpireManager:IsBankOpen()
-    return self.bankIsOpen or self.guildBankIsOpen or (BankFrame and BankFrame:IsShown())
+    return self.bankIsOpen or self.guildBankIsOpen
 end
 
 function EmpireManager:IsGuildBankOpen()
@@ -3537,7 +3550,7 @@ function EmpireManager:CountDepositableStash()
     if not results then
         return 0
     end
-    local bankOpen = self.bankIsOpen or (BankFrame and BankFrame:IsShown())
+    local bankOpen = self.bankIsOpen
     local warbandOnly = self:IsWarbandBankOnly()
     local guildOpen = self.guildBankIsOpen
     local warbandAccessible = bankOpen
@@ -3661,9 +3674,11 @@ function EmpireManager:SnapshotOpenBankCapacity()
         if entry and cap.charbank[guid] then
             local freeBank, totalBank = 0, 0
             for _, tabData in pairs(cap.charbank[guid]) do
-                local t = tabData.total or 0
-                freeBank = freeBank + t - (tabData.used or 0)
-                totalBank = totalBank + t
+                if type(tabData) == "table" then
+                    local t = tabData.total or 0
+                    freeBank = freeBank + t - (tabData.used or 0)
+                    totalBank = totalBank + t
+                end
             end
             entry.freeBankSlots = freeBank
             entry.totalBankSlots = totalBank
@@ -3689,9 +3704,10 @@ function EmpireManager:SnapshotOpenBankCapacity()
     -- Guild bank tabs
     if self.guildBankIsOpen then
         local guildName = GetGuildInfo("player")
-        if guildName and guildName ~= "" then
-            if not cap.guildbank[guildName] then
-                cap.guildbank[guildName] = {}
+        local guildKey = self:GuildKey(guildName, GetRealmName())
+        if guildKey then
+            if not cap.guildbank[guildKey] then
+                cap.guildbank[guildKey] = {}
             end
             local numTabs = GetNumGuildBankTabs()
             for tab = 1, numTabs do
@@ -3707,7 +3723,7 @@ function EmpireManager:SnapshotOpenBankCapacity()
                             used = used + 1
                         end
                     end
-                    cap.guildbank[guildName][tab] = { total = numSlots, used = used }
+                    cap.guildbank[guildKey][tab] = { total = numSlots, used = used }
                 end
             end
         end
@@ -3815,7 +3831,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     end
 
     -- Only count items for bank types that are actually accessible right now
-    local regularBankOpen = self.bankIsOpen or (BankFrame and BankFrame:IsShown())
+    local regularBankOpen = self.bankIsOpen
     local warbandOnly = self:IsWarbandBankOnly()
     local guildBankOpen = self:IsGuildBankOpen()
     local warbandAccessible = regularBankOpen
@@ -4462,7 +4478,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         local function DepositOnTab(tab, emptySlots, filledSlots)
             if not running or self:IsBulkCancelled(gen) or not self:IsGuildBankOpen() then
                 Cleanup()
-                self:ChatMsg("|cff4d99ff[Triage]|r Guild bank closed during deposit")
+                self:ChatMsg("|cff4d99ff[Triage]|r Guild Bank closed during deposit")
                 onComplete()
                 return
             end
@@ -5244,7 +5260,7 @@ end
 
 function EmpireManager:ReorganizeGuildBankItems()
     if not self:IsGuildBankOpen() then
-        self:ChatMsg("|cff4d99ff[Bank]|r Guild bank is not open", true)
+        self:ChatMsg("|cff4d99ff[Bank]|r Guild Bank is not open", true)
         return
     end
     if InCombatLockdown() then
@@ -5329,7 +5345,7 @@ function EmpireManager:ReorganizeGuildBankItems()
     local gen = self:StartBulkOperation()
     self:ChatVerbose(
         string.format(
-            "|cff4d99ff[Bank]|r Reorganizing %d guild bank item%s...",
+            "|cff4d99ff[Bank]|r Reorganizing %d Guild Bank item%s...",
             #candidateItems,
             #candidateItems == 1 and "" or "s"
         )
@@ -5445,7 +5461,7 @@ function EmpireManager:ReorganizeGuildBankItems()
             return
         end
         if not self:IsGuildBankOpen() then
-            self:ChatMsg("|cff4d99ff[Bank]|r Guild bank closed, stopping")
+            self:ChatMsg("|cff4d99ff[Bank]|r Guild Bank closed, stopping")
             Finish()
             return
         end
@@ -5736,7 +5752,7 @@ function EmpireManager:ReorganizeGuildBankItems()
             return
         end
         if not self:IsGuildBankOpen() then
-            self:ChatMsg("|cff4d99ff[Bank]|r Guild bank closed, stopping")
+            self:ChatMsg("|cff4d99ff[Bank]|r Guild Bank closed, stopping")
             Finish()
             return
         end
@@ -5989,7 +6005,7 @@ end
 
 function EmpireManager:TakeOutGuildBankItems()
     if not self:IsGuildBankOpen() then
-        self:ChatMsg("Open the guild bank first", true)
+        self:ChatMsg("Open the Guild Bank first", true)
         return
     end
 
@@ -6835,7 +6851,7 @@ end
 
 function EmpireManager:CreateGuildBlacklistWindow()
     local f = EmpireManagerGuildBlacklistWindow
-    f.TitleText:SetText("EmpireManager - Guild Storage Blacklist")
+    f.TitleText:SetText("EmpireManager - Guild Blacklist")
     StretchAddRow(f)
     AddDialogSubtitle(f, "Guilds here are hidden from storage dropdowns (e.g. trial guilds).")
     f:SetBackdrop({
@@ -6856,12 +6872,13 @@ function EmpireManager:CreateGuildBlacklistWindow()
     local selectedGuild = nil
 
     local guildDD = CreateFrame("DropdownButton", nil, addRow, "WowStyle1DropdownTemplate")
-    guildDD:SetPoint("LEFT", 4, 0)
-    guildDD:SetWidth(230)
     f._guildDD = guildDD
 
+    local guildSelIdx
     local function RebuildGuildDropdown()
         guildDD:SetupMenu(function(_, rootDescription)
+            rootDescription:SetScrollMode(20 * 20)
+            guildSelIdx = nil
             local bl = self.db.global.guildBlacklist or {}
             local guilds = {}
             for _, entry in pairs(self.db.global.registry) do
@@ -6874,7 +6891,8 @@ function EmpireManager:CreateGuildBlacklistWindow()
                 sorted[#sorted + 1] = g
             end
             table.sort(sorted)
-            for _, g in ipairs(sorted) do
+            for i, g in ipairs(sorted) do
+                if g == selectedGuild then guildSelIdx = i end
                 rootDescription:CreateRadio(g, function()
                     return selectedGuild == g
                 end, function()
@@ -6883,16 +6901,19 @@ function EmpireManager:CreateGuildBlacklistWindow()
             end
         end)
     end
+    self:EnableDropdownScrollToSelected(guildDD, function() return guildSelIdx end)
     RebuildGuildDropdown()
     self._guildBlacklistRebuildDD = RebuildGuildDropdown
 
     local addBtn = CreateFrame("Button", nil, addRow, "UIPanelButtonTemplate")
     addBtn:SetSize(60, 24)
-    addBtn:SetPoint("LEFT", guildDD, "RIGHT", 4, 0)
+    addBtn:SetPoint("RIGHT", addRow, "RIGHT", 0, 0)
     addBtn:SetText("Add")
+    guildDD:SetPoint("LEFT", addRow, "LEFT", 4, 0)
+    guildDD:SetPoint("RIGHT", addBtn, "LEFT", -8, 0)
     addBtn:SetScript("OnClick", function()
         if not selectedGuild or selectedGuild == "" then
-            self:ChatMsg("Select a guild first", true)
+            self:ChatMsg("Select a Guild first", true)
             return
         end
         if not self.db.global.guildBlacklist then
@@ -6900,7 +6921,7 @@ function EmpireManager:CreateGuildBlacklistWindow()
         end
         self.db.global.guildBlacklist[selectedGuild] = true
         self:ChatMsg(
-            string.format("Blacklisted guild |cffffcc00%s|r - hidden from storage options.", selectedGuild),
+            string.format("Blacklisted Guild |cffffcc00%s|r - hidden from storage options.", selectedGuild),
             true
         )
         selectedGuild = nil
@@ -6948,7 +6969,7 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
         fs:SetPoint("RIGHT", content, "RIGHT", -8, 0)
         fs:SetJustifyH("LEFT")
-        fs:SetText("|cff999999No guilds on the Blacklist. All guilds appear in storage options.|r")
+        fs:SetText("|cff999999No Guilds on the Blacklist. All Guilds appear in storage options.|r")
         y = y + 30
     else
         for _, guildName in ipairs(sorted) do

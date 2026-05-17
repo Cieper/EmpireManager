@@ -1,10 +1,33 @@
 # Changelog
 
+## [0.4.0] - 2026-05-17
+
+### Added
+
+- Storage: overflow routing - when a primary destination is full, items fall through to the next matching rule instead of stalling.
+- Import/Export: Remap Import dialog handles unknown characters and guilds on storage import, with duplicate-aware summary and ESC/X cancel hooks.
+- About panel: clickable header opens a website-URL popup; refreshed copy and tighter layout.
+- Dropdowns: scrollable when long, with automatic scroll-to-selected on open.
+- Storage: snapshot timestamps with stale-age tooltips across dashboard, Storage tab, and roster banks so you can tell at a glance how fresh each capacity reading is.
+- Sidecar: window is draggable by its title bar in both anchored and standalone (`/em config`) modes; option and simple-role checkbox labels are now clickable to toggle.
+
+### Changed
+
+- Storage: realm-aware guild-bank keys disambiguate same-named guilds across realms.
+- Triage: live overlay refresh on rule changes, including per-character Sidecar toggles (previously waited for the next bag event).
+- Triage: warbound legacy junk handling and several capacity edge cases tightened; broader UI/UX polish pass.
+- Triage: re-enabled the "All matching destinations are full" chat warning, batched alongside unreachable-destination reasons.
+- Naming: canonical capitalization for Character / Roster / Vendor Whitelist / Guild Blacklist / Character Blacklist across user-facing strings.
+
+### Fixed
+
+- Triage: Deposit button no longer renders on top of the Vendor button at a vendor. Dropped the `BankFrame:IsShown` fallback that falsely reported the bank as open; bank state now relies solely on tracked `BANKFRAME_OPENED/CLOSED` and `PLAYER_INTERACTION_MANAGER_FRAME_SHOW/HIDE` events.
+
 ## [0.3.6] - 2026-05-11
 
 ### Added
 
-- Storage Setup Wizard: new guided flow to bulk-create storage rules from templates (self banker, guild bank, warband bank, stash for gear and recipes). Includes per-template Review summary, Clear-existing toggle, and an option to route shared professions to the highest-skill character.
+- Storage Setup Wizard: new guided flow to bulk-create storage rules from templates (Self-Banker, Mule Banker, Guild/Warband Bank, Split by Expansion, Stash Everything Else). Includes per-template Review summary, Clear-existing toggle, and an option to route shared professions to the highest-skill character.
 - Roster: warband bank gold is now tracked and folded into the Roster Info total.
 
 ### Changed

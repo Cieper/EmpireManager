@@ -128,17 +128,30 @@ local function IsEligible(entry)
 end
 
 -- Returns sorted list of unique guild names from the registry, excluding blacklist.
+-- Returns sorted unique (guild, realm) pairs with disambiguated labels:
+-- "Guild" when the name is unique across the roster, "Guild - Realm" when it
+-- collides with another realm. Same shape as Tabs.lua's BuildGuildList.
 local function SortedGuilds()
-    local seen, out = {}, {}
     local bl = EmpireManager.db.global.guildBlacklist or {}
+    local nameCounts, out, seen = {}, {}, {}
     for _, entry in pairs(EmpireManager.db.global.registry or {}) do
         local g = entry.guild
-        if g and g ~= "" and not bl[g] and not seen[g] then
-            seen[g] = true
-            out[#out + 1] = g
+        local r = entry.realm
+        if g and g ~= "" and r and r ~= "" and not bl[g] then
+            local key = g .. "\1" .. r
+            if not seen[key] then
+                seen[key] = true
+                out[#out + 1] = { guild = g, realm = r }
+                nameCounts[g] = (nameCounts[g] or 0) + 1
+            end
         end
     end
-    table.sort(out)
+    for _, item in ipairs(out) do
+        item.label = (nameCounts[item.guild] > 1) and (item.guild .. " - " .. item.realm) or item.guild
+    end
+    table.sort(out, function(a, b)
+        return a.label:lower() < b.label:lower()
+    end)
     return out
 end
 
@@ -325,6 +338,7 @@ local function GenerateRules(state)
                     profession = prof,
                     type = "guildbank",
                     guild = state.guild,
+                    realm = state.guildRealm,
                 }
             else
                 rules[#rules + 1] = {
@@ -482,6 +496,7 @@ function EMWizardMixin:RenderStep1()
             -- Reset downstream state when template changes.
             self._state.mule = nil
             self._state.guild = nil
+            self._state.guildRealm = nil
             self._state.dest = nil
             self._state.stashChar = nil
             self._state.maxSkillOnly = nil
@@ -571,7 +586,7 @@ function EMWizardMixin:RenderStep2()
         cb:SetScript("OnClick", function(btn)
             self._state.maxSkillOnly = btn:GetChecked() and true or false
         end)
-        local cbLbl = MakeClickableLabel(self, body, cb, "When two Characters share a Profession, only route to the highest-skill one")
+        local cbLbl = MakeClickableLabel(self, body, cb, "For shared Professions, route only to the highest-skill Character")
         cbLbl:SetPoint("LEFT", cb, "RIGHT", 2, 0)
         return
     end
@@ -602,8 +617,12 @@ function EMWizardMixin:RenderStep2()
                 self._state.mule = chars[1].guid
             end
         end
+        local muleSelIdx
         dd:SetupMenu(function(_, root)
-            for _, c in ipairs(chars) do
+            root:SetScrollMode(20 * 20)
+            muleSelIdx = nil
+            for i, c in ipairs(chars) do
+                if c.guid == self._state.mule then muleSelIdx = i end
                 root:CreateRadio(CharLabel(c.entry), function()
                     return self._state.mule == c.guid
                 end, function()
@@ -611,6 +630,7 @@ function EMWizardMixin:RenderStep2()
                 end)
             end
         end)
+        EmpireManager:EnableDropdownScrollToSelected(dd, function() return muleSelIdx end)
         return
     end
 
@@ -684,18 +704,27 @@ function EMWizardMixin:RenderStep2()
             end
 
             if not self._state.guild and #guilds > 0 then
-                self._state.guild = guilds[1]
+                self._state.guild = guilds[1].guild
+                self._state.guildRealm = guilds[1].realm
             end
 
+            local guildSelIdx
             guildDD:SetupMenu(function(_, root)
-                for _, g in ipairs(guilds) do
-                    root:CreateRadio(g, function()
-                        return self._state.guild == g
+                root:SetScrollMode(20 * 20)
+                guildSelIdx = nil
+                for i, item in ipairs(guilds) do
+                    if item.guild == self._state.guild and item.realm == self._state.guildRealm then
+                        guildSelIdx = i
+                    end
+                    root:CreateRadio(item.label, function()
+                        return self._state.guild == item.guild and self._state.guildRealm == item.realm
                     end, function()
-                        self._state.guild = g
+                        self._state.guild = item.guild
+                        self._state.guildRealm = item.realm
                     end)
                 end
             end)
+            EmpireManager:EnableDropdownScrollToSelected(guildDD, function() return guildSelIdx end)
         end
 
         if self._state.dest == "char" then
@@ -722,8 +751,12 @@ function EMWizardMixin:RenderStep2()
                 end
             end
 
+            local stashSelIdx
             charDD:SetupMenu(function(_, root)
-                for _, c in ipairs(chars) do
+                root:SetScrollMode(20 * 20)
+                stashSelIdx = nil
+                for i, c in ipairs(chars) do
+                    if c.guid == self._state.stashChar then stashSelIdx = i end
                     root:CreateRadio(CharLabel(c.entry), function()
                         return self._state.stashChar == c.guid
                     end, function()
@@ -731,6 +764,7 @@ function EMWizardMixin:RenderStep2()
                     end)
                 end
             end)
+            EmpireManager:EnableDropdownScrollToSelected(charDD, function() return stashSelIdx end)
         end
         return
     end
@@ -800,7 +834,7 @@ function EMWizardMixin:RenderStep2()
         cb:SetScript("OnClick", function(btn)
             self._state.maxSkillOnly = btn:GetChecked() and true or false
         end)
-        local cbLbl = MakeClickableLabel(self, body, cb, "When two Characters share a Profession, only route to the highest-skill one")
+        local cbLbl = MakeClickableLabel(self, body, cb, "For shared Professions, route only to the highest-skill Character")
         cbLbl:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     end
 end
@@ -1159,7 +1193,7 @@ function EMWizardMixin:RenderStep5()
                     expText = string.format(" |cffe8d9a8(%d expansions)|r", #r.expansions)
                 end
             end
-            row:SetText(string.format("%s -> %s%s", profLabel, destText, expText))
+            row:SetText(string.format("%s » %s%s", profLabel, destText, expText))
             row:SetTextColor(1, 1, 1)
             y = y + 16
         end

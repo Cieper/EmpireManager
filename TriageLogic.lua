@@ -536,6 +536,9 @@ function EmpireManager:InvalidateStorageCache()
     self._bankTriageFingerprint = nil
     self._triageFingerprintCount = nil
     self._bankTriageFingerprintCount = nil
+    -- Repaint the triage overlay if it's open so rule/capacity changes show
+    -- without waiting for the next bag event. Cheap no-op when not visible.
+    self:SendMessage("EM_TRIAGE_REFRESH")
 end
 
 -------------------------------------------------------------------------------
@@ -1287,6 +1290,23 @@ end
 function EmpireManager:ClassifyItem(item, entry)
     local ctx = self._classifyCtx -- per-scan context from PrepareClassificationContext
 
+    -- Overflow tracking: when a matching assignment is skipped because the
+    -- destination has no free slots, set this flag. If no later rule wins,
+    -- we surface "All destinations full" instead of generic "No matching Rule".
+    -- Skipped for items already in a bank (reorg path) - we shouldn't refuse
+    -- to leave items in place when their assigned tab is full of themselves.
+    local capacityBlocked = false
+    local function HasCapacity(assignment)
+        if item.bankType then
+            return true -- reorganizing - bind/capacity checks deferred to Blizzard
+        end
+        if self:HasFreeCapacity(assignment) then
+            return true
+        end
+        capacityBlocked = true
+        return false
+    end
+
     -- Keep List: items here are protected from every triage action (vendor, mail, stash).
     -- Wins over every other rule, including vendorWhitelist.
     if ctx and ctx.keepList[item.itemID] then
@@ -1440,7 +1460,11 @@ function EmpireManager:ClassifyItem(item, entry)
         local assignments_list = ctx and ctx.storageAssignments or {}
         for ruleIndex, assignment in ipairs(assignments_list) do
             if assignment.profession == itemCategory then
-                if IsBankTypeCompatible(item, assignment) and IsAssignmentEligible(assignment, item) then
+                if
+                    IsBankTypeCompatible(item, assignment)
+                    and IsAssignmentEligible(assignment, item)
+                    and HasCapacity(assignment)
+                then
                     return self:GetStorageRouting(assignment, entry, itemCategory, ruleIndex, item)
                 end
             end
@@ -1463,7 +1487,7 @@ function EmpireManager:ClassifyItem(item, entry)
                     elseif item.isWarbound then
                         typeOK = assignment.type == "charbank" or assignment.type == "warbandbank"
                     end
-                    if typeOK and IsAssignmentEligible(assignment, item) then
+                    if typeOK and IsAssignmentEligible(assignment, item) and HasCapacity(assignment) then
                         return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                     end
                 end
@@ -1493,23 +1517,30 @@ function EmpireManager:ClassifyItem(item, entry)
         return CAT_STASH, "Move to Bank (Artifact Weapon)", { destType = "charbank", profKey = "quest_old" }
     end
 
-    -- Rule D.2b-oldmisc: Extend stashOldQuestItems to BoP clutter.
+    -- Rule D.2b-oldmisc: Extend stashOldQuestItems to BoP/warbound clutter.
     --   classID 15 sub 0 (Misc/Junk) + sub 4 (Misc/Other): legacy quest-reward
-    --     clutter (faction tokens, lore items, relics, fragments, NPC gifts).
+    --     clutter (faction tokens, lore items, relics, fragments, NPC gifts,
+    --     legacy raid tier tokens like Conqueror's Mark of Sanctification).
+    --     Both soulbound and warbound items in this bucket - they're all stuck
+    --     legacy junk regardless of bind state.
     --   classID 0 sub 0 (Consumable/Generic) + sub 8 (Consumable/Other): legacy
     --     event toys, challenge-mode cosmetics, old buffs (War Ravaged Armor
     --     Set, Battle Standard, Blossoming Branch, Elixir of Shadow Sight...).
+    --     Soulbound only - warbound consumables already route via the
+    --     Consumables category match in the profession loop above.
     -- Items of current expansion level are spared. Blocklist protects always-
     -- useful items (Hearthstone, Shadowguard Translocator, Timewalking keys).
     if
         entry.stashOldQuestItems
-        and ((item.itemClassID == 15 and (item.itemSubClassID == 0 or item.itemSubClassID == 4)) or (item.itemClassID == 0 and (item.itemSubClassID == 0 or item.itemSubClassID == 8)))
         and item.isBound
-        and not item.isWarbound
         and not item.bankType
         and not OLD_QUEST_STASH_BLOCKLIST[item.itemID]
         and item.expansionID
         and item.expansionID < GetExpansionLevel()
+        and (
+            (item.itemClassID == 15 and (item.itemSubClassID == 0 or item.itemSubClassID == 4))
+            or (item.itemClassID == 0 and (item.itemSubClassID == 0 or item.itemSubClassID == 8) and not item.isWarbound)
+        )
     then
         return CAT_STASH, "Move to Bank (Legacy item)", { destType = "charbank", profKey = "quest_old" }
     end
@@ -1549,6 +1580,7 @@ function EmpireManager:ClassifyItem(item, entry)
                     and assignment.char == guid
                     and matchSet[assignment.profession]
                     and IsAssignmentEligible(assignment, item)
+                    and HasCapacity(assignment)
                 then
                     return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                 end
@@ -1635,7 +1667,7 @@ function EmpireManager:ClassifyItem(item, entry)
                                 eligible = true
                             end
                         end
-                        if eligible and IsAssignmentEligible(assignment, item) then
+                        if eligible and IsAssignmentEligible(assignment, item) and HasCapacity(assignment) then
                             return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                         end
                     -- Equipment (BoA): only match warbound (account-bound) gear
@@ -1644,10 +1676,15 @@ function EmpireManager:ClassifyItem(item, entry)
                             item.isWarbound
                             and IsBankTypeCompatible(item, assignment)
                             and IsAssignmentEligible(assignment, item)
+                            and HasCapacity(assignment)
                         then
                             return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                         end
-                    elseif IsBankTypeCompatible(item, assignment) and IsAssignmentEligible(assignment, item) then
+                    elseif
+                        IsBankTypeCompatible(item, assignment)
+                        and IsAssignmentEligible(assignment, item)
+                        and HasCapacity(assignment)
+                    then
                         return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                     end
                 end
@@ -1774,7 +1811,13 @@ function EmpireManager:ClassifyItem(item, entry)
         end
     end
 
-    -- Rule D.3: Unrecognized items → KEEP (avoid false positives)
+    -- Rule D.3: Unrecognized items → KEEP (avoid false positives).
+    -- When a matching rule was skipped because its destination is full,
+    -- surface that instead of the generic fall-through (handled by
+    -- WarnOnUnreachableDestinations).
+    if capacityBlocked then
+        return CAT_KEEP, "All matching destinations are full"
+    end
     return CAT_KEEP, "No matching Rule"
 end
 
@@ -1809,15 +1852,19 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
 
     if sType == "guildbank" then
         local guildName = assignment.guild or ""
+        local guildRealm = assignment.realm or ""
         local myGuild = entry.guild or ""
-        -- Same guild? Deposit directly
-        if guildName ~= "" and myGuild == guildName then
+        local myRealm = entry.realm or ""
+        -- Same guild AND realm? Deposit directly. Two guilds with the same
+        -- name on different realms are distinct, so realm has to match.
+        if guildName ~= "" and myGuild == guildName and (guildRealm == "" or myRealm == guildRealm) then
             return CAT_STASH,
                 "Deposit in <" .. guildName .. ">" .. tabSuffix .. " (" .. profLabel .. ")",
                 {
                     destType = "guildbank",
                     destTabs = assignment.tabs,
                     guild = guildName,
+                    realm = guildRealm,
                     profKey = profKey,
                     ruleIndex = ruleIndex,
                 }
@@ -1827,9 +1874,9 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
         if assignment.char then
             bankerEntry = self.db.global.registry[assignment.char]
         end
-        -- Auto-resolve: find any character in the target guild
+        -- Auto-resolve: find any character in the target guild (on the same realm)
         if not bankerEntry then
-            local resolvedGuid = self:FindCharInGuild(guildName, guid)
+            local resolvedGuid = self:FindCharInGuild(guildName, guid, guildRealm)
             if resolvedGuid then
                 bankerEntry = self.db.global.registry[resolvedGuid]
             end
@@ -1990,19 +2037,45 @@ function EmpireManager:WarnOnUnreachableDestinations(results)
     end
     self._unreachableWarned = self._unreachableWarned or {}
     local seen = self._unreachableWarned
+
+    -- Group newly-seen items by their reason so we print one chat line per
+    -- reason instead of one per item. Session-dedup is still keyed per
+    -- (itemID, reason) so re-scans don't repeat already-warned items.
+    -- Surfaces both role/banker "unreachable" reasons and the
+    -- "All matching destinations are full" capacity case - batched so a
+    -- stack of affected items collapses to a single chat line.
+    local byReason = {}
+    local reasonOrder = {}
     for _, r in ipairs(results) do
         local action = r.action or ""
-        if action:find("unreachable", 1, true) then
+        if action:find("unreachable", 1, true) or action:find("destinations are full", 1, true) then
             local key = (r.item.itemID or 0) .. ":" .. action
             if not seen[key] then
                 seen[key] = true
-                -- Explicit |r after the item link to prevent the link's
-                -- quality color from bleeding onto the trailing reason text.
-                self:Print(
-                    string.format("|cffff8800[Triage]|r %s|r - %s", r.item.itemLink or r.item.itemName or "?", action)
-                )
+                local label = r.item.itemLink or r.item.itemName or "?"
+                if not byReason[action] then
+                    byReason[action] = {}
+                    reasonOrder[#reasonOrder + 1] = action
+                end
+                table.insert(byReason[action], label)
             end
         end
+    end
+
+    -- Print one line per reason, listing items inline. The trailing |r after
+    -- each item link prevents the quality color from bleeding onto the next
+    -- entry or the reason text.
+    for _, action in ipairs(reasonOrder) do
+        local items = byReason[action]
+        local n = #items
+        local labelStr
+        if n == 1 then
+            labelStr = items[1] .. "|r"
+        else
+            labelStr = string.format("%d items (%s|r", n, table.concat(items, "|r, "))
+            labelStr = labelStr .. ")"
+        end
+        self:Print(string.format("|cffff8800[Triage]|r %s - %s", labelStr, action))
     end
 end
 

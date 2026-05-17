@@ -341,6 +341,13 @@ function EMCharacterRowMixin:ShowStorageTooltip()
         GameTooltip:AddDoubleLine("Banks", "No data (open bank)", 1, 1, 1, 0.5, 0.5, 0.5)
     end
 
+    local cap = EmpireManager.db.global.storageCapacity
+    local charSection = cap and cap.charbank and self._guid and cap.charbank[self._guid]
+    local age = charSection and EmpireManager:FormatStaleAge(charSection._scannedAt)
+    if age then
+        GameTooltip:AddDoubleLine("Scanned", age, 1, 1, 1, 1, 1, 1)
+    end
+
     GameTooltip:Show()
 end
 
@@ -452,6 +459,7 @@ function EmpireManagerFrameMixin:OnLoad()
             "Right-click or double-click a rule to edit it.",
             " ",
             "Rules are checked top-to-bottom: the first matching rule wins, so put higher-priority rules above lower ones.",
+            "If that rule's destination is full, the item overflows to the next matching rule.",
             "Use the up/down arrows to reorder.",
             "Ctrl-click an arrow to move 5 positions.",
             "Shift-click to jump to the next rule of the same category.",
@@ -470,7 +478,7 @@ function EmpireManagerFrameMixin:OnLoad()
                 "Roster: Banks",
                 "Bank capacity overview across your roster.",
                 " ",
-                "Shows tab fill levels for character banks, the warband bank, and guild banks.",
+                "Shows tab fill levels for character banks, the Warband Bank, and Guild Banks.",
                 "Color codes the bars by how full each tab is.",
             },
             Professions = {

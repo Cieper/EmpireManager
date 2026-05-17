@@ -244,6 +244,231 @@ function EmpireManager:StyleIconButton(btn, alpha)
     end
 end
 
+-- For scrollable WowStyle1DropdownTemplate dropdowns: scroll the popup so the
+-- currently selected radio is visible on open. MenuUtil itself does not do
+-- this. Pattern lifted from Blizzard_DelvesDifficultyPicker.lua. The getter
+-- runs at open time and returns the 1-based index of the selected radio in
+-- the order it was added in SetupMenu, or nil if nothing is selected.
+function EmpireManager:EnableDropdownScrollToSelected(dd, getSelectedIndex)
+    dd:RegisterCallback(DropdownButtonMixin.Event.OnMenuOpen, function(dropdown)
+        if not dropdown.menu or not dropdown.menu.ScrollBox then
+            return
+        end
+        if not dropdown.menu.ScrollBox:HasScrollableExtent() then
+            return
+        end
+        local idx = getSelectedIndex and getSelectedIndex()
+        if idx and idx > 0 then
+            dropdown.menu.ScrollBox:ScrollToElementDataIndex(idx, ScrollBoxConstants.AlignCenter)
+        end
+    end, dd)
+end
+
+-- Composite key for cap.guildbank and any other guild-keyed table. Guild names
+-- are not unique across realms (two "Vanguard" guilds on different realms are
+-- distinct), so the storage key must include realm. Returns nil if either
+-- component is missing so callers can early-out cleanly.
+function EmpireManager:GuildKey(guildName, realm)
+    if not guildName or guildName == "" then
+        return nil
+    end
+    if not realm or realm == "" then
+        return nil
+    end
+    return guildName .. "-" .. realm
+end
+
+-- Single source of truth for the About panel layout. Called from both the
+-- Dashboard's About tab and the Interface > AddOns > EmpireManager canvas.
+-- `parent` is the frame to lay content into. `opts.track`, if provided, is
+-- called with each created child so the caller can hide/clear them on a
+-- subsequent rebuild (Dashboard re-renders on every OnShow; the Settings
+-- canvas is one-shot and passes no track).
+-- Returns the total content height in pixels.
+function EmpireManager:BuildAboutPanel(parent, opts)
+    opts = opts or {}
+    local track = opts.track or function(o) return o end
+    local LINE_HEIGHT = 20
+    local FONT_NORMAL = "GameFontHighlight"
+
+    local y = 8
+
+    local LOGO_SIZE = 96
+    local TEXT_LEFT = 8 + LOGO_SIZE + 12
+
+    local logo = track(parent:CreateTexture(nil, "ARTWORK"))
+    logo:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\logo256")
+    logo:SetSize(LOGO_SIZE, LOGO_SIZE)
+    logo:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+
+    y = y - 2
+
+    local title = track(parent:CreateTexture(nil, "ARTWORK"))
+    title:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\em")
+    title:SetSize(192, 48)
+    title:SetPoint("TOPLEFT", parent, "TOPLEFT", TEXT_LEFT, -(y + 4))
+    y = y + 52
+
+    local ver = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    ver:SetPoint("TOPLEFT", parent, "TOPLEFT", TEXT_LEFT, -y)
+    ver:SetText("Version " .. (self.version or "?"))
+    ver:SetTextColor(0.91, 0.85, 0.66)
+    y = y + LINE_HEIGHT
+
+    local author = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    author:SetPoint("TOPLEFT", parent, "TOPLEFT", TEXT_LEFT, -y)
+    author:SetText("|cffe8d9a8Author:|r  l0neshad0w")
+    author:SetTextColor(1, 1, 1)
+    y = y + LINE_HEIGHT
+
+    if y < 8 + LOGO_SIZE then
+        y = 8 + LOGO_SIZE
+    end
+
+    -- Clickable header (logo + title + version + author) opens the website URL popup.
+    local linkBtn = track(CreateFrame("Button", nil, parent))
+    linkBtn:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -8)
+    linkBtn:SetPoint("BOTTOMRIGHT", parent, "TOPLEFT", 8 + LOGO_SIZE + 12 + 220, -y)
+    linkBtn:SetScript("OnClick", function()
+        StaticPopup_Show("EM_URL_SITE")
+    end)
+    linkBtn:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_CURSOR")
+        GameTooltip:AddLine("https://wow.cyberpunk.gr", 1, 0.82, 0)
+        GameTooltip:AddLine("Click to copy the website link", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    linkBtn:SetScript("OnLeave", GameTooltip_Hide)
+
+    y = y + 8
+
+    local h1 = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    h1:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+    h1:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    h1:SetJustifyH("LEFT")
+    h1:SetText(self.description)
+    h1:SetTextColor(1, 1, 1)
+    y = y + LINE_HEIGHT
+
+    local lead = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    lead:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+    lead:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    lead:SetJustifyH("LEFT")
+    lead:SetText("Track inventory, route materials, and stay in control of your entire roster.")
+    lead:SetTextColor(1, 1, 1)
+    y = y + LINE_HEIGHT + 8
+
+    -- Statistics
+    y = y + 4
+    local statDivider = track(parent:CreateTexture(nil, "ARTWORK"))
+    statDivider:SetAtlas("ui-journeys-renown-divider", true)
+    statDivider:SetPoint("TOP", parent, "TOP", 0, -y)
+    y = y + 28
+    local statHdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+    statHdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+    statHdr:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    statHdr:SetJustifyH("LEFT")
+    statHdr:SetText("|cffffff88Statistics|r")
+    y = y + LINE_HEIGHT
+    y = y - 12
+
+    local gStats = self.db.global.stats or {}
+    local sStats = self._sessionStats or {}
+
+    local function FmtNum(n)
+        n = n or 0
+        local s = tostring(math.floor(n))
+        return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    end
+
+    local statDefs = {
+        { key = "goldVendored",   label = "Gold from Vendors",       icon = "Interface\\Icons\\INV_Misc_Coin_17", fmt = "gold" },
+        { key = "itemsVendored",  label = "Items Vendored",          icon = "Interface\\Icons\\INV_Misc_Bag_10",  fmt = "num"  },
+        { key = "itemsStashed",   label = "Items Deposited to Bank", icon = "Interface\\Icons\\INV_Misc_Bag_07",  fmt = "num"  },
+        { key = "itemsMailed",    label = "Items Mailed",            icon = "Interface\\Icons\\INV_Letter_15",    fmt = "num"  },
+    }
+
+    local STAT_LABEL_X = 12
+    local STAT_LABEL_WIDTH = 220
+    local STAT_SESSION_X = STAT_LABEL_X + STAT_LABEL_WIDTH
+    local STAT_ALLTIME_X = STAT_SESSION_X + 120
+    local STAT_COL_WIDTH = 100
+
+    local hdrSession = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    hdrSession:SetPoint("TOPLEFT", parent, "TOPLEFT", STAT_SESSION_X, -y)
+    hdrSession:SetWidth(STAT_COL_WIDTH)
+    hdrSession:SetJustifyH("RIGHT")
+    hdrSession:SetText("|cff88ccffThis Session|r")
+
+    local hdrAll = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    hdrAll:SetPoint("TOPLEFT", parent, "TOPLEFT", STAT_ALLTIME_X, -y)
+    hdrAll:SetWidth(STAT_COL_WIDTH)
+    hdrAll:SetJustifyH("RIGHT")
+    hdrAll:SetText("|cffffcc00All Time|r")
+    y = y + LINE_HEIGHT
+
+    for _, stat in ipairs(statDefs) do
+        local sVal = sStats[stat.key] or 0
+        local gVal = gStats[stat.key] or 0
+        local sFmt = stat.fmt == "gold" and self:FormatGold(sVal) or FmtNum(sVal)
+        local gFmt = stat.fmt == "gold" and self:FormatGold(gVal) or FmtNum(gVal)
+
+        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", STAT_LABEL_X, -y)
+        lbl:SetWidth(STAT_LABEL_WIDTH)
+        lbl:SetJustifyH("LEFT")
+        lbl:SetText(string.format("  |T%s:14:14|t  |cffe8d9a8%s|r", stat.icon, stat.label))
+
+        local sFs = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        sFs:SetPoint("TOPLEFT", parent, "TOPLEFT", STAT_SESSION_X, -y)
+        sFs:SetWidth(STAT_COL_WIDTH)
+        sFs:SetJustifyH("RIGHT")
+        sFs:SetText("|cff88ccff" .. sFmt .. "|r")
+
+        local gFs = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        gFs:SetPoint("TOPLEFT", parent, "TOPLEFT", STAT_ALLTIME_X, -y)
+        gFs:SetWidth(STAT_COL_WIDTH)
+        gFs:SetJustifyH("RIGHT")
+        gFs:SetText("|cffffffff" .. gFmt .. "|r")
+
+        y = y + LINE_HEIGHT
+    end
+
+    y = y + 8
+
+    -- Slash Commands divider + heading (inline version of AddSeparator).
+    y = y + 4
+    local cmdDivider = track(parent:CreateTexture(nil, "ARTWORK"))
+    cmdDivider:SetAtlas("ui-journeys-renown-divider", true)
+    cmdDivider:SetPoint("TOP", parent, "TOP", 0, -y)
+    y = y + 28
+    local cmdHdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+    cmdHdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+    cmdHdr:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    cmdHdr:SetJustifyH("LEFT")
+    cmdHdr:SetText("|cffffff88Slash Commands|r")
+    y = y + 24
+
+    local CMD_LABEL_WIDTH = 170
+    for _, c in ipairs(EmpireManager.SLASH_COMMANDS) do
+        local cmdFs = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        cmdFs:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
+        cmdFs:SetWidth(CMD_LABEL_WIDTH)
+        cmdFs:SetJustifyH("LEFT")
+        cmdFs:SetText("|cffffd100" .. c.cmd .. "|r")
+
+        local descFs = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        descFs:SetPoint("TOPLEFT", parent, "TOPLEFT", 12 + CMD_LABEL_WIDTH, -y)
+        descFs:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+        descFs:SetJustifyH("LEFT")
+        descFs:SetText(c.desc)
+        descFs:SetTextColor(1, 1, 1)
+        y = y + 18
+    end
+
+    return y
+end
+
 -- Hardcoded: which item subclasses each profession consumes/produces
 -- Values are {classID, subClassID} pairs from WoW's item classification
 EmpireManager.PROF_ITEM_MAP = {
@@ -631,7 +856,7 @@ EmpireManager.ROLE_TOOLTIPS = {
     artisan = "Crafting character. Maximum 2 professions.\n\nItems matching those professions will be routed to assigned storage.",
     gatherer = "Gathering character. Maximum 2 professions.\n\nGathered materials are categorized and routed automatically.",
     auctioneer = "Receives BoE items for selling.\n\nTriage routes non-Warbound BoE gear to this character via mail. Only one Auctioneer per realm is typical.",
-    banker = "Bank mule for guild or personal bank storage.\n\nAuto-assigned when a character is set as a storage destination. Receives mail from other characters.",
+    banker = "Bank mule for Guild or personal Bank storage.\n\nAuto-assigned when a character is set as a storage destination. Receives mail from other characters.",
     lockpicker = "Opens locked items (Rogue, Mechagnome, or Blacksmith with Skeleton Keys).\n\nMark this character so you remember who can pick locks.",
     zookeeper = "Battle pet manager.\n\nTag your pet collection character for quick identification.",
     pvper = "PvP-focused character.\n\nTag for quick identification in the roster.",
@@ -795,6 +1020,81 @@ end
 -- Also register non-profession storage categories so display lookups resolve them
 for _, info in ipairs(EmpireManager.STORAGE_CATEGORY_DISPLAY) do
     EmpireManager.PROF_INFO_BY_KEY[info.key] = info
+end
+
+-------------------------------------------------------------------------------
+-- Storage capacity helpers
+-------------------------------------------------------------------------------
+
+function EmpireManager:FormatStaleAge(scannedAt)
+    if not scannedAt or scannedAt == 0 then
+        return nil
+    end
+    local d = time() - scannedAt
+    if d < 60 then
+        return "just now"
+    end
+    if d < 3600 then
+        return string.format("%dm ago", math.floor(d / 60))
+    end
+    if d < 86400 then
+        return string.format("%dh ago", math.floor(d / 3600))
+    end
+    return string.format("%dd ago", math.floor(d / 86400))
+end
+
+-- Aggregate { total, used } across specific tabs (array) or all tabs (nil).
+-- capSection is one of: cap.warbandbank, cap.guildbank[GuildKey(name, realm)], cap.charbank[guid].
+-- Returns { total, used } or nil if no data.
+function EmpireManager:AggregateCapacity(capSection, tabs)
+    if not capSection then
+        return nil
+    end
+    local totalSum, usedSum = 0, 0
+    if tabs and #tabs > 0 then
+        for _, t in ipairs(tabs) do
+            local td = capSection[t]
+            if td and td.total then
+                totalSum = totalSum + td.total
+                usedSum = usedSum + td.used
+            end
+        end
+    else
+        for _, td in pairs(capSection) do
+            if type(td) == "table" and td.total then
+                totalSum = totalSum + td.total
+                usedSum = usedSum + td.used
+            end
+        end
+    end
+    return totalSum > 0 and { total = totalSum, used = usedSum } or nil
+end
+
+-- Resolve the capacity section for an assignment and check if any free slots
+-- are available. Returns true when:
+--   - no snapshot exists yet (unknown -> optimistic, don't block routing on
+--     first scan before any bank has been opened), or
+--   - aggregated free > 0.
+-- Returns false only when we have positive evidence the destination is full.
+function EmpireManager:HasFreeCapacity(assignment)
+    local cap = self.db and self.db.global and self.db.global.storageCapacity
+    if not cap then
+        return true
+    end
+    local capSection
+    if assignment.type == "warbandbank" then
+        capSection = cap.warbandbank
+    elseif assignment.type == "guildbank" and assignment.guild then
+        local key = self:GuildKey(assignment.guild, assignment.realm)
+        capSection = key and cap.guildbank and cap.guildbank[key]
+    elseif assignment.type == "charbank" and assignment.char then
+        capSection = cap.charbank and cap.charbank[assignment.char]
+    end
+    local agg = self:AggregateCapacity(capSection, assignment.tabs)
+    if not agg then
+        return true -- no snapshot for this destination yet
+    end
+    return (agg.total - agg.used) > 0
 end
 
 -------------------------------------------------------------------------------

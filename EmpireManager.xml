@@ -575,7 +575,7 @@
            inherits="PortraitFrameTemplate"
            parent="UIParent"
            toplevel="true" hidden="true"
-           enableMouse="true" clampedToScreen="true">
+           enableMouse="true" movable="true" clampedToScreen="true">
         <Size x="480" y="500"/>
         <Anchors>
             <Anchor point="CENTER"/>
@@ -1052,6 +1052,60 @@
                 <Anchors>
                     <Anchor point="TOPLEFT" x="24" y="-56"/>
                     <Anchor point="BOTTOMRIGHT" x="-32" y="44"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Storage-Import Remap Dialog                                          -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerRemapDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="HIGH"
+           inherits="BackdropTemplate">
+        <Size x="560" y="400"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-16"/>
+                    </Anchors>
+                </FontString>
+                <FontString parentKey="SubTitleText" inherits="GameFontNormal">
+                    <Anchors>
+                        <Anchor point="TOP" relativeKey="$parent.TitleText" relativePoint="BOTTOM" x="0" y="-2"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="24" y="-64"/>
+                    <Anchor point="BOTTOMRIGHT" x="-32" y="52"/>
                 </Anchors>
                 <Frames>
                     <Frame parentKey="Content">

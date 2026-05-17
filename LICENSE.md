@@ -9,7 +9,7 @@ All rights are reserved by George Litos unless explicitly stated below.
 
 ## Comments
 
-1. If you would like to use sections of the works in your own project, please contact the license holder — permission is likely to be granted.
+1. If you would like to use sections of the works in your own project, please contact the license holder - permission is likely to be granted.
 2. The right to distribute the works is reserved exclusively by the license holder. No other person may distribute the works in any form.
 3. For any questions regarding this license, contact the license holder at: gl@cyberpunk.gr
 

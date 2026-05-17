@@ -9,6 +9,23 @@ local EmpireManager = LibStub("AceAddon-3.0"):NewAddon("EmpireManager", "AceCons
 EmpireManager.version = C_AddOns.GetAddOnMetadata("EmpireManager", "Version") or "?"
 EmpireManager.description = C_AddOns.GetAddOnMetadata("EmpireManager", "Notes") or ""
 
+-- Single source of truth for the slash-command list. Rendered in the Options
+-- panel, the About tab, and the `/em help` chat output.
+EmpireManager.SLASH_COMMANDS = {
+    { cmd = "/em", desc = "Open the Dashboard" },
+    { cmd = "/em config", desc = "Configure the current Character" },
+    { cmd = "/em triage", desc = "Open Bag Triage overlay" },
+    { cmd = "/em options", desc = "Open this settings panel" },
+    { cmd = "/em purge <Name-Realm>", desc = "Remove a Character from the Roster" },
+    { cmd = "/em keeplist", desc = "Open the Keep List window" },
+    { cmd = "/em vendorw", desc = "Open the Vendor Whitelist window" },
+    { cmd = "/em gb", desc = "Open the Guild Blacklist window" },
+    { cmd = "/em charb", desc = "Open the Character Blacklist window" },
+    { cmd = "/em ie", desc = "Open the Import / Export window" },
+    { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
+    { cmd = "/em help", desc = "Show all commands in chat" },
+}
+
 -- DB defaults
 local DB_DEFAULTS = {
     global = {
@@ -16,7 +33,7 @@ local DB_DEFAULTS = {
         storageAssignments = {}, -- array of { profession, type, tabs?, char?, guild?, expansions? }
         storageCapacity = {
             warbandbank = {}, -- [tabIndex] = { total, used }
-            guildbank = {}, -- [guildName] = { [tabIndex] = { total, used } }
+            guildbank = {}, -- [guildName .. "-" .. realm] = { [tabIndex] = { total, used } }
             charbank = {}, -- [guid] = { [tabIndex] = { total, used } }
         },
         schemaVersion = 1,
@@ -57,7 +74,7 @@ local DB_DEFAULTS = {
         keepOwnProfMatsInBank = false, -- Keep own profession materials in character bank
         keepOwnProfMatsInBags = false, -- Keep own profession materials in bags
         keepOwnProfMatsInBagsLatestOnly = false, -- Sub-option: only apply Keep-in-Bags to latest-expansion mats
-        stashOldQuestItems = true, -- Route soulbound Quest items from previous expansions to own bank
+        stashOldQuestItems = false, -- Route soulbound Quest items from previous expansions to own bank
     },
 }
 
@@ -134,6 +151,41 @@ function EmpireManager:OnInitialize()
         end
     end
 
+    -- Backfill asn.realm on guild-bank rules created before the realm-aware
+    -- composite key existed. Look up the first registry character in that
+    -- guild and use their realm. If no such character exists, leave realm
+    -- empty: the rule remains unresolvable until the user logs in to a
+    -- character in that guild on the right realm.
+    for _, asn in ipairs(self.db.global.storageAssignments or {}) do
+        if asn.type == "guildbank" and asn.guild and asn.guild ~= "" and (not asn.realm or asn.realm == "") then
+            for _, entry in pairs(registry) do
+                if entry.guild == asn.guild and entry.realm and entry.realm ~= "" then
+                    asn.realm = entry.realm
+                    break
+                end
+            end
+        end
+    end
+
+    -- Drop orphan cap.guildbank entries: any key that doesn't match a known
+    -- (guild, realm) pair from the registry. Old bare-guild-name keys end up
+    -- here, as do composite keys for guilds no character in the roster is
+    -- currently in. The next guild-bank open re-populates the right key.
+    if self.db.global.storageCapacity and self.db.global.storageCapacity.guildbank then
+        local validKeys = {}
+        for _, entry in pairs(registry) do
+            if entry.guild and entry.guild ~= "" and entry.realm and entry.realm ~= "" then
+                validKeys[entry.guild .. "-" .. entry.realm] = true
+            end
+        end
+        local gb = self.db.global.storageCapacity.guildbank
+        for k in pairs(gb) do
+            if not validKeys[k] then
+                gb[k] = nil
+            end
+        end
+    end
+
     self:RegisterChatCommand("em", "SlashHandler")
 
     -- Native WoW Settings panel (Interface → AddOns → EmpireManager)
@@ -145,178 +197,7 @@ function EmpireManager:OnInitialize()
     local category = Settings.RegisterCanvasLayoutCategory(aboutFrame, "EmpireManager")
     self.settingsCategoryID = category:GetID()
 
-    -- Build About content on the canvas frame
-    local function BuildAboutContent(parent)
-        local LOGO_SIZE = 96
-        local TEXT_LEFT = 16 + LOGO_SIZE + 12 -- logo width + gap
-
-        local logo = parent:CreateTexture(nil, "ARTWORK")
-        logo:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\logo256")
-        logo:SetSize(LOGO_SIZE, LOGO_SIZE)
-        logo:SetPoint("TOPLEFT", 16, -10)
-
-        -- Text column starts slightly above the logo's top edge (matches About page)
-        local y = -8
-
-        local title = parent:CreateTexture(nil, "ARTWORK")
-        title:SetTexture("Interface\\AddOns\\EmpireManager\\textures\\em")
-        title:SetSize(192, 48)
-        title:SetPoint("TOPLEFT", TEXT_LEFT, y - 4)
-        y = y - 52
-
-        local ver = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        ver:SetPoint("TOPLEFT", TEXT_LEFT, y)
-        ver:SetText("Version " .. (self.version or "?"))
-        ver:SetTextColor(0.91, 0.85, 0.66)
-        y = y - 18
-
-        local author = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        author:SetPoint("TOPLEFT", TEXT_LEFT, y)
-        author:SetText("|cffe8d9a8Author:|r  l0neshad0w")
-        y = y - 24
-
-        -- Drop below the logo before the description block
-        if y > -10 - LOGO_SIZE then
-            y = -10 - LOGO_SIZE - 8
-        end
-
-        local desc = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        desc:SetPoint("TOPLEFT", 16, y)
-        desc:SetPoint("RIGHT", parent, "RIGHT", -16, 0)
-        desc:SetJustifyH("LEFT")
-        desc:SetText(self.description)
-        desc:SetTextColor(0.8, 0.8, 0.8)
-        y = y - 36
-
-        -- Statistics
-        local function FmtNum(n)
-            n = n or 0
-            local s = tostring(math.floor(n))
-            return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
-        end
-
-        local gStats = self.db.global.stats or {}
-        local sStats = self._sessionStats or {}
-
-        local statDefs = {
-            {
-                key = "goldVendored",
-                label = "Gold from Vendors",
-                icon = "Interface\\Icons\\INV_Misc_Coin_17",
-                fmt = "gold",
-            },
-            {
-                key = "itemsVendored",
-                label = "Items Vendored",
-                icon = "Interface\\Icons\\INV_Misc_Bag_10",
-                fmt = "num",
-            },
-            {
-                key = "itemsStashed",
-                label = "Items Deposited to Bank",
-                icon = "Interface\\Icons\\INV_Misc_Bag_07",
-                fmt = "num",
-            },
-            {
-                key = "itemsMailed",
-                label = "Items Mailed",
-                icon = "Interface\\Icons\\INV_Letter_15",
-                fmt = "num",
-            },
-        }
-
-        local STAT_LABEL_X = 16
-        local STAT_LABEL_WIDTH = 220
-        local STAT_SESSION_X = STAT_LABEL_X + STAT_LABEL_WIDTH
-        local STAT_ALLTIME_X = STAT_SESSION_X + 120
-        local STAT_COL_WIDTH = 100
-
-        local statHdr = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        statHdr:SetPoint("TOPLEFT", STAT_LABEL_X, y)
-        statHdr:SetText("|cffffff88Statistics|r")
-        y = y - 18
-
-        local hdrSession = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        hdrSession:SetPoint("TOPLEFT", STAT_SESSION_X, y)
-        hdrSession:SetWidth(STAT_COL_WIDTH)
-        hdrSession:SetJustifyH("RIGHT")
-        hdrSession:SetText("|cff88ccffThis Session|r")
-
-        local hdrAll = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        hdrAll:SetPoint("TOPLEFT", STAT_ALLTIME_X, y)
-        hdrAll:SetWidth(STAT_COL_WIDTH)
-        hdrAll:SetJustifyH("RIGHT")
-        hdrAll:SetText("|cffffcc00All Time|r")
-        y = y - 18
-
-        for _, stat in ipairs(statDefs) do
-            local sVal = sStats[stat.key] or 0
-            local gVal = gStats[stat.key] or 0
-            local sFmt = stat.fmt == "gold" and self:FormatGold(sVal) or FmtNum(sVal)
-            local gFmt = stat.fmt == "gold" and self:FormatGold(gVal) or FmtNum(gVal)
-
-            local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            lbl:SetPoint("TOPLEFT", STAT_LABEL_X, y)
-            lbl:SetWidth(STAT_LABEL_WIDTH)
-            lbl:SetJustifyH("LEFT")
-            lbl:SetText(string.format("  |T%s:14:14|t  |cffe8d9a8%s|r", stat.icon, stat.label))
-
-            local sFs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            sFs:SetPoint("TOPLEFT", STAT_SESSION_X, y)
-            sFs:SetWidth(STAT_COL_WIDTH)
-            sFs:SetJustifyH("RIGHT")
-            sFs:SetText("|cff88ccff" .. sFmt .. "|r")
-
-            local gFs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            gFs:SetPoint("TOPLEFT", STAT_ALLTIME_X, y)
-            gFs:SetWidth(STAT_COL_WIDTH)
-            gFs:SetJustifyH("RIGHT")
-            gFs:SetText("|cffffffff" .. gFmt .. "|r")
-
-            y = y - 18
-        end
-
-        y = y - 8
-
-        -- Slash commands
-        local CMD_LABEL_WIDTH = 170
-        local cmdHdr = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        cmdHdr:SetPoint("TOPLEFT", 16, y)
-        cmdHdr:SetText("|cffffff88Slash Commands|r")
-        y = y - 20
-
-        local commands = {
-            { cmd = "/em", desc = "Open the Dashboard" },
-            { cmd = "/em config", desc = "Configure the current character" },
-            { cmd = "/em triage", desc = "Open Bag Triage overlay" },
-            { cmd = "/em options", desc = "Open this settings panel" },
-            { cmd = "/em purge <name>", desc = "Remove a character from the roster" },
-            { cmd = "/em keeplist", desc = "Open the Keep List window" },
-            { cmd = "/em vendorw", desc = "Open the vendor whitelist window" },
-            { cmd = "/em gb", desc = "Open the guild storage blacklist window" },
-            { cmd = "/em charb", desc = "Open the character blacklist window" },
-            { cmd = "/em ie", desc = "Open the Import / Export window" },
-            { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
-            { cmd = "/em help", desc = "Show all commands in chat" },
-        }
-        for _, c in ipairs(commands) do
-            local cmdFs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            cmdFs:SetPoint("TOPLEFT", 20, y)
-            cmdFs:SetWidth(CMD_LABEL_WIDTH)
-            cmdFs:SetJustifyH("LEFT")
-            cmdFs:SetText("|cffffd100" .. c.cmd .. "|r")
-
-            local descFs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            descFs:SetPoint("TOPLEFT", 20 + CMD_LABEL_WIDTH, y)
-            descFs:SetPoint("RIGHT", parent, "RIGHT", -16, 0)
-            descFs:SetJustifyH("LEFT")
-            descFs:SetText(c.desc)
-            descFs:SetTextColor(0.8, 0.8, 0.8)
-
-            y = y - 16
-        end
-    end
-    BuildAboutContent(aboutFrame)
+    self:BuildAboutPanel(aboutFrame)
 
     -- Helper: register a boolean option backed by db.global.options.
     -- Returns (setting, initializer). Pass the parent's initializer as
@@ -902,7 +783,7 @@ function EmpireManager:SlashHandler(input)
     elseif cmd == "purge" then
         local _, charName = self:GetArgs(input, 2)
         if not charName or charName == "" then
-            self:ChatMsg("Usage: /em purge <character name>", true)
+            self:ChatMsg("Usage: /em purge <Name> or <Name-Realm>", true)
             return
         end
         self:PurgeCharacter(charName)
@@ -1040,7 +921,7 @@ function EmpireManager:SlashHandler(input)
         elseif sub == "wb" or sub == "warband" then
             target = { label = "warband bank", scan = "bank", bankType = "warbandbank" }
         elseif sub == "gb" or sub == "guild" then
-            target = { label = "guild bank", scan = "guildbank" }
+            target = { label = "Guild Bank", scan = "guildbank" }
         else
             self:ChatMsg(string.format("|cffff4444[dump]|r unknown target: %s", sub), true)
             return
@@ -1048,18 +929,9 @@ function EmpireManager:SlashHandler(input)
         self:_DumpDebug(target)
     elseif cmd == "help" then
         self:ChatMsg("|cffffcc00Available commands:|r", true)
-        self:ChatMsg("  /em Open the Dashboard", true)
-        self:ChatMsg("  /em config Open the Assignment Panel for this character", true)
-        self:ChatMsg("  /em triage Open the Bag Triage overlay", true)
-        self:ChatMsg("  /em options Open the Options panel", true)
-        self:ChatMsg("  /em purge <name> Remove a character from the roster", true)
-        self:ChatMsg("  /em keeplist Open the Keep List window", true)
-        self:ChatMsg("  /em vendorw Open the vendor whitelist window", true)
-        self:ChatMsg("  /em gb Open the guild storage blacklist window", true)
-        self:ChatMsg("  /em charb Open the character blacklist window", true)
-        self:ChatMsg("  /em ie Open the Import/Export window", true)
-        self:ChatMsg("  /em wizard Open the Storage Setup Wizard", true)
-        self:ChatMsg("  /em help Show this list", true)
+        for _, c in ipairs(EmpireManager.SLASH_COMMANDS) do
+            self:ChatMsg(string.format("  %s %s", c.cmd, c.desc), true)
+        end
     else
         self:ToggleDashboard()
     end
@@ -1076,6 +948,7 @@ function EmpireManager:UpdateEscBehavior()
         "EmpireManagerGuildBlacklistWindow",
         "EmpireManagerCharBlacklistWindow",
         "EmpireManagerWizardFrame",
+        "EmpireManagerRemapDialog",
     }
     local enabled = self.db.global.options.escToClose
     if enabled then
@@ -1204,7 +1077,7 @@ function EmpireManager:_DumpDebug(target)
         end)
     elseif target.scan == "guildbank" then
         if not self:IsGuildBankOpen() then
-            self:ChatMsg("|cffff4444[dump]|r Guild bank must be open for this dump.", true)
+            self:ChatMsg("|cffff4444[dump]|r Guild Bank must be open for this dump.", true)
             return
         end
         self:RunBankTriageAsync(function(results)
@@ -1355,6 +1228,7 @@ EmpireManager.CLAMPED_FRAMES = {
     "EmpireManagerWizardFrame",
     "EmpireManagerTriageFrame",
     "EmpireManagerMailDialog",
+    "EmpireManagerRemapDialog",
     "EmpireManagerKeeplistWindow",
     "EmpireManagerVendorlistWindow",
     "EmpireManagerGuildBlacklistWindow",
@@ -1646,13 +1520,20 @@ function EmpireManager:BANKFRAME_OPENED()
             end
         end
 
+        -- Capacity changed -> drop cached triage classifications so overflow
+        -- routing (HasFreeCapacity) reflects fresh fill levels on next scan.
+        selfRef:InvalidateStorageCache()
+
         local freeBank, totalBank, charTabs = 0, 0, 0
         for _, tabData in pairs(cap.charbank[guid] or {}) do
-            local t = tabData.total or 0
-            freeBank = freeBank + t - (tabData.used or 0)
-            totalBank = totalBank + t
-            charTabs = charTabs + 1
+            if type(tabData) == "table" then
+                local t = tabData.total or 0
+                freeBank = freeBank + t - (tabData.used or 0)
+                totalBank = totalBank + t
+                charTabs = charTabs + 1
+            end
         end
+        cap.charbank[guid]._scannedAt = time()
         local entry = selfRef.db.global.registry[guid]
         if entry then
             entry.freeBankSlots = freeBank
@@ -1661,11 +1542,14 @@ function EmpireManager:BANKFRAME_OPENED()
 
         local freeWB, totalWB, wbTabs = 0, 0, 0
         for _, tabData in pairs(cap.warbandbank or {}) do
-            local t = tabData.total or 0
-            freeWB = freeWB + t - (tabData.used or 0)
-            totalWB = totalWB + t
-            wbTabs = wbTabs + 1
+            if type(tabData) == "table" then
+                local t = tabData.total or 0
+                freeWB = freeWB + t - (tabData.used or 0)
+                totalWB = totalWB + t
+                wbTabs = wbTabs + 1
+            end
         end
+        cap.warbandbank._scannedAt = time()
 
         selfRef:ChatVerbose(
             string.format(
@@ -1769,18 +1653,27 @@ function EmpireManager:RefreshBankCapacity()
         end
     end
 
+    cap.charbank[guid]._scannedAt = time()
+    cap.warbandbank._scannedAt = time()
+
     -- Roll up totals onto the registry entry (used by dashboard "free/total").
     local freeBank, totalBank = 0, 0
     for _, tabData in pairs(cap.charbank[guid] or {}) do
-        local t = tabData.total or 0
-        freeBank = freeBank + t - (tabData.used or 0)
-        totalBank = totalBank + t
+        if type(tabData) == "table" then
+            local t = tabData.total or 0
+            freeBank = freeBank + t - (tabData.used or 0)
+            totalBank = totalBank + t
+        end
     end
     local entry = self.db.global.registry[guid]
     if entry then
         entry.freeBankSlots = freeBank
         entry.totalBankSlots = totalBank
     end
+
+    -- Capacity changed -> drop cached triage classifications so overflow
+    -- routing (HasFreeCapacity) reflects fresh fill levels on next scan.
+    self:InvalidateStorageCache()
 
     -- Repaint the Storage tab if it's the active page.
     local frame = EmpireManagerFrame
@@ -1876,6 +1769,10 @@ function EmpireManager:SnapshotGuildBank()
     if not guildName or guildName == "" then
         return
     end
+    local guildKey = self:GuildKey(guildName, GetRealmName())
+    if not guildKey then
+        return
+    end
 
     local numTabs = GetNumGuildBankTabs()
     if not numTabs or numTabs == 0 then
@@ -1912,7 +1809,7 @@ function EmpireManager:SnapshotGuildBank()
         if hiddenTabs > 0 then
             self:ChatVerbose(
                 string.format(
-                    "|cff4d99ff[Storage]|r Skipped guild bank snapshot for <%s>: no viewable tabs.",
+                    "|cff4d99ff[Storage]|r Skipped Guild Bank snapshot for <%s>: no viewable tabs.",
                     guildName
                 )
             )
@@ -1923,10 +1820,10 @@ function EmpireManager:SnapshotGuildBank()
 
     -- Wipe stale tab entries only for tabs we can actually see; preserve data
     -- from other characters' snapshots for tabs hidden from this character.
-    if not cap.guildbank[guildName] then
-        cap.guildbank[guildName] = {}
+    if not cap.guildbank[guildKey] then
+        cap.guildbank[guildKey] = {}
     end
-    local guildCap = cap.guildbank[guildName]
+    local guildCap = cap.guildbank[guildKey]
     for _, tab in ipairs(purchasedTabs) do
         guildCap[tab] = nil
     end
@@ -1949,10 +1846,13 @@ function EmpireManager:SnapshotGuildBank()
 
         local freeGB, totalGB = 0, 0
         for _, tabData in pairs(guildCap or {}) do
-            local t = tabData.total or 0
-            freeGB = freeGB + t - (tabData.used or 0)
-            totalGB = totalGB + t
+            if type(tabData) == "table" then
+                local t = tabData.total or 0
+                freeGB = freeGB + t - (tabData.used or 0)
+                totalGB = totalGB + t
+            end
         end
+        guildCap._scannedAt = time()
         selfRef:ChatVerbose(
             string.format(
                 "|cff4d99ff[Storage]|r Guild Bank %d tab%s, %d/%d free",
@@ -1962,6 +1862,10 @@ function EmpireManager:SnapshotGuildBank()
                 totalGB
             )
         )
+
+        -- Capacity changed -> drop cached triage classifications so overflow
+        -- routing (HasFreeCapacity) reflects fresh fill levels on next scan.
+        selfRef:InvalidateStorageCache()
 
         -- Chain: bag scan (deposits into GB) → bank scan (takeouts from GB) → open triage if needed.
         -- All scans share a single async slot so they must run sequentially.
@@ -2504,16 +2408,42 @@ function EmpireManager:ConfirmPurgeByGUID(guid)
 end
 
 function EmpireManager:PurgeCharacter(charName)
-    local needle = charName:lower()
+    -- Accept "Name" or "Name-Realm". Realm part lets users disambiguate when
+    -- the same name exists on multiple realms.
+    local namePart, realmPart = charName:match("^([^-]+)-(.+)$")
+    if not namePart then
+        namePart = charName
+    end
+    local needleName = namePart:lower()
+    local needleRealm = realmPart and realmPart:lower() or nil
+
     local found = {}
     for guid, entry in pairs(self.db.global.registry) do
-        if (entry.name or ""):lower() == needle then
-            found[#found + 1] = { guid = guid, entry = entry }
+        if (entry.name or ""):lower() == needleName then
+            if not needleRealm or (entry.realm or ""):lower() == needleRealm then
+                found[#found + 1] = { guid = guid, entry = entry }
+            end
         end
     end
 
     if #found == 0 then
         self:ChatMsg(string.format("No character named '%s' found in roster.", charName), true)
+        return
+    end
+
+    -- Ambiguous: bare name matched multiple realms. List them and abort so the
+    -- user can re-run with Name-Realm instead of silently purging all of them.
+    if #found > 1 and not needleRealm then
+        self:ChatMsg(
+            string.format("Multiple characters named '%s' - specify the realm:", charName),
+            true
+        )
+        for _, match in ipairs(found) do
+            self:ChatMsg(
+                string.format("  /em purge %s-%s", match.entry.name or "?", match.entry.realm or "?"),
+                true
+            )
+        end
         return
     end
 
@@ -2900,9 +2830,9 @@ function EmpireManager:PurgeByGUID(guid)
     end
     if not alreadyBlacklisted then
         self.db.global.charBlacklist[guid] = label
-        self:ChatMsg(string.format("Removed %s - %s from roster and added to character blacklist.", name, realm), true)
+        self:ChatMsg(string.format("Removed %s - %s from Roster and added to Character Blacklist.", name, realm), true)
     else
-        self:ChatMsg(string.format("Removed %s - %s from roster (already on character blacklist).", name, realm), true)
+        self:ChatMsg(string.format("Removed %s - %s from Roster (already on Character Blacklist).", name, realm), true)
     end
     if removedRules > 0 then
         self:ChatMsg(
