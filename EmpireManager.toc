@@ -1,4 +1,4 @@
-## Interface: 120007
+## Interface: 120007, 120005
 ## Title: EmpireManager
 ## Notes: One addon to manage every alt, every bag, every bank.
 ## Author: l0neshad0w
