@@ -151,16 +151,26 @@ function EmpireManager:OnInitialize()
         end
     end
 
+    -- Migration: registry entries from before entry.guildRealm existed. Assume
+    -- the guild's realm equals the character's realm. The next login on that
+    -- character (via OnEnable / PLAYER_GUILD_UPDATE) refreshes it from the 4th
+    -- return of GetGuildInfo, which corrects cross-realm guilds.
+    for _, entry in pairs(registry) do
+        if entry.guild and entry.guild ~= "" and (not entry.guildRealm or entry.guildRealm == "") then
+            entry.guildRealm = entry.realm
+        end
+    end
+
     -- Backfill asn.realm on guild-bank rules created before the realm-aware
     -- composite key existed. Look up the first registry character in that
-    -- guild and use their realm. If no such character exists, leave realm
-    -- empty: the rule remains unresolvable until the user logs in to a
-    -- character in that guild on the right realm.
+    -- guild and use the guild's home realm. If no such character exists, leave
+    -- realm empty: the rule remains unresolvable until the user logs in to a
+    -- character in that guild.
     for _, asn in ipairs(self.db.global.storageAssignments or {}) do
         if asn.type == "guildbank" and asn.guild and asn.guild ~= "" and (not asn.realm or asn.realm == "") then
             for _, entry in pairs(registry) do
-                if entry.guild == asn.guild and entry.realm and entry.realm ~= "" then
-                    asn.realm = entry.realm
+                if entry.guild == asn.guild and entry.guildRealm and entry.guildRealm ~= "" then
+                    asn.realm = entry.guildRealm
                     break
                 end
             end
@@ -168,14 +178,14 @@ function EmpireManager:OnInitialize()
     end
 
     -- Drop orphan cap.guildbank entries: any key that doesn't match a known
-    -- (guild, realm) pair from the registry. Old bare-guild-name keys end up
-    -- here, as do composite keys for guilds no character in the roster is
+    -- (guild, guildRealm) pair from the registry. Old bare-guild-name keys end
+    -- up here, as do composite keys for guilds no character in the roster is
     -- currently in. The next guild-bank open re-populates the right key.
     if self.db.global.storageCapacity and self.db.global.storageCapacity.guildbank then
         local validKeys = {}
         for _, entry in pairs(registry) do
-            if entry.guild and entry.guild ~= "" and entry.realm and entry.realm ~= "" then
-                validKeys[entry.guild .. "-" .. entry.realm] = true
+            if entry.guild and entry.guild ~= "" and entry.guildRealm and entry.guildRealm ~= "" then
+                validKeys[entry.guild .. "-" .. entry.guildRealm] = true
             end
         end
         local gb = self.db.global.storageCapacity.guildbank
@@ -608,7 +618,17 @@ function EmpireManager:OnEnable()
     entry.race = select(2, UnitRace("player")) -- "BloodElf", "Orc", etc.
     entry.level = UnitLevel("player")
     entry.gold = GetMoney()
-    entry.guild = GetGuildInfo("player") or ""
+    local guildName, _, _, guildRealm = GetGuildInfo("player")
+    entry.guild = guildName or ""
+    -- 4th return of GetGuildInfo is the guild's home realm (normalized, no-space)
+    -- when it differs from the player's realm, OR nil when the guild's realm
+    -- matches OR (timing) when guild data hasn't loaded yet. We can't tell those
+    -- apart at OnEnable time, so defer the write: PLAYER_GUILD_UPDATE fires once
+    -- guild data is ready and re-runs the capture with the correct 4th return.
+    if entry.guild ~= "" and guildRealm then
+        entry.guildRealm = guildRealm
+        self:PropagateGuildRealmToRules(entry.guild, entry.guildRealm)
+    end
     entry.lastSeen = time()
     entry.ilvl = select(2, GetAverageItemLevel()) -- equipped ilvl
     entry.faction = UnitFactionGroup("player") -- "Horde" or "Alliance"
@@ -1286,11 +1306,10 @@ function EmpireManager:BAG_UPDATE_DELAYED()
     -- Session-scoped dedup inside HintOpenableContainers prevents spam.
     self:HintOpenableContainers()
 
-    -- Update gold + free bag slots snapshot (cheap calls, always relevant)
+    -- Update free bag slots snapshot. Gold is handled by PLAYER_MONEY.
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
     if entry then
-        entry.gold = GetMoney()
         local free, total = 0, 0
         for bag = 0, 4 do
             local slots = C_Container.GetContainerNumSlots(bag)
@@ -1324,9 +1343,24 @@ end
 function EmpireManager:PLAYER_GUILD_UPDATE()
     local guid = self.playerGUID
     local entry = self.db.global.registry[guid]
-    if entry then
-        entry.guild = GetGuildInfo("player") or ""
+    if not entry then
+        return
     end
+    local guildName, _, _, guildRealm = GetGuildInfo("player")
+    entry.guild = guildName or ""
+    if entry.guild == "" then
+        entry.guildRealm = nil
+        return
+    end
+    -- Same logic as OnEnable: only write when the 4th return is non-nil. If
+    -- it's nil here too (after a delay) the guild realm genuinely matches the
+    -- player's realm, so use the player's normalized realm.
+    if guildRealm then
+        entry.guildRealm = guildRealm
+    elseif not entry.guildRealm then
+        entry.guildRealm = GetNormalizedRealmName()
+    end
+    self:PropagateGuildRealmToRules(entry.guild, entry.guildRealm)
 end
 
 function EmpireManager:TRADE_SKILL_SHOW()
@@ -1765,11 +1799,11 @@ function EmpireManager:SnapshotGuildBank()
         return
     end
 
-    local guildName = GetGuildInfo("player")
+    local guildName, _, _, guildRealm = GetGuildInfo("player")
     if not guildName or guildName == "" then
         return
     end
-    local guildKey = self:GuildKey(guildName, GetRealmName())
+    local guildKey = self:GuildKey(guildName, guildRealm or GetRealmName())
     if not guildKey then
         return
     end
@@ -1996,15 +2030,19 @@ function EmpireManager:PLAYER_LEVEL_UP(_, newLevel)
 end
 
 function EmpireManager:PLAYER_MONEY()
-    local guid = self.playerGUID
-    local entry = guid and self.db.global.registry[guid]
-    if not entry then
-        return
-    end
-    entry.gold = GetMoney()
-    if self.RefreshVisibleRows then
-        self:RefreshVisibleRows()
-    end
+    -- Defer GetMoney() to the next frame to avoid tainting the same execution
+    -- context as Blizzard's MoneyFrame update, which fires in the same event.
+    C_Timer.After(0, function()
+        local guid = self.playerGUID
+        local entry = guid and self.db.global.registry[guid]
+        if not entry then
+            return
+        end
+        entry.gold = GetMoney()
+        if self.RefreshVisibleRows then
+            self:RefreshVisibleRows()
+        end
+    end)
 end
 
 function EmpireManager:PLAYER_EQUIPMENT_CHANGED()

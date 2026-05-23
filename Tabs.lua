@@ -13,7 +13,7 @@ local EmpireManager = LibStub("AceAddon-3.0"):GetAddon("EmpireManager")
 function EmpireManager:ExportStorageAssignments()
     local assignments = self.db.global.storageAssignments or {}
     if #assignments == 0 then
-        return "# EmpireManager Storage Rules v1\n# category;type;tabs;char;guild;expansions;subcategories\n# (no rules configured)\n"
+        return "# EmpireManager Storage Rules v1\n# category;type;tabs;char;guild;expansions;subcategories;realm\n# (no rules configured)\n"
     end
 
     -- Build GUID -> "Name-Realm" lookup
@@ -24,7 +24,7 @@ function EmpireManager:ExportStorageAssignments()
 
     local lines = {
         "# EmpireManager Storage Rules v1",
-        "# category;type;tabs;char;guild;expansions;subcategories",
+        "# category;type;tabs;char;guild;expansions;subcategories;realm",
     }
     for _, asn in ipairs(assignments) do
         if type(asn) == "table" then
@@ -42,7 +42,14 @@ function EmpireManager:ExportStorageAssignments()
                 charStr = guidToName[asn.char] or tostring(asn.char)
             end
 
-            local guildStr = type(asn.guild) == "string" and asn.guild or ""
+            local guildStr = ""
+            local realmStr = ""
+            if type(asn.guild) == "string" and asn.guild ~= "" then
+                guildStr = asn.guild
+                if type(asn.realm) == "string" and asn.realm ~= "" then
+                    realmStr = asn.realm
+                end
+            end
 
             local expStr = ""
             if type(asn.expansions) == "table" and #asn.expansions > 0 then
@@ -63,14 +70,15 @@ function EmpireManager:ExportStorageAssignments()
             end
 
             lines[#lines + 1] = string.format(
-                "%s;%s;%s;%s;%s;%s;%s",
+                "%s;%s;%s;%s;%s;%s;%s;%s",
                 tostring(asn.profession or ""),
                 tostring(asn.type or ""),
                 tabStr,
                 charStr,
                 guildStr,
                 expStr,
-                subcatStr
+                subcatStr,
+                realmStr
             )
         end
     end
@@ -111,6 +119,9 @@ function EmpireManager:ImportStorageAssignments(text)
             local guildStr = parts[5] or ""
             local expStr = parts[6] or ""
             local subcatStr = parts[7] or ""
+            -- Column 8 (realm) was added later. Old exports omit it and fall
+            -- back to the registry lookup below for cross-realm guilds.
+            local realmStr = parts[8] or ""
 
             -- Cap free-text fields so a malformed export can't break the UI / chat
             if #category > 32 then category = category:sub(1, 32) end
@@ -158,14 +169,13 @@ function EmpireManager:ImportStorageAssignments(text)
                         if bankType == "warbandbank" then
                             capSection = cap.warbandbank
                         elseif bankType == "guildbank" and guildStr ~= "" then
-                            -- Without a realm on the import, we can't deterministically
-                            -- pick a snapshot - skip tab pruning. The runtime read sites
-                            -- still resolve via the rule's backfilled realm.
-                            local realm
-                            for _, entry in pairs(self.db.global.registry) do
-                                if entry.guild == guildStr and entry.realm and entry.realm ~= "" then
-                                    realm = entry.realm
-                                    break
+                            local realm = realmStr ~= "" and realmStr or nil
+                            if not realm then
+                                for _, entry in pairs(self.db.global.registry) do
+                                    if entry.guild == guildStr and entry.guildRealm and entry.guildRealm ~= "" then
+                                        realm = entry.guildRealm
+                                        break
+                                    end
                                 end
                             end
                             local key = realm and self:GuildKey(guildStr, realm)
@@ -281,15 +291,15 @@ function EmpireManager:ImportStorageAssignments(text)
                 if bankType == "warbandbank" then
                     readyRules[#readyRules + 1] = rule
                 elseif bankType == "guildbank" then
-                    -- Check if guild exists locally; backfill realm from the first
-                    -- matching character. The import format has no realm, so when
-                    -- the user has same-named guilds on multiple realms, this
-                    -- picks one - they can correct via Edit afterwards.
-                    local resolvedRealm
-                    if guildStr ~= "" then
+                    -- Prefer the realm from column 8 of the export. Fall back to
+                    -- registry lookup (by guild name) for old exports without it.
+                    -- entry.guildRealm is the guild's home realm, NOT the
+                    -- character's realm - they differ for cross-realm guilds.
+                    local resolvedRealm = realmStr ~= "" and realmStr or nil
+                    if not resolvedRealm and guildStr ~= "" then
                         for _, entry in pairs(self.db.global.registry) do
-                            if entry.guild == guildStr and entry.realm and entry.realm ~= "" then
-                                resolvedRealm = entry.realm
+                            if entry.guild == guildStr and entry.guildRealm and entry.guildRealm ~= "" then
+                                resolvedRealm = entry.guildRealm
                                 break
                             end
                         end
@@ -299,8 +309,11 @@ function EmpireManager:ImportStorageAssignments(text)
                         local bankerGuid = self:FindCharInGuild(guildStr, nil, resolvedRealm)
                         if bankerGuid then
                             rule.char = bankerGuid
+                            readyRules[#readyRules + 1] = rule
+                        else
+                            -- Guild name known but no matching banker - surface in remap dialog
+                            unresolvedRules[#unresolvedRules + 1] = rule
                         end
-                        readyRules[#readyRules + 1] = rule
                     else
                         -- Unknown / missing guild - surface in remap dialog
                         unresolvedRules[#unresolvedRules + 1] = rule
@@ -429,18 +442,27 @@ local function GroupUnresolved(unresolvedRules)
     return groups
 end
 
--- Sorted, deduped list of guild names from the registry (excluding blacklist).
-local function RemapCandidateGuilds(self)
+-- Sorted, deduped list of {guild, realm} pairs from the registry (excluding blacklist).
+-- Keyed on guild.."\1"..realm so same-name guilds on different realms are distinct.
+local function RemapCandidateGuilds(self, excludeGuild)
     local seen, list = {}, {}
     local bl = self.db.global.guildBlacklist or {}
     for _, entry in pairs(self.db.global.registry or {}) do
         local g = entry.guild
-        if g and g ~= "" and not seen[g] and not bl[g] then
-            seen[g] = true
-            list[#list + 1] = g
+        local r = entry.guildRealm or ""
+        if g and g ~= "" and not bl[g] and g ~= excludeGuild then
+            local key = g .. "\1" .. r
+            if not seen[key] then
+                seen[key] = true
+                list[#list + 1] = { guild = g, realm = r }
+            end
         end
     end
-    table.sort(list, function(a, b) return a:lower() < b:lower() end)
+    table.sort(list, function(a, b)
+        local la, lb = a.guild:lower(), b.guild:lower()
+        if la ~= lb then return la < lb end
+        return a.realm:lower() < b.realm:lower()
+    end)
     return list
 end
 
@@ -554,9 +576,10 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
                 if group.type == "guild" and d.guild then
                     -- Guildbank rules: replace guild + auto-resolve a banker char
                     -- the same way the parser's resolved-guild path does.
-                    local bankerGuid = self_:FindCharInGuild(d.guild)
+                    local bankerGuid = self_:FindCharInGuild(d.guild, nil, d.realm)
                     for _, r in ipairs(group.rules) do
                         r.guild = d.guild
+                        r.realm = d.realm
                         if bankerGuid then
                             r.char = bankerGuid
                         end
@@ -672,13 +695,14 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
 
         local existing = decisions[groupKey]
         local chosenGUID = (not isGuild and existing and existing.action == "remap") and existing.guid or nil
-        local chosenGuild = (isGuild and existing and existing.action == "remap") and existing.guild or nil
+        local chosenGuild = (isGuild and existing and existing.action == "remap")
+            and { guild = existing.guild, realm = existing.realm or "" } or nil
 
         -- Forward decl: Next button is created below; the dropdown callbacks
         -- need to re-enable it when the user makes a pick.
         local nextBtn
         local function HasPick()
-            return (isGuild and chosenGuild ~= nil) or ((not isGuild) and chosenGUID ~= nil)
+            return (isGuild and chosenGuild ~= nil) or (not isGuild and chosenGUID ~= nil)
         end
         local function RefreshNextBtn()
             if nextBtn then
@@ -703,9 +727,11 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
             if isGuild then
                 if #guilds == 0 then return end
                 for i, g in ipairs(guilds) do
-                    if g == chosenGuild then selIdx = i end
-                    root:CreateRadio(g, function()
-                        return chosenGuild == g
+                    local isChosen = chosenGuild and chosenGuild.guild == g.guild and chosenGuild.realm == g.realm
+                    if isChosen then selIdx = i end
+                    local label = g.realm ~= "" and (g.guild .. " (" .. g.realm .. ")") or g.guild
+                    root:CreateRadio(label, function()
+                        return chosenGuild and chosenGuild.guild == g.guild and chosenGuild.realm == g.realm
                     end, function()
                         chosenGuild = g
                         RefreshNextBtn()
@@ -770,7 +796,7 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
         nextBtn:SetText("Next")
         nextBtn:SetScript("OnClick", function()
             if isGuild then
-                decisions[groupKey] = { action = "remap", guild = chosenGuild }
+                decisions[groupKey] = { action = "remap", guild = chosenGuild.guild, realm = chosenGuild.realm }
             else
                 decisions[groupKey] = { action = "remap", guid = chosenGUID }
             end
@@ -802,7 +828,7 @@ function EmpireManager:ShowRemapDialog(groups, readyRules, doReplace, onCommit)
             if d and d.action == "remap" then
                 local label
                 if group.type == "guild" then
-                    label = d.guild or "?"
+                    label = (d.realm and d.realm ~= "") and (d.guild .. " (" .. d.realm .. ")") or (d.guild or "?")
                 else
                     local rEntry = registry[d.guid]
                     label = rEntry and RemapCharLabel(rEntry) or d.guid
@@ -2774,12 +2800,26 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         end
     end
     if cap.guildbank then
-        -- cap.guildbank keys are "GuildName-Realm" composites (realm names can't
-        -- contain hyphens, so split on the last "-").
+        -- cap.guildbank keys are "GuildName-Realm" composites. Realm names CAN
+        -- contain "-" (e.g. "Azjol-Nerub"), so we can't reliably regex-split.
+        -- Instead, match each composite against the registry's known
+        -- (guild, guildRealm) pairs.
+        local knownPairs = {}
+        for _, entry in pairs(self.db.global.registry or {}) do
+            if entry.guild and entry.guild ~= "" and entry.guildRealm and entry.guildRealm ~= "" then
+                knownPairs[entry.guild .. "-" .. entry.guildRealm] = { entry.guild, entry.guildRealm }
+            end
+        end
         for composite, section in pairs(cap.guildbank) do
-            local guildName, realm = composite:match("^(.+)-([^-]+)$")
-            guildName = guildName or composite
-            realm = realm or ""
+            local pair = knownPairs[composite]
+            local guildName, realm
+            if pair then
+                guildName, realm = pair[1], pair[2]
+            else
+                guildName, realm = composite:match("^(.+)-([^-]+)$")
+                guildName = guildName or composite
+                realm = realm or ""
+            end
             local key = "guildbank:" .. guildName .. "\1" .. realm
             if not bankMap[key] and not guildBL[guildName] then
                 bankMap[key] = {
@@ -3179,7 +3219,7 @@ local function BuildGuildList()
     local seen = {}
     for _, entry in pairs(EmpireManager.db.global.registry) do
         local g = entry.guild
-        local r = entry.realm
+        local r = entry.guildRealm
         if g and g ~= "" and r and r ~= "" and not bl[g] then
             local key = g .. "\1" .. r
             if not seen[key] then

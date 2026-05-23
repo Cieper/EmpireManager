@@ -258,7 +258,7 @@ function EmpireManager:AutoAssignRoles(entry, guid)
         local guildbankMatch = asn.type == "guildbank"
             and (entry.guild or "") ~= ""
             and (entry.guild or "") == (asn.guild or "")
-            and ((asn.realm or "") == "" or (entry.realm or "") == asn.realm)
+            and ((asn.realm or "") == "" or (entry.guildRealm or "") == asn.realm)
         if (asn.type == "charbank" and asn.char == guid) or guildbankMatch then
             if not entry.assignments.banker then
                 entry.assignments.banker = {}
@@ -288,7 +288,7 @@ function EmpireManager:SyncBankerRole(guid)
         local guildbankMatch = asn.type == "guildbank"
             and (charEntry.guild or "") ~= ""
             and (charEntry.guild or "") == (asn.guild or "")
-            and ((asn.realm or "") == "" or (charEntry.realm or "") == asn.realm)
+            and ((asn.realm or "") == "" or (charEntry.guildRealm or "") == asn.realm)
         if (asn.type == "charbank" and asn.char == guid) or guildbankMatch then
             needed = true
             break
@@ -311,8 +311,9 @@ end
 -------------------------------------------------------------------------------
 
 -- Find the first character in a guild (excluding a given GUID or its name+realm).
--- If guildRealm is given, also requires the character's realm to match - needed
--- because the same guild name can exist on different realms.
+-- If guildRealm is given, requires the entry's guildRealm (the guild's home realm,
+-- NOT the character's realm) to match - needed for cross-realm guilds where the
+-- character can be on a different connected realm than the guild's home.
 -- Returns guid, entry or nil, nil.
 function EmpireManager:FindCharInGuild(guildName, excludeGUID, guildRealm)
     -- Resolve name+realm of the excluded character so stubs with a different GUID
@@ -325,7 +326,7 @@ function EmpireManager:FindCharInGuild(guildName, excludeGUID, guildRealm)
     for guid, entry in pairs(self.db.global.registry) do
         local isExcluded = guid == excludeGUID or (exName and entry.name == exName and entry.realm == exRealm)
         local guildMatches = (entry.guild or "") == guildName
-        local realmMatches = not guildRealm or guildRealm == "" or (entry.realm or "") == guildRealm
+        local realmMatches = not guildRealm or guildRealm == "" or (entry.guildRealm or "") == guildRealm
         if not isExcluded and guildMatches and realmMatches then
             -- Prefer characters with the Banker role
             if entry.assignments and entry.assignments.banker then

@@ -136,7 +136,7 @@ local function SortedGuilds()
     local nameCounts, out, seen = {}, {}, {}
     for _, entry in pairs(EmpireManager.db.global.registry or {}) do
         local g = entry.guild
-        local r = entry.realm
+        local r = entry.guildRealm
         if g and g ~= "" and r and r ~= "" and not bl[g] then
             local key = g .. "\1" .. r
             if not seen[key] then

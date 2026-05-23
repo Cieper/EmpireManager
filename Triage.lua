@@ -3703,8 +3703,8 @@ function EmpireManager:SnapshotOpenBankCapacity()
 
     -- Guild bank tabs
     if self.guildBankIsOpen then
-        local guildName = GetGuildInfo("player")
-        local guildKey = self:GuildKey(guildName, GetRealmName())
+        local guildName, _, _, guildRealm = GetGuildInfo("player")
+        local guildKey = self:GuildKey(guildName, guildRealm or GetRealmName())
         if guildKey then
             if not cap.guildbank[guildKey] then
                 cap.guildbank[guildKey] = {}

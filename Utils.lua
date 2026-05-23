@@ -264,6 +264,31 @@ function EmpireManager:EnableDropdownScrollToSelected(dd, getSelectedIndex)
     end, dd)
 end
 
+-- Safeguard: propagate a freshly-captured guildRealm to every storage rule
+-- pointing at that guild. Rules can carry a stale asn.realm if they were
+-- created from a character on a different connected realm (BuildGuildList used
+-- to source entry.realm). Running this on each login/guild change keeps
+-- asn.realm self-correcting forever; the cost is one O(rules) loop per login.
+function EmpireManager:PropagateGuildRealmToRules(guildName, guildRealm)
+    if not guildName or guildName == "" or not guildRealm or guildRealm == "" then
+        return
+    end
+    for _, asn in ipairs(self.db.global.storageAssignments or {}) do
+        if asn.type == "guildbank" and asn.guild == guildName and asn.realm ~= guildRealm then
+            asn.realm = guildRealm
+        end
+    end
+    -- Also heal stale guildRealm on other registry entries in the same guild.
+    -- Pre-fix logins wrote the character's realm into entry.guildRealm, so a
+    -- single correct login (4th return of GetGuildInfo) corrects every alt in
+    -- that guild without needing to log in to each one.
+    for _, entry in pairs(self.db.global.registry or {}) do
+        if entry.guild == guildName and entry.guildRealm ~= guildRealm then
+            entry.guildRealm = guildRealm
+        end
+    end
+end
+
 -- Composite key for cap.guildbank and any other guild-keyed table. Guild names
 -- are not unique across realms (two "Vanguard" guilds on different realms are
 -- distinct), so the storage key must include realm. Returns nil if either

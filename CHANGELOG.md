@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1] - 2026-05-23
+
+### Fixed
+
+- Storage: cross-realm guild handling overhauled - guild home realm is tracked separately from the character's realm, exports and remap dialog disambiguate by realm, and stale realm data on alts self-heals as soon as any one character in the guild logs in.
+- Core: deferred `GetMoney()` out of the `PLAYER_MONEY` event handler to avoid MoneyFrame taint.
+
 ## [0.4.0] - 2026-05-17
 
 ### Added
