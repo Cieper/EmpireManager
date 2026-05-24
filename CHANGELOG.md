@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.2] - 2026-05-24
+
+### Fixed
+
+- Triage: Mail All Routable works with TradeSkillMaster open.
+
 ## [0.4.1] - 2026-05-23
 
 ### Fixed

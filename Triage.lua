@@ -3029,18 +3029,30 @@ end
 -- Mail button state (reacts to tab switches)
 -------------------------------------------------------------------------------
 
+-- True when MAIL_SHOW has fired and MAIL_CLOSED has not. The mail send APIs
+-- (ClearSendMail, ClickSendMailItemButton, SendMail) work whenever this is
+-- true - they don't care if Blizzard's MailFrame is visible. TSM hides
+-- MailFrame entirely while its own UI is up, so checking MailFrame:IsShown()
+-- would incorrectly disable our send flow.
+function EmpireManager:IsMailboxOpen()
+    return self.mailboxOpen == true
+end
+
 function EmpireManager:UpdateMailBtnState()
     local btn = self.triageMailBtn
     if not btn then
         return
     end
-    local mailboxOpen = self.mailboxOpen and MailFrame and MailFrame:IsShown()
-    if self._triageActiveTab ~= "bags" or not mailboxOpen then
+    if self._triageActiveTab ~= "bags" or not self:IsMailboxOpen() then
         btn:Hide()
         return
     end
     btn:Show()
-    local sendTabOpen = SendMailFrame and SendMailFrame:IsShown()
+    -- Send-tab gate only applies when Blizzard's MailFrame is the active UI.
+    -- With TSM (or any addon that hides MailFrame), the SendMail API works
+    -- regardless of which tab the player would be on visually.
+    local blizzardMailVisible = MailFrame and MailFrame:IsShown()
+    local sendTabOpen = (not blizzardMailVisible) or (SendMailFrame and SendMailFrame:IsShown())
     local hasRoute = btn._hasRoute
     local routeCount = btn._routeCount or 0
     if not hasRoute then
@@ -3114,7 +3126,7 @@ end
 -------------------------------------------------------------------------------
 
 function EmpireManager:MailTriageRoutable()
-    if not MailFrame or not MailFrame:IsShown() then
+    if not self:IsMailboxOpen() then
         self:ChatMsg("Open a mailbox first to mail routable items", true)
         return
     end
@@ -3379,7 +3391,7 @@ end
 -------------------------------------------------------------------------------
 
 function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
-    if not MailFrame or not MailFrame:IsShown() then
+    if not self:IsMailboxOpen() then
         self:ChatMsg("Mailbox closed before sending")
         if onComplete then
             onComplete(0)
@@ -3429,7 +3441,7 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
             return
         end
 
-        if not MailFrame or not MailFrame:IsShown() then
+        if not self:IsMailboxOpen() then
             self:ChatMsg(
                 string.format("|cffffcc00[Triage]|r Mailbox closed, mailed %d items before interruption", totalSent)
             )
@@ -3444,13 +3456,27 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
         SendMailNameEditBox:SetText(recipient)
         SendMailSubjectEditBox:SetText("EmpireManager Triage")
 
-        -- Attach items, counting only those that actually attach
+        -- Attach items via pickup + ClickSendMailItemButton. This pattern
+        -- works whether or not SendMailFrame is visible (TSM and other mail
+        -- replacement addons hide it). UseContainerItem only attaches when
+        -- the Blizzard mail UI is the active frame; without that it no-ops
+        -- and we'd silently send empty mail.
         local attached = 0
         for _, item in ipairs(b) do
             local loc = ItemLocation:CreateFromBagAndSlot(item.bag, item.slot)
             if loc and loc:IsValid() and C_Item.DoesItemExist(loc) and not C_Item.IsLocked(loc) then
-                C_Container.UseContainerItem(item.bag, item.slot)
-                attached = attached + 1
+                ClearCursor()
+                C_Container.PickupContainerItem(item.bag, item.slot)
+                if CursorHasItem() then
+                    ClickSendMailItemButton()
+                    if CursorHasItem() then
+                        -- Attach refused (mailbox closed, attachment slots full,
+                        -- bound item, etc). Drop the item back and stop counting it.
+                        ClearCursor()
+                    else
+                        attached = attached + 1
+                    end
+                end
             end
         end
 
@@ -3512,6 +3538,31 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
                 end
             end
         end)
+
+        -- Final guard: verify at least one attachment slot is populated.
+        -- Belt-and-braces against future cases where the attach loop silently
+        -- fails (mail UI replaced, slot blocked, etc).
+        local hasAnyAttachment = false
+        for i = 1, ATTACHMENTS_MAX_SEND do
+            if GetSendMailItem(i) then
+                hasAnyAttachment = true
+                break
+            end
+        end
+        if not hasAnyAttachment then
+            Cleanup()
+            fallbackTimer:Cancel()
+            self:ChatMsg(
+                string.format(
+                    "|cffffcc00[Triage]|r Mail to %s aborted: no items attached (mail UI may have refused the attach)",
+                    recipient
+                )
+            )
+            if onComplete then
+                onComplete(totalSent)
+            end
+            return
+        end
 
         SendMail(recipient, "EmpireManager Triage", "")
     end
