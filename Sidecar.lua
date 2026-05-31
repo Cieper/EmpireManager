@@ -368,7 +368,6 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
     autoBtn:SetSize(80, 22)
     autoBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
     autoBtn:SetText("Auto")
-    local hasProfs = entry.professions and #entry.professions > 0
     autoBtn:SetScript("OnClick", function()
         EmpireManager:AutoAssignRoles(entry, guid)
         self:DeferredRefresh(entry, guid, isCurrentChar, "assignments")
@@ -377,11 +376,7 @@ function EMSidecarMixin:BuildAssignments(content, y, entry, guid, isCurrentChar)
         GameTooltip:SetOwner(btn, "ANCHOR_CURSOR_RIGHT")
         GameTooltip:AddLine("Auto-Assign Roles", 1, 0.82, 0)
         GameTooltip:AddLine(" ")
-        if hasProfs then
-            GameTooltip:AddLine("Detects professions and assigns Artisan/Gatherer roles.", 1, 1, 1, true)
-        else
-            GameTooltip:AddLine("No professions detected - clears any stale profession role selections.", 1, 1, 1, true)
-        end
+        GameTooltip:AddLine("Detects professions and assigns roles.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     autoBtn:SetScript("OnLeave", function()

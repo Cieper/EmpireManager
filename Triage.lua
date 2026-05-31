@@ -457,6 +457,7 @@ EmpireManager:RegisterMessage("EM_BANK_CLOSED", function()
         EmpireManager:SwitchTriageTab("bags")
     end
     EmpireManager:UpdateTriageTabButtons()
+    EmpireManager:CloseTriageOnLeave()
 end)
 
 EmpireManager:RegisterMessage("EM_MERCHANT_SHOW", function()
@@ -476,6 +477,7 @@ EmpireManager:RegisterMessage("EM_MERCHANT_CLOSED", function()
     if EmpireManager.triageFrame and EmpireManager.triageFrame:IsShown() then
         EmpireManager:UpdateVendorBtnState()
     end
+    EmpireManager:CloseTriageOnLeave()
 end)
 
 EmpireManager:RegisterMessage("EM_MAIL_SHOW", function()
@@ -496,6 +498,7 @@ EmpireManager:RegisterMessage("EM_MAIL_CLOSED", function()
     if EmpireManager.triageFrame and EmpireManager.triageFrame:IsShown() then
         EmpireManager:UpdateMailBtnState()
     end
+    EmpireManager:CloseTriageOnLeave()
 end)
 
 EmpireManager:RegisterMessage("EM_MAIL_BTN_UPDATE", function()
@@ -814,6 +817,25 @@ function EmpireManager:AnchorTriageOverlay()
     -- reflow mid-drag, yanking the triage along. Rebind to absolute UIParent
     -- coords so resize grows cleanly from the current top-left.
     DetachToUIParent(f)
+end
+
+-- Hide the triage overlay when the player leaves a bank/vendor/mailbox, if the
+-- closeTriageOnLeave option is set. Skipped while a bulk operation is running or
+-- if another interaction source is still open (the close events for one source
+-- shouldn't dismiss triage while another is active).
+function EmpireManager:CloseTriageOnLeave()
+    if not self.db.global.options.closeTriageOnLeave then
+        return
+    end
+    if self._triageBulkOperating then
+        return
+    end
+    if self.bankIsOpen or self.guildBankIsOpen or self.mailboxOpen then
+        return
+    end
+    if self.triageFrame and self.triageFrame:IsShown() then
+        self.triageFrame:Hide()
+    end
 end
 
 function EmpireManager:ToggleTriageOverlay()

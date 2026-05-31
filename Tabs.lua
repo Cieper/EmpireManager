@@ -2805,7 +2805,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         -- Instead, match each composite against the registry's known
         -- (guild, guildRealm) pairs.
         local knownPairs = {}
-        for _, entry in pairs(self.db.global.registry or {}) do
+        for _, entry in pairs(EmpireManager.db.global.registry or {}) do
             if entry.guild and entry.guild ~= "" and entry.guildRealm and entry.guildRealm ~= "" then
                 knownPairs[entry.guild .. "-" .. entry.guildRealm] = { entry.guild, entry.guildRealm }
             end

@@ -252,6 +252,12 @@ function EmpireManager:AutoAssignRoles(entry, guid)
             end
         end
     end
+    -- Auto-detect Lockpicker: rogues and Mechagnomes can pick lockboxes.
+    -- Add-only: never clears a manual tag (e.g. a blacksmith with skeleton keys).
+    if entry.class == "ROGUE" or entry.race == "Mechagnome" then
+        entry.assignments.lockpicker = true
+    end
+
     -- Auto-detect banker: check if any charbank or guildbank storage assignment targets this character.
     -- For guildbank rules, realm must also match - guild names aren't unique across realms.
     for _, asn in ipairs(self.db.global.storageAssignments or {}) do

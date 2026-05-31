@@ -55,6 +55,7 @@ local DB_DEFAULTS = {
             popupOnGuildBank = true, -- misplaced scan on guild bank open
             popupOnMailbox = true, -- routable reminder on mailbox open
             popupOnVendor = true, -- open triage overlay on vendor open
+            closeTriageOnLeave = true, -- auto-close triage overlay when leaving bank/vendor/mailbox
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
             vendorBopIlvl = false, -- vendor soulbound gear with lower ilvl than equipped
@@ -507,6 +508,13 @@ function EmpireManager:OnInitialize()
         "popupOnVendor",
         "Open on Vendor Open",
         "Automatically open the Bag Triage overlay when visiting a Vendor (if there are vendorable items)."
+    )
+
+    AddCheckbox(
+        triageCat,
+        "closeTriageOnLeave",
+        "Close on Leaving Bank/Vendor/Mail",
+        "Automatically close the Triage overlay when you close the Bank, Guild Bank, Vendor, or Mailbox."
     )
 
     Settings.RegisterAddOnCategory(category)

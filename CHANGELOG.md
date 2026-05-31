@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.3] - 2026-05-31
+
+### Added
+
+- Triage: new option to automatically close the Triage window when you close the bank, guild bank, vendor, or mailbox. On by default; find it under Options > Triage.
+
+### Fixed
+
+- Roster: fixed an error that could appear on the Banks tab after opening a guild bank.
+
 ## [0.4.2] - 2026-05-24
 
 ### Fixed
