@@ -56,6 +56,7 @@ local DB_DEFAULTS = {
             popupOnMailbox = true, -- routable reminder on mailbox open
             popupOnVendor = true, -- open triage overlay on vendor open
             closeTriageOnLeave = true, -- auto-close triage overlay when leaving bank/vendor/mailbox
+            autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
             vendorBopIlvl = false, -- vendor soulbound gear with lower ilvl than equipped
@@ -186,7 +187,12 @@ function EmpireManager:OnInitialize()
         local validKeys = {}
         for _, entry in pairs(registry) do
             if entry.guild and entry.guild ~= "" and entry.guildRealm and entry.guildRealm ~= "" then
-                validKeys[entry.guild .. "-" .. entry.guildRealm] = true
+                -- Route through GuildKey so the validity set uses the same
+                -- realm-normalized form the capacity entries are stored under.
+                local vk = self:GuildKey(entry.guild, entry.guildRealm)
+                if vk then
+                    validKeys[vk] = true
+                end
             end
         end
         local gb = self.db.global.storageCapacity.guildbank
@@ -352,6 +358,15 @@ function EmpireManager:OnInitialize()
             "Automatically show comparison tooltips when hovering over items. Hold Shift to compare when disabled."
         )
     end
+
+    AddCheckbox(
+        generalCat,
+        "autoTransferGold",
+        "Auto Transfer Gold at Warband Bank",
+        "When you open a Warband Bank, move this character's gold to or from it without asking. "
+            .. "Set the per-character Withdraw/Deposit amounts in the character panel (/em config) > Gold tab. "
+            .. "When off, you are asked to confirm each transfer."
+    )
 
     ---------------------------------------------------------------------------
     -- Subcategory: Triage
@@ -728,6 +743,12 @@ function EmpireManager:OnEnable()
         if entry.stashOldQuestItems ~= nil then
             self.db.char.stashOldQuestItems = entry.stashOldQuestItems
         end
+        if entry.goldLow ~= nil then
+            self.db.char.goldLow = entry.goldLow
+        end
+        if entry.goldHigh ~= nil then
+            self.db.char.goldHigh = entry.goldHigh
+        end
         entry.dirtyFromSidecar = nil
     else
         entry.assignments = self.db.char.assignments
@@ -739,6 +760,8 @@ function EmpireManager:OnEnable()
         entry.keepOwnProfMatsInBags = self.db.char.keepOwnProfMatsInBags
         entry.keepOwnProfMatsInBagsLatestOnly = self.db.char.keepOwnProfMatsInBagsLatestOnly
         entry.stashOldQuestItems = self.db.char.stashOldQuestItems
+        entry.goldLow = self.db.char.goldLow
+        entry.goldHigh = self.db.char.goldHigh
     end
 
     -- Lazy trigger events (only the windows we care about)
@@ -877,6 +900,7 @@ function EmpireManager:SlashHandler(input)
         if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
             local td = C_TooltipInfo.GetHyperlink(itemLink)
             local isWarbound, isSoulbound = false, false
+            local isConjured = false
             if td and td.lines then
                 for _, line in ipairs(td.lines) do
                     local txt = line.leftText
@@ -889,6 +913,8 @@ function EmpireManager:SlashHandler(input)
                             isWarbound = true
                         elseif txt == ITEM_SOULBOUND then
                             isSoulbound = true
+                        elseif txt == ITEM_CONJURED then
+                            isConjured = true
                         end
                     end
                 end
@@ -897,7 +923,12 @@ function EmpireManager:SlashHandler(input)
                 isWarbound = false
             end
             self:ChatMsg(
-                string.format("  tooltip: isWarbound=%s  isSoulbound=%s", tostring(isWarbound), tostring(isSoulbound)),
+                string.format(
+                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s",
+                    tostring(isWarbound),
+                    tostring(isSoulbound),
+                    tostring(isConjured)
+                ),
                 true
             )
         end
@@ -1435,6 +1466,78 @@ function EmpireManager:RefreshAfterProfessionChange(guid)
     end
 end
 
+-- Decide whether the current character's bag gold is outside its Withdraw/Deposit
+-- amounts (per-character, db.char). Returns "deposit"|"withdraw", amount (copper),
+-- or nil when nothing is needed. Withdraw is capped by what the warband pool holds.
+function EmpireManager:ComputeWarbandGoldTransfer()
+    local low = self.db.char.goldLow or 0
+    local high = self.db.char.goldHigh or 0
+    if low <= 0 and high <= 0 then
+        return nil
+    end
+    local bagGold = GetMoney()
+    if high > 0 and bagGold > high then
+        return "deposit", bagGold - high
+    elseif low > 0 and bagGold < low then
+        local pool = self.db.global.warbandGold or 0
+        local amount = math.min(low - bagGold, pool)
+        if amount > 0 then
+            return "withdraw", amount
+        end
+    end
+    return nil
+end
+
+-- Move gold to/from warband gold via C_Bank, then re-snapshot the pool.
+function EmpireManager:ExecuteWarbandGoldTransfer(dir, amount)
+    if not (C_Bank and Enum and Enum.BankType) or not amount or amount <= 0 then
+        return
+    end
+    local bt = Enum.BankType.Account
+    if C_Bank.DoesBankTypeSupportMoneyTransfer and not C_Bank.DoesBankTypeSupportMoneyTransfer(bt) then
+        return
+    end
+    if dir == "deposit" then
+        if C_Bank.CanDepositMoney and not C_Bank.CanDepositMoney(bt) then
+            return
+        end
+        C_Bank.DepositMoney(bt, amount)
+        self:ChatMsg(string.format("Moved %s from bags to the Warband Bank.", self:FormatGold(amount)), true)
+    elseif dir == "withdraw" then
+        if C_Bank.CanWithdrawMoney and not C_Bank.CanWithdrawMoney(bt) then
+            return
+        end
+        C_Bank.WithdrawMoney(bt, amount)
+        self:ChatMsg(string.format("Moved %s from the Warband Bank to bags.", self:FormatGold(amount)), true)
+    end
+    if C_Bank.FetchDepositedMoney then
+        local wb = C_Bank.FetchDepositedMoney(bt)
+        if wb then
+            self.db.global.warbandGold = wb
+        end
+    end
+end
+
+-- Called on warband bank open: if the character is out of its gold range, either
+-- transfer silently (auto option on) or ask first with an OK/Cancel dialog.
+function EmpireManager:MaybeWarbandGoldTransfer()
+    local dir, amount = self:ComputeWarbandGoldTransfer()
+    if not dir then
+        return
+    end
+    if self.db.global.options.autoTransferGold then
+        self:ExecuteWarbandGoldTransfer(dir, amount)
+    else
+        local text = (dir == "deposit")
+                and string.format("Move %s from bags to the Warband Bank?", self:FormatGold(amount))
+            or string.format("Move %s from the Warband Bank to bags?", self:FormatGold(amount))
+        local dialog = StaticPopup_Show("EM_GOLD_TRANSFER_CONFIRM", text)
+        if dialog then
+            dialog.data = { dir = dir, amount = amount }
+        end
+    end
+end
+
 function EmpireManager:BANKFRAME_OPENED()
     self.bankIsOpen = true
 
@@ -1461,6 +1564,12 @@ function EmpireManager:BANKFRAME_OPENED()
         if wbGold then
             self.db.global.warbandGold = wbGold
         end
+    end
+
+    -- Auto-balance this character's bag gold against the warband pool (per-char
+    -- amounts in Sidecar > Gold). Runs only when the warband bank is reachable.
+    if warbandAccessible then
+        self:MaybeWarbandGoldTransfer()
     end
 
     -- Refresh triage tab visibility + deposit button immediately so the UI
@@ -2358,6 +2467,22 @@ StaticPopupDialogs["EM_WIPE_CONFIRM"] = {
     whileDead = true,
     hideOnEscape = true,
     showAlert = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["EM_GOLD_TRANSFER_CONFIRM"] = {
+    text = "%s",
+    button1 = OKAY,
+    button2 = CANCEL,
+    OnAccept = function(self)
+        local d = self.data
+        if d then
+            EmpireManager:ExecuteWarbandGoldTransfer(d.dir, d.amount)
+        end
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
     preferredIndex = 3,
 }
 

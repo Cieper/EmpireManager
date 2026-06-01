@@ -10,11 +10,16 @@
             <KeyValue key="selectedFontObject" value="GameFontHighlight" type="string"/>
             <KeyValue key="unselectedFontObject" value="GameFontNormal" type="string"/>
             <KeyValue key="textOffsetY" value="3" type="number"/>
-            <KeyValue key="textPadding" value="17" type="number"/>
+            
         </KeyValues>
         <NormalFont style="GameFontNormal"/>
         <HighlightFont style="GameFontHighlight"/>
     </Button>
+
+    <!-- Compact variant (sidecar only): same look as EMTopTabTemplate but
+         EMTopTabMixin overrides UpdateTabWidth to size tabs to their label,
+         dropping the side-art width floor so 5 tabs fit the narrow sidecar. -->
+    <Button name="EMCompactTabTemplate" inherits="EMTopTabTemplate" mixin="EMTopTabMixin" virtual="true"/>
 
     <!-- ================================================================== -->
     <!-- Character Row Template (used by ScrollBox pool)                    -->
@@ -600,7 +605,7 @@
                     <!-- Top tabs (Wardrobe pattern: TOPLEFT inside content) -->
                     <Frame parentKey="TabSystem" inherits="TabSystemTemplate">
                         <KeyValues>
-                            <KeyValue key="tabTemplate" value="EMTopTabTemplate" type="string"/>
+                            <KeyValue key="tabTemplate" value="EMCompactTabTemplate" type="string"/>
                             <KeyValue key="minTabWidth" value="40" type="number"/>
                             <KeyValue key="maxTabWidth" value="120" type="number"/>
                         </KeyValues>

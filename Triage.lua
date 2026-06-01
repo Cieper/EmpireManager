@@ -67,6 +67,12 @@ local function AcquireRow(content)
     -- Per-half highlights so the user can see which side a right-click will hit.
     -- Layered as ARTWORK and toggled in the row's OnEnter/OnUpdate; HIGHLIGHT layer
     -- is used by the standard mouseover overlay below.
+    -- Full-row red wash for capacity-blocked rows (assigned tabs full). Sits below
+    -- the per-half hover highlights; shown only when result.blocked is set.
+    local blockedBg = row:CreateTexture(nil, "BACKGROUND", nil, -1)
+    blockedBg:SetAllPoints()
+    blockedBg:SetColorTexture(0.7, 0.1, 0.1, 0.2)
+    blockedBg:Hide()
     local hlLeft = row:CreateTexture(nil, "BACKGROUND")
     hlLeft:SetPoint("TOPLEFT")
     hlLeft:SetPoint("BOTTOM")
@@ -101,6 +107,7 @@ local function AcquireRow(content)
     return {
         frame = row,
         hl = hl,
+        blockedBg = blockedBg,
         hlLeft = hlLeft,
         hlRight = hlRight,
         divider = divider,
@@ -115,6 +122,9 @@ local function ReleaseRow(entry)
     entry.frame:SetScript("OnEnter", nil)
     entry.frame:SetScript("OnLeave", nil)
     entry.frame:SetScript("OnUpdate", nil)
+    if entry.blockedBg then
+        entry.blockedBg:Hide()
+    end
     if entry.hlLeft then
         entry.hlLeft:Hide()
     end
@@ -1929,6 +1939,11 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     local hlLeft = entry.hlLeft
     local hlRight = entry.hlRight
     local divider = entry.divider
+
+    -- Red full-row wash for capacity-blocked rows (assigned tabs full).
+    if entry.blockedBg then
+        entry.blockedBg:SetShown(result.blocked == true)
+    end
 
     row:SetSize(contentW - 8, 20)
     row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)

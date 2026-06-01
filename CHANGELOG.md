@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0] - 2026-06-01
+
+### Added
+
+- Gold tab in the character panel (`/em config`): shows bag gold and Warband Bank gold, with per-character "Withdraw if below" / "Deposit if above" amounts.
+- Auto Transfer Gold at Warband Bank (Options > General): when you open a Warband Bank, gold is moved to or from the Warband Bank to keep the character within those amounts. On = moves automatically with a chat message; off = asks first with a confirmation dialog.
+- Triage now vendors soulbound gear your class can never use, regardless of item level: a wrong armor type (such as Plate on a Priest), shields for classes that cannot use them, and weapons your class cannot wield. Gear you can use, account-bound (Warband) gear, and high-end items are left alone.
+
+### Changed
+
+- Triage keeps conjured items (healthstones, mage food and water, soulwells) instead of trying to route them, since they cannot be mailed, banked, or sold.
+- Items that cannot be deposited because their assigned bank tabs are full now appear in the Triage window (highlighted) instead of being silently kept.
+
+### Fixed
+
+- Guild bank capacity showing "No data", items not depositing to your own guild bank, and guild mail recipients failing to resolve, all caused by a realm-name mismatch on realms whose name contains a space.
+- Setting a Map waypoint no longer causes a blocked-action error when opening the world map in combat.
+
 ## [0.4.3] - 2026-05-31
 
 ### Added

@@ -589,7 +589,8 @@ end
 -- isTeleport: any "Use: Teleport..." line (trinkets/rings like Runed Signet of
 -- the Kirin Tor, Time-Lost Artifact). Used to preserve these from vendor.
 local function ParseTooltipBind(tooltipData)
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
+        false, false, false, false, false, false
     if tooltipData and tooltipData.lines then
         for _, line in ipairs(tooltipData.lines) do
             local txt = line.leftText
@@ -609,6 +610,8 @@ local function ParseTooltipBind(tooltipData)
                     isLockbox = true
                 elseif txt == ITEM_UNIQUE or txt:match("^Unique %(%d+%)$") then
                     isUnique = true
+                elseif txt == ITEM_CONJURED then
+                    isConjured = true
                 end
                 if not isTeleport and txt:find("[Tt]eleport") then
                     isTeleport = true
@@ -619,7 +622,7 @@ local function ParseTooltipBind(tooltipData)
     if isSoulbound then
         isWarbound = false
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured
 end
 
 -- Parse bag slot count from an item's tooltip. Returns slot count or nil.
@@ -647,7 +650,7 @@ end
 
 -- Per-scan tooltip cache: avoids re-parsing tooltips for the same itemID.
 -- Cleared at the start of each async scan via ResetTooltipCache().
--- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport }
+-- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured }
 -- isSoulbound is NOT cached: it is per-slot state (one stack of an itemID may
 -- be bound while another slot of the same itemID is a fresh BoE), so we must
 -- re-parse the tooltip each call to get the slot-specific soulbound flag.
@@ -658,20 +661,20 @@ end
 
 local function CachedTooltipBind(itemID, tooltipDataFn)
     local tooltipData = tooltipDataFn()
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = ParseTooltipBind(tooltipData)
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = ParseTooltipBind(tooltipData)
     local cached = tooltipCache[itemID]
     if cached then
         -- Per-slot soulbound from the live tooltip; static flags from the cache.
-        return cached[1], isSoulbound, cached[2], cached[3], cached[4]
+        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5]
     end
     -- Only cache when the tooltip actually returned data; an empty `lines`
     -- table means the client hasn't fetched item data yet and parsing returned
     -- all-false flags. Caching that would lock in a wrong answer for the
     -- session.
     if tooltipData and tooltipData.lines and #tooltipData.lines > 0 then
-        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport }
+        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport, isConjured }
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured
 end
 
 -------------------------------------------------------------------------------
@@ -694,11 +697,12 @@ local function ScanBagSlot(items, bag, slot)
     local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
+        false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local bagRef, slotRef = bag, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(info.itemID, function()
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(info.itemID, function()
                 return C_TooltipInfo.GetBagItem(bagRef, slotRef)
             end)
         end
@@ -731,6 +735,7 @@ local function ScanBagSlot(items, bag, slot)
         isLockbox = isLockbox,
         isUnique = isUnique,
         isTeleport = isTeleport,
+        isConjured = isConjured,
         iconID = info.iconFileID,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -782,11 +787,12 @@ local function ScanGuildBankSlot(items, tab, slot)
     local itemName, _, quality, _, _, _, _, _, _, icon, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
         C_Item.GetItemInfo(link)
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
+        false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
             local linkRef = link -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(itemID, function()
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(itemID, function()
                 return C_TooltipInfo.GetHyperlink(linkRef)
             end)
         end
@@ -804,6 +810,7 @@ local function ScanGuildBankSlot(items, tab, slot)
         isWarbound = isWarbound,
         isLockbox = isLockbox,
         isTeleport = isTeleport,
+        isConjured = isConjured,
         iconID = icon,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -835,11 +842,12 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
     local loc = ItemLocation:CreateFromBagAndSlot(container, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
+        false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local cRef, sRef = container, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport = CachedTooltipBind(info.itemID, function()
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(info.itemID, function()
                 return C_TooltipInfo.GetBagItem(cRef, sRef)
             end)
         end
@@ -864,6 +872,7 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
         isWarbound = isWarbound,
         isLockbox = isLockbox,
         isTeleport = isTeleport,
+        isConjured = isConjured,
         iconID = info.iconFileID,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -1207,6 +1216,82 @@ end
 local ITEM_CLASS_WEAPON = 2 -- Enum.ItemClass.Weapon
 local ITEM_CLASS_ARMOR = 4 -- Enum.ItemClass.Armor
 
+-- True if the player currently has any equipped armor of the given tier. Used as
+-- a proxy for "has this class unlocked its primary armor proficiency" so we don't
+-- vendor the lower-tier gear a leveling alt is still wearing before that unlock.
+function EmpireManager:HasArmorTierEquipped(tier)
+    for _, slotID in ipairs(self.ARMOR_TIER_SLOTS) do
+        local link = GetInventoryItemLink("player", slotID)
+        if link then
+            local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
+            if classID == ITEM_CLASS_ARMOR and subClassID == tier then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Vendor reason for a soulbound weapon the class can never equip, or nil.
+-- Data: EmpireManager.CLASS_NEVER_USABLE_WEAPON (Utils.lua).
+function EmpireManager:WeaponVendorReason(item, entry)
+    if item.itemClassID ~= ITEM_CLASS_WEAPON then
+        return nil
+    end
+    local neverSet = self.CLASS_NEVER_USABLE_WEAPON[entry.class or ""]
+    if not neverSet then
+        return nil -- unknown class: don't guess
+    end
+    if neverSet[item.itemSubClassID] then
+        return "Unusable weapon type"
+    end
+    return nil
+end
+
+-- Vendor reason for soulbound armor that isn't the class's primary tier, or nil.
+--   subclass > primary  → permanently unusable (priest+plate): always vendor.
+--   subclass < primary  → suboptimal lower tier: vendor only once the character
+--                          has its primary-tier proficiency (proficient == true),
+--                          so leveling alts keep the gear they're still wearing.
+--   subclass == primary  → keep.
+-- Only the four wearable tiers (subclass 1-4) qualify; misc (0) is excluded.
+-- Data: EmpireManager.CLASS_PRIMARY_ARMOR_TIER (Utils.lua).
+function EmpireManager:ArmorTierVendorReason(item, entry, proficient)
+    if item.itemClassID ~= ITEM_CLASS_ARMOR then
+        return nil
+    end
+    local sub = item.itemSubClassID
+    local class = entry.class or ""
+    -- Shields (subclass 6): unusable unless the class is a shield user. Always
+    -- vendor for everyone else - level-independent, like an over-tier piece.
+    if sub == 6 then
+        if self.CLASS_CAN_USE_SHIELD[class] or not self.CLASS_PRIMARY_ARMOR_TIER[class] then
+            return nil -- shield user, or unknown class: don't guess
+        end
+        return "Unusable shield"
+    end
+    if not sub or sub < 1 or sub > 4 then
+        return nil
+    end
+    -- Tier restriction applies only to real body-armor slots. Cloaks are
+    -- subClassID 1 (Cloth) but worn by every class, so they must not be treated
+    -- as off-tier; same for shirts/tabards (those are subclass 0 anyway).
+    if not self.ARMOR_TIER_EQUIPLOC[item.itemEquipLoc or ""] then
+        return nil
+    end
+    local primary = self.CLASS_PRIMARY_ARMOR_TIER[class]
+    if not primary then
+        return nil -- unknown class: don't guess
+    end
+    if sub > primary then
+        return "Unusable armor type"
+    end
+    if sub < primary and proficient then
+        return "Off-tier armor (suboptimal)"
+    end
+    return nil
+end
+
 -- Determine if a BoE item should be disenchanted rather than sold on the AH.
 -- With TSM: disenchant value > market value → DE is more profitable.
 -- Without TSM: per-unit sell price < threshold → DE (user-configured fallback).
@@ -1326,6 +1411,14 @@ function EmpireManager:ClassifyItem(item, entry)
         return CAT_VENDOR, "Vendor (whitelisted)"
     end
 
+    -- Conjured guard: mage food/water, healthstones, soulwells, etc. cannot be
+    -- mailed, deposited in any bank, or sold on the AH (ERR_AUCTION_CONJURED_ITEM),
+    -- so Route/Stash are dead ends. Keep them in bags. An explicit vendor whitelist
+    -- entry above still wins for a user who wants to clear them at a merchant.
+    if item.isConjured then
+        return CAT_KEEP, "Conjured item"
+    end
+
     -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books)
     if item.quality == 0 and item.sellPrice > 0 then
         return CAT_VENDOR, "Vendor junk"
@@ -1365,6 +1458,35 @@ function EmpireManager:ClassifyItem(item, entry)
             -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup)
             if self._equipSetItems and self._equipSetItems[item.itemID] then
                 return CAT_KEEP, "Equipment set: " .. self._equipSetItems[item.itemID]
+            end
+            -- Off-tier armor: anything that isn't the class's primary armor tier.
+            -- Higher tiers are never usable (priest+plate); lower tiers are
+            -- suboptimal and vendored only once the class has primary-tier
+            -- proficiency (so leveling alts keep what they're still wearing).
+            -- Vendored regardless of iLvl/ceiling and independent of the Pawn/iLvl
+            -- options. The enchanter-DE override still applies.
+            do
+                local primaryTier = self.CLASS_PRIMARY_ARMOR_TIER[entry.class or ""]
+                local proficient = false
+                if primaryTier then
+                    if ctx then
+                        if ctx.armorTierProficient == nil then
+                            ctx.armorTierProficient = self:HasArmorTierEquipped(primaryTier)
+                        end
+                        proficient = ctx.armorTierProficient
+                    else
+                        proficient = self:HasArmorTierEquipped(primaryTier)
+                    end
+                end
+                local gearReason = self:ArmorTierVendorReason(item, entry, proficient)
+                    or self:WeaponVendorReason(item, entry)
+                if gearReason then
+                    local asn = entry.assignments or {}
+                    if entry.enchanterKeepDE ~= false and asn.artisan and asn.artisan.enchanting then
+                        return CAT_KEEP, "Keep for disenchant"
+                    end
+                    return CAT_VENDOR, gearReason
+                end
             end
             -- iLvl ceiling: gear at or above the configured ceiling is preserved
             -- regardless of Pawn/iLvl checks. Guards against vendoring upgrades
@@ -1816,7 +1938,10 @@ function EmpireManager:ClassifyItem(item, entry)
     -- surface that instead of the generic fall-through (handled by
     -- WarnOnUnreachableDestinations).
     if capacityBlocked then
-        return CAT_KEEP, "All matching destinations are full"
+        -- Render under the Stash section (it IS stash-intent) but flagged blocked
+        -- (4th return) so the row gets a red wash and - with routing = nil - is
+        -- excluded from the deposit count/move list (those guard on r.routing).
+        return CAT_STASH, "All matching destinations are full", nil, true
     end
     return CAT_KEEP, "No matching Rule"
 end
@@ -1856,8 +1981,14 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
         local myGuild = entry.guild or ""
         local myRealm = entry.realm or ""
         -- Same guild AND realm? Deposit directly. Two guilds with the same
-        -- name on different realms are distinct, so realm has to match.
-        if guildName ~= "" and myGuild == guildName and (guildRealm == "" or myRealm == guildRealm) then
+        -- name on different realms are distinct, so realm has to match. Normalize
+        -- both sides: entry.realm is the space form (GetRealmName) while the rule's
+        -- realm is the no-space form, so a raw compare wrongly fails on spaced realms.
+        if
+            guildName ~= ""
+            and myGuild == guildName
+            and (guildRealm == "" or self:NormRealm(myRealm) == self:NormRealm(guildRealm))
+        then
             return CAT_STASH,
                 "Deposit in <" .. guildName .. ">" .. tabSuffix .. " (" .. profLabel .. ")",
                 {
@@ -1978,12 +2109,13 @@ function EmpireManager:RunTriage()
     PrepareClassificationContext(self)
 
     for _, item in ipairs(bagItems) do
-        local category, action, routing = self:ClassifyItem(item, entry)
+        local category, action, routing, blocked = self:ClassifyItem(item, entry)
         results[#results + 1] = {
             item = item,
             category = category,
             action = action,
             routing = routing,
+            blocked = blocked,
         }
     end
     self._classifyCtx = nil
@@ -2233,12 +2365,13 @@ function EmpireManager:RunTriageAsync(callback)
         PrepareClassificationContext(addon)
         local results = {}
         for _, item in ipairs(bagItems) do
-            local category, action, routing = addon:ClassifyItem(item, entry)
+            local category, action, routing, blocked = addon:ClassifyItem(item, entry)
             results[#results + 1] = {
                 item = item,
                 category = category,
                 action = action,
                 routing = routing,
+                blocked = blocked,
             }
             yieldCheck()
         end

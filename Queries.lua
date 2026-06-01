@@ -332,7 +332,9 @@ function EmpireManager:FindCharInGuild(guildName, excludeGUID, guildRealm)
     for guid, entry in pairs(self.db.global.registry) do
         local isExcluded = guid == excludeGUID or (exName and entry.name == exName and entry.realm == exRealm)
         local guildMatches = (entry.guild or "") == guildName
-        local realmMatches = not guildRealm or guildRealm == "" or (entry.guildRealm or "") == guildRealm
+        local realmMatches = not guildRealm
+            or guildRealm == ""
+            or self:NormRealm(entry.guildRealm) == self:NormRealm(guildRealm)
         if not isExcluded and guildMatches and realmMatches then
             -- Prefer characters with the Banker role
             if entry.assignments and entry.assignments.banker then

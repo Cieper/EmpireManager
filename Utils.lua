@@ -300,7 +300,23 @@ function EmpireManager:GuildKey(guildName, realm)
     if not realm or realm == "" then
         return nil
     end
+    -- Normalize realm: the same realm shows up with a space ("Steamwheedle Cartel"
+    -- via GetRealmName) and without ("SteamwheedleCartel" via GetNormalizedRealmName),
+    -- depending on which API the caller used. Collapse to one form so snapshot keys
+    -- and rule lookups always match.
+    realm = realm:gsub("%s+", "")
     return guildName .. "-" .. realm
+end
+
+-- Normalize a realm name for equality checks. The same realm shows up with a
+-- space ("Steamwheedle Cartel" via GetRealmName) and without ("SteamwheedleCartel"
+-- via GetNormalizedRealmName / rule storage), so any realm comparison that might
+-- mix the two sources must normalize both sides. Matches GuildKey's normalization.
+function EmpireManager:NormRealm(realm)
+    if not realm or realm == "" then
+        return ""
+    end
+    return (realm:gsub("%s+", ""))
 end
 
 -- Single source of truth for the About panel layout. Called from both the
@@ -1358,6 +1374,94 @@ for token, label in pairs(CLASS_NAMES) do
     CLASS_TOKENS[label:lower()] = token
 end
 EmpireManager.CLASS_TOKENS = CLASS_TOKENS
+
+-------------------------------------------------------------------------------
+-- Class gear usability (drives the triage "unusable soulbound gear → vendor"
+-- rules in TriageLogic.lua). Keyed by class file token (UnitClass 2nd return).
+-------------------------------------------------------------------------------
+
+-- A class's PRIMARY (and highest) armor tier. Armor subclass is ordered:
+-- 1=Cloth, 2=Leather, 3=Mail, 4=Plate. A class wears its own tier at endgame;
+-- lower tiers are suboptimal, higher tiers are permanently unusable.
+EmpireManager.CLASS_PRIMARY_ARMOR_TIER = {
+    WARRIOR = 4,
+    PALADIN = 4,
+    DEATHKNIGHT = 4,
+    HUNTER = 3,
+    SHAMAN = 3,
+    EVOKER = 3,
+    ROGUE = 2,
+    DRUID = 2,
+    MONK = 2,
+    DEMONHUNTER = 2,
+    MAGE = 1,
+    PRIEST = 1,
+    WARLOCK = 1,
+}
+
+-- Armor-bearing equipment slots (exclude neck/back/rings/trinkets - those are
+-- Misc subclass 0, usable by all and not a proficiency signal).
+EmpireManager.ARMOR_TIER_SLOTS = { 1, 3, 5, 6, 7, 8, 9, 10 } -- head, shoulder, chest, waist, legs, feet, wrist, hands
+
+-- Equip locations that carry the class armor-tier restriction. ONLY these are
+-- tier-bound. Cloaks report subClassID 1 (Cloth) but are back-slot items every
+-- class wears, so INVTYPE_CLOAK must be excluded or a geared non-cloth character
+-- would wrongly vendor its cloaks. Shirts/tabards are subclass 0 (already skipped).
+EmpireManager.ARMOR_TIER_EQUIPLOC = {
+    INVTYPE_HEAD = true,
+    INVTYPE_SHOULDER = true,
+    INVTYPE_CHEST = true,
+    INVTYPE_ROBE = true,
+    INVTYPE_WAIST = true,
+    INVTYPE_LEGS = true,
+    INVTYPE_FEET = true,
+    INVTYPE_WRIST = true,
+    INVTYPE_HAND = true,
+}
+
+-- Shields are Armor subclass 6. Only these classes can ever equip one; every
+-- other class's shield drop is permanently unusable (per Pawn's IsShield flags).
+EmpireManager.CLASS_CAN_USE_SHIELD = {
+    WARRIOR = true,
+    PALADIN = true,
+    SHAMAN = true,
+}
+
+-- Weapon subclasses each class can NEVER equip, regardless of spec. Subclass IDs
+-- are Enum.ItemWeaponSubclass:
+--   Axe1H=0 Axe2H=1 Bow=2 Gun=3 Mace1H=4 Mace2H=5 Polearm=6 Sword1H=7 Sword2H=8
+--   Warglaive=9 Staff=10 Fist=13 Dagger=15 Thrown=16 Crossbow=18 Wand=19
+-- Derived from Pawn's PawnNeverUsableStats (ScaleTemplates.lua), translated from
+-- its type-flags to subclass IDs. Off-hand frills, relics, fishing poles and the
+-- dead Thrown slot are not listed - they're handled by the equip-loc/quality
+-- guards or simply left alone.
+EmpireManager.CLASS_NEVER_USABLE_WEAPON = {
+    WARRIOR = { [9] = true, [19] = true },
+    PALADIN = { [2] = true, [3] = true, [9] = true, [10] = true, [13] = true, [15] = true, [18] = true, [19] = true },
+    HUNTER = { [4] = true, [5] = true, [9] = true, [19] = true },
+    ROGUE = { [1] = true, [5] = true, [6] = true, [8] = true, [9] = true, [10] = true, [19] = true },
+    PRIEST = {
+        [0] = true, [1] = true, [2] = true, [3] = true, [5] = true, [6] = true,
+        [7] = true, [8] = true, [9] = true, [13] = true, [18] = true,
+    },
+    DEATHKNIGHT = { [2] = true, [3] = true, [9] = true, [10] = true, [13] = true, [15] = true, [18] = true, [19] = true },
+    SHAMAN = { [2] = true, [3] = true, [6] = true, [7] = true, [8] = true, [9] = true, [18] = true, [19] = true },
+    MAGE = {
+        [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] = true,
+        [6] = true, [8] = true, [9] = true, [13] = true, [18] = true,
+    },
+    WARLOCK = {
+        [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] = true,
+        [6] = true, [8] = true, [9] = true, [13] = true, [18] = true,
+    },
+    MONK = { [1] = true, [2] = true, [3] = true, [5] = true, [8] = true, [9] = true, [15] = true, [18] = true, [19] = true },
+    DRUID = { [0] = true, [1] = true, [2] = true, [3] = true, [7] = true, [8] = true, [9] = true, [18] = true, [19] = true },
+    DEMONHUNTER = {
+        [1] = true, [2] = true, [3] = true, [4] = true, [5] = true, [6] = true,
+        [8] = true, [10] = true, [15] = true, [18] = true, [19] = true,
+    },
+    EVOKER = { [2] = true, [3] = true, [6] = true, [9] = true, [18] = true, [19] = true },
+}
 
 function EmpireManager:FormatPlaytime(seconds)
     if not seconds or seconds == 0 then

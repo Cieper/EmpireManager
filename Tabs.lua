@@ -1344,7 +1344,10 @@ function EMMapRowMixin:OnClick(button)
     if entry.mapID and entry.mapX then
         local point = UiMapPoint.CreateFromCoordinates(entry.mapID, entry.mapX, entry.mapY or 0)
         C_Map.SetUserWaypoint(point)
-        C_SuperTrack.SetSuperTrackedUserWaypoint(true)
+        -- NOTE: do NOT call C_SuperTrack.SetSuperTrackedUserWaypoint here. Supertracking
+        -- from an insecure click handler taints the user-waypoint state, which later breaks
+        -- Blizzard's WorldMap flight-point pins (SetPropagateMouseClicks) in combat and
+        -- gets the whole ADDON_ACTION_BLOCKED error blamed on us.
         -- Print clickable waypoint link
         local link = C_Map.GetUserWaypointHyperlink()
         if link then

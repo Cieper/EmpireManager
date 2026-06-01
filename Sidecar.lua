@@ -12,6 +12,30 @@ local ICON16_FMT = EmpireManager.ICON16_FMT
 local FONT_NORMAL = "GameFontHighlight"
 local LINE_HEIGHT = 20
 
+-- Sidecar-only tab width override (used by EMCompactTabTemplate in the XML).
+-- Blizzard's TabSystemButtonMixin:UpdateTabWidth floors every tab at
+-- Left+Right+TabSideExtraSpacing(20), which makes short tabs wider than their
+-- text and overflows the 5-tab sidecar strip. We size to the label instead,
+-- still clamped to the TabSystem's min/max width. Applied after the inherited
+-- TabSystemButtonMixin, so this overrides its UpdateTabWidth.
+local TAB_EXTRA = 26 -- horizontal breathing room added to each label (the sidecar has spare width)
+EMTopTabMixin = {}
+function EMTopTabMixin:UpdateTabWidth()
+    local minW, maxW = self:GetTabSystem():GetTabWidthConstraints()
+    local textWidth = self.Text:GetWidth() + (self.textPadding or 0)
+    local width = textWidth + TAB_EXTRA
+    if maxW and width > maxW then
+        width = maxW
+        textWidth = width - TAB_EXTRA
+    end
+    if minW and width < minW then
+        width = minW
+        textWidth = width - TAB_EXTRA
+    end
+    self.Text:SetWidth(textWidth or 0)
+    self:SetTabWidth(width)
+end
+
 -- Toggle a checkbox when its label hit-rect is clicked. Mirrors native
 -- UICheckButtonTemplate behaviour: respects disabled state, plays the
 -- right sound, and fires the box's existing OnClick handler so persistence
@@ -139,12 +163,16 @@ function EMSidecarMixin:InitTabSystem()
             "Overview of the tracked data for this character.",
         },
         [3] = {
+            "Gold",
+            "Gold held in bags and the Warband Bank, plus auto-balance settings.",
+        },
+        [4] = {
             "Notes",
             "Free-text notes for this character.",
             " ",
             "Notes appear in the dashboard tooltip when hovering this character.",
         },
-        [4] = {
+        [5] = {
             "Options",
             "Per-character settings and overrides.",
         },
@@ -171,7 +199,7 @@ function EMSidecarMixin:InitTabSystem()
     end)
     infoBtn:Show()
 
-    local tabNames = { "Assignments", "Details", "Notes", "Options" }
+    local tabNames = { "Assignments", "Details", "Gold", "Notes", "Options" }
     self._tabIDs = {}
     for i, name in ipairs(tabNames) do
         self._tabIDs[i] = area:AddNamedTab(name)
@@ -311,10 +339,12 @@ function EMSidecarMixin:Populate(guid)
     elseif tab == 2 then
         y = self:BuildDetails(content, y, entry, guid)
     elseif tab == 3 then
+        y = self:BuildGold(content, y, entry, guid, isCurrentChar)
+    elseif tab == 4 then
         content:Hide()
         notesEdit:Show()
         self:BuildNotes(entry, guid, isCurrentChar)
-    elseif tab == 4 then
+    elseif tab == 5 then
         y = self:BuildOptions(content, y, entry, guid, isCurrentChar)
     end
 end
@@ -692,16 +722,138 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
     addBarRow("Bags", entry.freeBagSlots, entry.totalBagSlots)
     addBarRow("Bank", entry.freeBankSlots, entry.totalBankSlots)
 
-    -- Gold
-    if entry.gold and entry.gold > 0 then
-        local g = math.floor(entry.gold / 10000)
-        local s = math.floor((entry.gold % 10000) / 100)
-        local c = entry.gold % 100
-        local GOLD_IC = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12|t"
-        local SILVER_IC = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
-        local COPPER_IC = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
-        addRow("Gold", string.format("%d%s %d%s %d%s", g, GOLD_IC, s, SILVER_IC, c, COPPER_IC))
+    return y
+end
+
+-------------------------------------------------------------------------------
+-- Gold Tab
+-------------------------------------------------------------------------------
+
+local GOLD_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12|t"
+local SILVER_ICON = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12|t"
+local COPPER_ICON = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12|t"
+
+local function FormatMoneyGSC(copper)
+    copper = copper or 0
+    local g = math.floor(copper / 10000)
+    local s = math.floor((copper % 10000) / 100)
+    local c = copper % 100
+    return string.format("%d%s %d%s %d%s", g, GOLD_ICON, s, SILVER_ICON, c, COPPER_ICON)
+end
+
+function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
+    local parent = content
+
+    local function track(obj)
+        self._widgets[#self._widgets + 1] = obj
+        return obj
     end
+
+    -- Section header in the Details/Storage style (no leading divider on the first).
+    local function addSection(label, first)
+        if not first then
+            y = y + 4
+            local sep = track(parent:CreateTexture(nil, "ARTWORK"))
+            sep:SetAtlas("perks-divider-short", true)
+            sep:SetPoint("TOP", parent, "TOP", 0, -y)
+            y = y + 16
+        end
+        local hdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+        hdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
+        hdr:SetText("|cffffd100" .. label .. "|r")
+        y = y + LINE_HEIGHT + 6
+    end
+
+    local function addRow(label, value)
+        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
+        lbl:SetText(label)
+        local val = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        val:SetPoint("TOPLEFT", parent, "TOPLEFT", 120, -y)
+        val:SetText(value)
+        val:SetTextColor(1, 1, 1)
+        y = y + LINE_HEIGHT
+    end
+
+    addSection("Gold", true)
+    -- Bags: live money for the logged-in character, last snapshot for others.
+    local bagsGold = isCurrentChar and GetMoney() or (entry.gold or 0)
+    addRow("Bags", FormatMoneyGSC(bagsGold))
+    -- Warband Bank gold is account-wide (shared pool), snapshotted on bank open.
+    addRow("Warband", FormatMoneyGSC(EmpireManager.db.global.warbandGold or 0))
+
+    -- Auto-Balance: keep this character's bag gold between a low and high amount
+    -- by moving gold to/from warband gold. Whole-gold input, stored as copper in
+    -- db.char (synced to the registry entry on login - see Core.lua). 0 = that
+    -- side off; low must be <= high. The transfer itself runs on warband bank
+    -- open (see EmpireManager:MaybeWarbandGoldTransfer), gated by the General
+    -- "Auto transfer gold at Warband Bank" option.
+    addSection("Auto-Balance")
+    local hint = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    hint:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
+    hint:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    hint:SetJustifyH("LEFT")
+    hint:SetWordWrap(true)
+    hint:SetSpacing(4) -- leading between wrapped lines so the paragraph isn't cramped
+    hint:SetText(
+        "At a Warband Bank, keep this character's bag gold in range: withdraw warband gold when below the first amount, deposit the excess when above the second. Leave either at 0 to turn that side off."
+    )
+    hint:SetTextColor(1, 1, 1)
+    -- Extra breathing room after the description before the input rows.
+    y = y + math.max(LINE_HEIGHT, math.ceil(hint:GetStringHeight()) + 2) + 14
+
+    local function commitGoldLimit(field, box, prevGold)
+        local txt = box:GetText()
+        local num = tonumber(txt)
+        local copper = (num and num > 0) and math.floor(num) * 10000 or 0
+        local low = (field == "goldLow") and copper or (entry.goldLow or 0)
+        local high = (field == "goldHigh") and copper or (entry.goldHigh or 0)
+        if low > 0 and high > 0 and low > high then
+            -- low above high is contradictory - revert to the previous value
+            box:SetText(prevGold > 0 and tostring(prevGold) or "")
+            box:ClearFocus()
+            return
+        end
+        entry[field] = copper
+        if isCurrentChar then
+            EmpireManager.db.char[field] = copper
+        else
+            entry.dirtyFromSidecar = true
+        end
+        box:ClearFocus()
+    end
+
+    local function addGoldLimitRow(label, field)
+        local lbl = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -y)
+        lbl:SetText(label)
+        local box = track(CreateFrame("EditBox", nil, parent, "InputBoxTemplate"))
+        box:SetSize(80, 20)
+        box:SetPoint("TOPLEFT", parent, "TOPLEFT", 150, -y + 2)
+        box:SetAutoFocus(false)
+        box:SetNumeric(true)
+        box:SetMaxLetters(6)
+        box:SetJustifyH("RIGHT")
+        local prevGold = math.floor((entry[field] or 0) / 10000)
+        box:SetText(prevGold > 0 and tostring(prevGold) or "")
+        local goldIcon = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+        goldIcon:SetPoint("LEFT", box, "RIGHT", 4, 0)
+        goldIcon:SetText(GOLD_ICON)
+        box:SetScript("OnEnterPressed", function(self)
+            commitGoldLimit(field, self, prevGold)
+        end)
+        box:SetScript("OnEscapePressed", function(self)
+            self:SetText(prevGold > 0 and tostring(prevGold) or "")
+            self:ClearFocus()
+        end)
+        box:SetScript("OnEditFocusLost", function(self)
+            commitGoldLimit(field, self, prevGold)
+        end)
+        y = y + 26
+    end
+
+    addGoldLimitRow("Withdraw if below", "goldLow")
+    addGoldLimitRow("Deposit if above", "goldHigh")
 
     return y
 end
