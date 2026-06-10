@@ -55,6 +55,8 @@ local DB_DEFAULTS = {
             popupOnGuildBank = true, -- misplaced scan on guild bank open
             popupOnMailbox = true, -- routable reminder on mailbox open
             popupOnVendor = true, -- open triage overlay on vendor open
+            autoRepair = false, -- auto-repair gear on opening a repair-capable merchant
+            repairWithGuildFunds = false, -- prefer guild bank funds for auto-repair, fall back to personal gold
             closeTriageOnLeave = true, -- auto-close triage overlay when leaving bank/vendor/mailbox
             autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
@@ -77,6 +79,7 @@ local DB_DEFAULTS = {
         keepOwnProfMatsInBags = false, -- Keep own profession materials in bags
         keepOwnProfMatsInBagsLatestOnly = false, -- Sub-option: only apply Keep-in-Bags to latest-expansion mats
         stashOldQuestItems = false, -- Route soulbound Quest items from previous expansions to own bank
+        ignoreStorageRules = false, -- Exempt this character from all Storage-tab routing (stash/mail/takeout/reorganize)
     },
 }
 
@@ -126,7 +129,11 @@ function EmpireManager:OnInitialize()
             itemsVendored = 0,
             itemsStashed = 0,
             itemsMailed = 0,
+            goldRepaired = 0,
         }
+    end
+    if self.db.global.stats and self.db.global.stats.goldRepaired == nil then
+        self.db.global.stats.goldRepaired = 0
     end
     if not rawget(self.db.global, "warbandGold") then
         self.db.global.warbandGold = 0
@@ -366,6 +373,22 @@ function EmpireManager:OnInitialize()
         "When you open a Warband Bank, move this character's gold to or from it without asking. "
             .. "Set the per-character Withdraw/Deposit amounts in the character panel (/em config) > Gold tab. "
             .. "When off, you are asked to confirm each transfer."
+    )
+
+    local _, autoRepairInit = AddCheckbox(
+        generalCat,
+        "autoRepair",
+        "Auto-Repair at Vendor",
+        "Automatically repair all your gear when you open a repair-capable merchant."
+    )
+
+    AddCheckbox(
+        generalCat,
+        "repairWithGuildFunds",
+        "Repair with Guild funds",
+        "When auto-repairing, use guild bank funds if available and sufficient, falling back to your own gold otherwise.",
+        nil,
+        autoRepairInit
     )
 
     ---------------------------------------------------------------------------
@@ -662,6 +685,7 @@ function EmpireManager:OnEnable()
         itemsVendored = 0,
         itemsStashed = 0,
         itemsMailed = 0,
+        goldRepaired = 0,
     }
 
     -- Snapshot bag slots
@@ -743,6 +767,9 @@ function EmpireManager:OnEnable()
         if entry.stashOldQuestItems ~= nil then
             self.db.char.stashOldQuestItems = entry.stashOldQuestItems
         end
+        if entry.ignoreStorageRules ~= nil then
+            self.db.char.ignoreStorageRules = entry.ignoreStorageRules
+        end
         if entry.goldLow ~= nil then
             self.db.char.goldLow = entry.goldLow
         end
@@ -760,6 +787,7 @@ function EmpireManager:OnEnable()
         entry.keepOwnProfMatsInBags = self.db.char.keepOwnProfMatsInBags
         entry.keepOwnProfMatsInBagsLatestOnly = self.db.char.keepOwnProfMatsInBagsLatestOnly
         entry.stashOldQuestItems = self.db.char.stashOldQuestItems
+        entry.ignoreStorageRules = self.db.char.ignoreStorageRules
         entry.goldLow = self.db.char.goldLow
         entry.goldHigh = self.db.char.goldHigh
     end
@@ -901,6 +929,9 @@ function EmpireManager:SlashHandler(input)
             local td = C_TooltipInfo.GetHyperlink(itemLink)
             local isWarbound, isSoulbound = false, false
             local isConjured = false
+            local hasUseLine, hasClassLine = false, false
+            local usePrefix = (ITEM_SPELL_TRIGGER_ONUSE or "Use: %s"):gsub("%%s.*$", "")
+            local classPrefix = (ITEM_CLASSES_ALLOWED or "Classes: %s"):gsub("%%s.*$", "")
             if td and td.lines then
                 for _, line in ipairs(td.lines) do
                     local txt = line.leftText
@@ -916,6 +947,12 @@ function EmpireManager:SlashHandler(input)
                         elseif txt == ITEM_CONJURED then
                             isConjured = true
                         end
+                        if not hasUseLine and usePrefix ~= "" and txt:find(usePrefix, 1, true) == 1 then
+                            hasUseLine = true
+                        end
+                        if not hasClassLine and classPrefix ~= "" and txt:find(classPrefix, 1, true) == 1 then
+                            hasClassLine = true
+                        end
                     end
                 end
             end
@@ -924,10 +961,11 @@ function EmpireManager:SlashHandler(input)
             end
             self:ChatMsg(
                 string.format(
-                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s",
+                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s",
                     tostring(isWarbound),
                     tostring(isSoulbound),
-                    tostring(isConjured)
+                    tostring(isConjured),
+                    tostring(hasUseLine and hasClassLine)
                 ),
                 true
             )

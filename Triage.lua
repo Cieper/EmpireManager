@@ -2744,40 +2744,64 @@ function EmpireManager:_StartVendorSell(autoItems, confirmItems)
         end
         sellNext()
 
-        -- Debounce: wait for bags to settle, then check results
-        local debounceTimer
+        -- Debounce: wait for bags to settle, then check results. A fallback timer
+        -- covers the case where a game confirmation popup (e.g. selling a still-
+        -- refundable dungeon drop) blocks a sale so no BAG_UPDATE_DELAYED ever
+        -- fires - without it the loop would hang and never refresh the list,
+        -- leaving already-sold junk still showing.
+        local debounceTimer, fallbackTimer
         local listener = self:AcquireListener()
+        local settled = false
+
+        local function settle()
+            if settled then
+                return
+            end
+            settled = true
+            if debounceTimer then
+                debounceTimer:Cancel()
+            end
+            if fallbackTimer then
+                fallbackTimer:Cancel()
+            end
+            if addon:IsBulkCancelled(gen) then
+                return
+            end
+            addon:ReleaseListener(listener)
+
+            -- Count what sold this round
+            local soldThisRound = 0
+            for _, item in ipairs(remaining) do
+                if not C_Container.GetContainerItemInfo(item.bag, item.slot) then
+                    soldThisRound = soldThisRound + 1
+                    totalSold = totalSold + 1
+                end
+            end
+
+            if soldThisRound == 0 then
+                -- Nothing moved: either an empty merchant or a popup blocked the
+                -- last item(s). Either way, finish and refresh so the list clears.
+                finishSelling(totalSold == 0 and "This merchant doesn't buy items" or nil)
+            elseif soldThisRound < #remaining and attempt < maxRetries then
+                -- Some items were busy - retry the rest
+                sellBatch()
+            else
+                finishSelling()
+            end
+        end
+
         local function onBagUpdate()
             if debounceTimer then
                 debounceTimer:Cancel()
             end
-            debounceTimer = C_Timer.NewTimer(0.5, function()
-                if addon:IsBulkCancelled(gen) then
-                    return
-                end
-                addon:ReleaseListener(listener)
-
-                -- Count what sold this round
-                local soldThisRound = 0
-                for _, item in ipairs(remaining) do
-                    if not C_Container.GetContainerItemInfo(item.bag, item.slot) then
-                        soldThisRound = soldThisRound + 1
-                        totalSold = totalSold + 1
-                    end
-                end
-
-                if soldThisRound == 0 then
-                    finishSelling(totalSold == 0 and "This merchant doesn't buy items" or nil)
-                elseif soldThisRound < #remaining and attempt < maxRetries then
-                    -- Some items were busy - retry the rest
-                    sellBatch()
-                else
-                    finishSelling()
-                end
-            end)
+            debounceTimer = C_Timer.NewTimer(0.5, settle)
         end
         listener:SetScript("OnEvent", onBagUpdate)
         listener:RegisterEvent("BAG_UPDATE_DELAYED")
+
+        -- Fallback: if no bag update arrives (a popup blocked every remaining
+        -- sale), force a settle so the operation always completes and refreshes.
+        fallbackTimer = C_Timer.NewTimer(2, settle)
     end
 
     sellBatch()
@@ -2972,7 +2996,56 @@ function EmpireManager:CountDEItems(results)
     return count, links
 end
 
+function EmpireManager:DoAutoRepair()
+    if not self.db.global.options.autoRepair then
+        return
+    end
+    if not CanMerchantRepair() then
+        return
+    end
+
+    local cost, canRepair = GetRepairAllCost()
+    if not canRepair or not cost or cost <= 0 then
+        return -- nothing needs repair
+    end
+
+    -- Prefer guild funds when enabled, available, and within the withdraw limit.
+    if self.db.global.options.repairWithGuildFunds and CanGuildBankRepair() then
+        local guildLimit = GetGuildBankWithdrawMoney()
+        -- GetGuildBankWithdrawMoney returns -1 for unlimited (guild master).
+        if guildLimit == -1 or guildLimit >= cost then
+            RepairAllItems(true)
+            self:IncrementStat("goldRepaired", cost)
+            self:ChatMsg(
+                string.format("|cff00ff96[Repair]|r Repaired with Guild funds for %s.", self:FormatGold(cost)),
+                true
+            )
+            return
+        end
+    end
+
+    -- Personal gold: only repair if we can actually afford it.
+    if GetMoney() >= cost then
+        RepairAllItems(false)
+        self:IncrementStat("goldRepaired", cost)
+        self:ChatMsg(
+            string.format("|cff00ff96[Repair]|r Repaired for %s.", self:FormatGold(cost)),
+            true
+        )
+    else
+        self:ChatMsg(
+            string.format(
+                "|cffff5555[Repair]|r Not enough gold to repair (need %s).",
+                self:FormatGold(cost)
+            ),
+            true
+        )
+    end
+end
+
 function EmpireManager:OnMerchantShow()
+    self:DoAutoRepair()
+
     local function notify(results)
         local counts, vendorValue = self:GetTriageSummary(results)
         local triageOpen = self.triageFrame and self.triageFrame:IsShown()
@@ -3232,6 +3305,14 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         CheckBagsFull()
     end
 
+    -- Mailbox closed mid-flow (walked away between recipients): never re-show the
+    -- Send dialog or attempt another send. Finalize what we already sent and bail.
+    if not self:IsMailboxOpen() then
+        self:UpdateMailBtnState()
+        reportMailed()
+        return
+    end
+
     -- All recipients processed
     if index > #recipients then
         self:UpdateMailBtnState()
@@ -3374,6 +3455,12 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         intentionalClose = true
         f:Hide()
         self.mailConfirmFrame = nil
+        -- Guard: mailbox may have closed while the dialog was up (walked away).
+        if not self:IsMailboxOpen() then
+            self:UpdateMailBtnState()
+            reportMailed()
+            return
+        end
         self._mailingSending = true
         self:UpdateMailBtnState()
         self:ExecuteMailForRecipient(recipient, items, function(sent)

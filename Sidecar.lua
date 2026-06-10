@@ -834,6 +834,8 @@ function EMSidecarMixin:BuildGold(content, y, entry, _guid, isCurrentChar)
         box:SetNumeric(true)
         box:SetMaxLetters(6)
         box:SetJustifyH("RIGHT")
+        -- Right-justified text hugs the border; pad the right so it isn't flush.
+        box:SetTextInsets(5, 8, 0, 0)
         local prevGold = math.floor((entry[field] or 0) / 10000)
         box:SetText(prevGold > 0 and tostring(prevGold) or "")
         local goldIcon = track(parent:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
@@ -1319,6 +1321,52 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
         EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.stashOldQuestItems = entry.stashOldQuestItems
+        else
+            entry.dirtyFromSidecar = true
+        end
+    end)
+    y = y + 28
+
+    -- Skip all Storage Rules for this character
+    local skipCB = self:Track(CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate"))
+    skipCB:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+    skipCB:SetChecked(entry.ignoreStorageRules == true)
+    local skipLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
+    skipLabel:SetPoint("LEFT", skipCB, "RIGHT", 2, 0)
+    skipLabel:SetText("Skip all Storage Rules")
+    local function showSkipTip(anchor)
+        GameTooltip:SetOwner(anchor, "ANCHOR_CURSOR_RIGHT")
+        GameTooltip:AddLine("Skip all Storage Rules", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(
+            "When checked, this character is exempt from all Storage rules: Triage will not stash, mail, take out, or reorganize materials and equipment on its behalf. Items stay in bags. Vendor rules and other roles' routing still apply.",
+            1,
+            1,
+            1,
+            true
+        )
+        GameTooltip:Show()
+    end
+    local function hideSkipTip()
+        GameTooltip:Hide()
+    end
+    skipCB:SetScript("OnEnter", function(btn)
+        showSkipTip(btn)
+    end)
+    skipCB:SetScript("OnLeave", hideSkipTip)
+    local skipHit = self:Track(CreateFrame("Frame", nil, content))
+    skipHit:SetAllPoints(skipLabel)
+    skipHit:SetScript("OnEnter", function(f)
+        showSkipTip(f)
+    end)
+    skipHit:SetScript("OnLeave", hideSkipTip)
+    WireLabelClick(skipHit, skipCB)
+    skipCB:SetScript("OnClick", function(self)
+        entry.ignoreStorageRules = self:GetChecked()
+        EmpireManager._bagsDirty = true
+        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        if guid == EmpireManager.playerGUID then
+            EmpireManager.db.char.ignoreStorageRules = entry.ignoreStorageRules
         else
             entry.dirtyFromSidecar = true
         end

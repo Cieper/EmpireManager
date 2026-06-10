@@ -427,6 +427,7 @@ function EmpireManager:BuildAboutPanel(parent, opts)
         { key = "itemsVendored",  label = "Items Vendored",          icon = "Interface\\Icons\\INV_Misc_Bag_10",  fmt = "num"  },
         { key = "itemsStashed",   label = "Items Deposited to Bank", icon = "Interface\\Icons\\INV_Misc_Bag_07",  fmt = "num"  },
         { key = "itemsMailed",    label = "Items Mailed",            icon = "Interface\\Icons\\INV_Letter_15",    fmt = "num"  },
+        { key = "goldRepaired",   label = "Gold on Repairs",         icon = "Interface\\Icons\\Trade_BlackSmithing", fmt = "gold" },
     }
 
     local STAT_LABEL_X = 12

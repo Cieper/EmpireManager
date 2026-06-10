@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0] - 2026-06-10
+
+### Added
+
+- Auto-Repair at Vendor (Options > General, off by default): repairs all your gear when you open a repair-capable merchant. The child "Repair with Guild funds" option uses guild bank funds when available and sufficient, falling back to your own gold. The result is reported in chat every time (repaired, repaired with Guild funds, or not enough gold), and total repair spend is tracked as a new "Gold on Repairs" statistic in the About tab.
+- Per-character "Skip all Storage Rules" option: exempts a character from all Storage-tab routing (stash, mail, take out, reorganize).
+- Triage vendors mounts and battle pets you have already collected, since soulbound duplicates cannot be traded or relearned.
+
+### Changed
+
+- Triage keeps right-click gear tokens (such as the Unsullied set) in your bags instead of mailing them to a consumables banker. These are class-restricted "Use: opens a piece of gear" items that were previously mis-detected as consumables.
+- New logo artwork.
+
+### Fixed
+
+- Triage: walking away from the mailbox while the per-recipient mail confirmation is open now closes the dialog and finalizes, instead of leaving it up and attempting another send.
+- Triage: fixed a hang in the vendor loop and padding on the gold input field.
+
 ## [0.5.0] - 2026-06-01
 
 ### Added

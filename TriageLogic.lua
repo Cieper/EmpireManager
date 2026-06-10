@@ -588,9 +588,20 @@ end
 -- Parse tooltip data for warbound/soulbound/lockbox/teleport flags.
 -- isTeleport: any "Use: Teleport..." line (trinkets/rings like Runed Signet of
 -- the Kirin Tor, Time-Lost Artifact). Used to preserve these from vendor.
+-- Prefix of ITEM_CLASSES_ALLOWED ("Classes: %s"), used to spot the class
+-- restriction line that gear tokens (Unsullied set, etc.) carry. Stripped to the
+-- literal text before the format token so we can match by prefix, locale-safe.
+local CLASSES_ALLOWED_PREFIX = (ITEM_CLASSES_ALLOWED or "Classes: %s"):gsub("%%s.*$", "")
+-- Prefix of ITEM_SPELL_TRIGGER_ONUSE ("Use: %s") - same stripping.
+local USE_LINE_PREFIX = (ITEM_SPELL_TRIGGER_ONUSE or "Use: %s"):gsub("%%s.*$", "")
+
 local function ParseTooltipBind(tooltipData)
     local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
         false, false, false, false, false, false
+    -- A "Use:" line AND a "Classes:" restriction together mark an equipment token
+    -- (e.g. Unsullied Leather Belt): a consumable-classed item that grants gear on
+    -- use. Real consumables (potions/flasks) have a Use line but no class line.
+    local hasUseLine, hasClassLine = false, false
     if tooltipData and tooltipData.lines then
         for _, line in ipairs(tooltipData.lines) do
             local txt = line.leftText
@@ -616,13 +627,20 @@ local function ParseTooltipBind(tooltipData)
                 if not isTeleport and txt:find("[Tt]eleport") then
                     isTeleport = true
                 end
+                if not hasUseLine and USE_LINE_PREFIX ~= "" and txt:find(USE_LINE_PREFIX, 1, true) == 1 then
+                    hasUseLine = true
+                end
+                if not hasClassLine and CLASSES_ALLOWED_PREFIX ~= "" and txt:find(CLASSES_ALLOWED_PREFIX, 1, true) == 1 then
+                    hasClassLine = true
+                end
             end
         end
     end
     if isSoulbound then
         isWarbound = false
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured
+    local isEquipToken = hasUseLine and hasClassLine
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken
 end
 
 -- Parse bag slot count from an item's tooltip. Returns slot count or nil.
@@ -650,7 +668,7 @@ end
 
 -- Per-scan tooltip cache: avoids re-parsing tooltips for the same itemID.
 -- Cleared at the start of each async scan via ResetTooltipCache().
--- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured }
+-- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken }
 -- isSoulbound is NOT cached: it is per-slot state (one stack of an itemID may
 -- be bound while another slot of the same itemID is a fresh BoE), so we must
 -- re-parse the tooltip each call to get the slot-specific soulbound flag.
@@ -661,20 +679,21 @@ end
 
 local function CachedTooltipBind(itemID, tooltipDataFn)
     local tooltipData = tooltipDataFn()
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = ParseTooltipBind(tooltipData)
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
+        ParseTooltipBind(tooltipData)
     local cached = tooltipCache[itemID]
     if cached then
         -- Per-slot soulbound from the live tooltip; static flags from the cache.
-        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5]
+        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5], cached[6]
     end
     -- Only cache when the tooltip actually returned data; an empty `lines`
     -- table means the client hasn't fetched item data yet and parsing returned
     -- all-false flags. Caching that would lock in a wrong answer for the
     -- session.
     if tooltipData and tooltipData.lines and #tooltipData.lines > 0 then
-        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport, isConjured }
+        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken }
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken
 end
 
 -------------------------------------------------------------------------------
@@ -697,14 +716,15 @@ local function ScanBagSlot(items, bag, slot)
     local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
-        false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
+        false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local bagRef, slotRef = bag, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(info.itemID, function()
-                return C_TooltipInfo.GetBagItem(bagRef, slotRef)
-            end)
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
+                CachedTooltipBind(info.itemID, function()
+                    return C_TooltipInfo.GetBagItem(bagRef, slotRef)
+                end)
         end
     end
 
@@ -736,6 +756,7 @@ local function ScanBagSlot(items, bag, slot)
         isUnique = isUnique,
         isTeleport = isTeleport,
         isConjured = isConjured,
+        isEquipToken = isEquipToken,
         iconID = info.iconFileID,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -954,6 +975,7 @@ end
 local ITEM_CLASS_TRADEGOODS = 7 -- Enum.ItemClass.Tradegoods
 local ITEM_CLASS_MISC = 15 -- Enum.ItemClass.Miscellaneous
 local ITEM_SUBCLASS_COMPANION = 2 -- companion pets under Miscellaneous
+local ITEM_SUBCLASS_MOUNT = 5 -- mounts under Miscellaneous
 
 -- Known pet charm / pet consumable item IDs (add more as needed)
 local ZOOKEEPER_ITEMS = {
@@ -1292,6 +1314,36 @@ function EmpireManager:ArmorTierVendorReason(item, entry, proficient)
     return nil
 end
 
+-- True if this Miscellaneous item teaches a mount the player already has, or a
+-- battle pet already owned up to the species cap. Soulbound such items are dead
+-- weight (can't relearn, can't trade), so they route to vendor. Mounts are binary
+-- (known or not); pets must be at their collection limit so a soulbound dupe can
+-- still be learned to fill an open slot. Only call for classID 15 sub 2/5 items.
+function EmpireManager:IsKnownCollectible(item)
+    if item.itemClassID ~= ITEM_CLASS_MISC then
+        return false
+    end
+    if item.itemSubClassID == ITEM_SUBCLASS_MOUNT then
+        if C_MountJournal and C_MountJournal.GetMountFromItem then
+            local mountID = C_MountJournal.GetMountFromItem(item.itemID)
+            if mountID then
+                -- GetMountInfoByID: isCollected is the 11th return value.
+                return select(11, C_MountJournal.GetMountInfoByID(mountID)) == true
+            end
+        end
+    elseif item.itemSubClassID == ITEM_SUBCLASS_COMPANION then
+        if C_PetJournal and C_PetJournal.GetPetInfoByItemID then
+            -- GetPetInfoByItemID: speciesID is the 13th return value.
+            local speciesID = select(13, C_PetJournal.GetPetInfoByItemID(item.itemID))
+            if speciesID then
+                local numCollected, limit = C_PetJournal.GetNumCollectedInfo(speciesID)
+                return numCollected and limit and limit > 0 and numCollected >= limit
+            end
+        end
+    end
+    return false
+end
+
 -- Determine if a BoE item should be disenchanted rather than sold on the AH.
 -- With TSM: disenchant value > market value → DE is more profitable.
 -- Without TSM: per-unit sell price < threshold → DE (user-configured fallback).
@@ -1372,7 +1424,22 @@ local function PrepareClassificationContext(addon)
     addon._classifyCtx = ctx
 end
 
+-- Public entry point. Wraps the classification logic so a per-character
+-- "Skip all Storage Rules" opt-out (entry.ignoreStorageRules) can neutralize any
+-- storage-routing outcome in one place, no matter which inner rule produced it.
+-- STASH/ROUTE results collapse to KEEP "Ignoring storage rules"; KEEP and VENDOR
+-- results (Keep List, vendor whitelist, gray junk, class-unusable gear, etc.)
+-- pass through unchanged. ClassifyBankItem derives takeout/reorganize from the
+-- returned category, so this single guard also suppresses bank-side moves.
 function EmpireManager:ClassifyItem(item, entry)
+    local category, action, routing, blocked = self:_ClassifyItemInner(item, entry)
+    if entry.ignoreStorageRules and (category == CAT_STASH or category == CAT_ROUTE) then
+        return CAT_KEEP, "Ignoring storage rules"
+    end
+    return category, action, routing, blocked
+end
+
+function EmpireManager:_ClassifyItemInner(item, entry)
     local ctx = self._classifyCtx -- per-scan context from PrepareClassificationContext
 
     -- Overflow tracking: when a matching assignment is skipped because the
@@ -1417,6 +1484,16 @@ function EmpireManager:ClassifyItem(item, entry)
     -- entry above still wins for a user who wants to clear them at a merchant.
     if item.isConjured then
         return CAT_KEEP, "Conjured item"
+    end
+
+    -- Equipment-token guard: items classed as Consumables (classID 0) that are
+    -- really "right-click for a piece of gear" tokens (BfA Unsullied set, etc.).
+    -- They carry a "Use:" line AND a "Classes:" restriction, which real
+    -- consumables never do. Without this they match the consumables subclass map
+    -- (0/8 "Other") and get mailed to a consumables banker, which is wrong - the
+    -- player should keep the token and open it. Keep in bags.
+    if item.isEquipToken and item.itemClassID == 0 then
+        return CAT_KEEP, "Equipment token (right-click to open)"
     end
 
     -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books)
@@ -1710,6 +1787,23 @@ function EmpireManager:ClassifyItem(item, entry)
         end
     end
 
+    -- Rule D.2b-collectible: a soulbound mount/pet item teaching something the
+    -- player already has is dead weight - it can't be relearned or traded, so
+    -- vendor it (when sellable). Mounts vendor once known; pets only at the
+    -- species collection cap. Checked before the blanket soulbound keep below.
+    if
+        item.isBound
+        and not item.isWarbound
+        and item.sellPrice > 0
+        and item.itemClassID == ITEM_CLASS_MISC
+        and (item.itemSubClassID == ITEM_SUBCLASS_COMPANION or item.itemSubClassID == ITEM_SUBCLASS_MOUNT)
+        and self:IsKnownCollectible(item)
+    then
+        local reason = (item.itemSubClassID == ITEM_SUBCLASS_MOUNT) and "Mount already known"
+            or "Pet already collected"
+        return CAT_VENDOR, reason
+    end
+
     -- Rule D.2b: Non-gear soulbound items → KEEP (never route soulbound)
     -- Warbound items continue to routing rules (can be mailed/warband-banked).
     if item.isBound and not item.isWarbound then
@@ -1855,12 +1949,16 @@ function EmpireManager:ClassifyItem(item, entry)
     -- warbound consumables/gems have isWarbound=true but itemEquipLoc="".
     -- Also covers bindType=0 equippable gear (vintage "no bind" items like Cubic Zirconia Ring,
     -- Shiny Silver Necklace) - they have a sell price and valid equip loc, so they're AH-eligible.
+    -- Skipped entirely when this character ignores storage rules: every B.4
+    -- outcome is either a STASH/ROUTE the wrapper would discard or a KEEP the
+    -- fall-through below also produces, so this is behavior-equivalent while
+    -- avoiding the per-item TSM disenchant lookups (ShouldDisenchant).
     local loc = item.itemEquipLoc or ""
     local isRealEquip = loc ~= "" and loc ~= "INVTYPE_NON_EQUIP" and loc ~= "INVTYPE_NON_EQUIP_IGNORE"
     local isGuildBankEquip = item.bankType == "guildbank" and isRealEquip and not (item.isBound and not item.isWarbound) -- exclude truly soulbound gear
     local isUnboundBoE = item.bindType == 2 and not item.isBound and not item.isWarbound
     local isNoBindEquip = item.bindType == 0 and isRealEquip and not item.isBound and not item.isWarbound
-    if isGuildBankEquip or isUnboundBoE or isNoBindEquip then
+    if not entry.ignoreStorageRules and (isGuildBankEquip or isUnboundBoE or isNoBindEquip) then
         local isOwnAuctioneer = assignments.auctioneer
         local isOwnEnchanter = assignments.artisan and assignments.artisan.enchanting
 
@@ -2294,6 +2392,15 @@ function EmpireManager:ClassifyBankItem(item, entry)
     end
 
     local category, action, routing = self:ClassifyItem(item, entry)
+
+    -- Skip all Storage Rules: this character's bank items stay put. The wrapper
+    -- already collapsed STASH/ROUTE to KEEP, but VENDOR (e.g. class-unusable junk
+    -- sitting in a bank) and the guild-bank "Auctioneer (sell on AH)" KEEP would
+    -- otherwise become TAKEOUT below. Suppress those too - vendor junk is only
+    -- flagged once it's already in bags, never pulled out of a bank on its behalf.
+    if entry.ignoreStorageRules then
+        return CAT_KEEP, "Ignoring storage rules", routing
+    end
 
     if category == CAT_STASH then
         -- Item wants to be stashed somewhere - check if it's already there
