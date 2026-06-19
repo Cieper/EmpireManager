@@ -360,7 +360,11 @@ end
 function EMCharacterRowMixin:ShowProfTooltip()
     local entry = self._entry
     local profSet = EmpireManager:GetAssignedProfs(entry)
-    if not next(profSet) then
+    -- Secondary professions have no role assignment, so a character with only
+    -- Fishing/Cooking/Archaeology has an empty profSet but still has prof data
+    -- worth showing. Fall back to the name tooltip only when there is nothing.
+    local hasCapturedProf = entry.professions and #entry.professions > 0
+    if not next(profSet) and not hasCapturedProf then
         EmpireManager:ShowNameTooltip({ frame = self }, entry, "ANCHOR_CURSOR_RIGHT")
         return
     end
@@ -383,6 +387,17 @@ function EMCharacterRowMixin:ShowProfTooltip()
                 label = string.format("%s (%d)", info.label, profData.skill)
             end
             GameTooltip:AddLine(string.format(ICON16_FMT, info.icon, label), info.r, info.g, info.b)
+        end
+    end
+    -- Secondary professions (Fishing/Cooking/Archaeology) have no role assignment,
+    -- so they never appear in profSet. Show any that were captured from skill data.
+    for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
+        if info.category == "secondary" and not profSet[info.key] then
+            local profData = profByName[info.label]
+            if profData and profData.skill then
+                local label = string.format("%s (%d)", info.label, profData.skill)
+                GameTooltip:AddLine(string.format(ICON16_FMT, info.icon, label), info.r, info.g, info.b)
+            end
         end
     end
     GameTooltip:Show()
@@ -583,9 +598,6 @@ function EmpireManagerFrameMixin:OnLoad()
     -- Initialize column headers
     self:InitColumnHeaders()
 
-    -- Global name alias for UISpecialFrames (ESC to close)
-    _G["EmpireManagerDashboard"] = self
-
     -- Store reference for compat
     EmpireManager.dashboardFrame = self
     self.frame = self -- shim for Sidecar/Triage that use .frame
@@ -600,11 +612,12 @@ end
 
 function EmpireManagerFrameMixin:OnShow()
     if EmpireManager.db then
-        -- ESC to close (db not available during OnLoad, so sync here every show)
-        local idx = tIndexOf(UISpecialFrames, "EmpireManagerDashboard")
+        -- ESC to close (db not available during OnLoad, so sync here every show).
+        -- Register the real XML frame name (untainted), not a Lua _G alias.
+        local idx = tIndexOf(UISpecialFrames, "EmpireManagerFrame")
         if EmpireManager.db.global.options.escToClose then
             if not idx then
-                tinsert(UISpecialFrames, "EmpireManagerDashboard")
+                tinsert(UISpecialFrames, "EmpireManagerFrame")
             end
         elseif idx then
             tremove(UISpecialFrames, idx)

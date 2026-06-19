@@ -1683,15 +1683,36 @@ function EMRosterPageMixin:AddBarRow(content, y, opts)
         CreateColor(math.min(1, br * 1.1), math.min(1, bg2 * 1.1), math.min(1, bb * 1.1), 0.6)
     )
 
+    local labelText = opts.iconText and (opts.iconText .. " " .. opts.label) or opts.label
+
     local fs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
     fs:SetPoint("LEFT", row, "LEFT", LABEL_PAD, 1)
-    fs:SetPoint("RIGHT", row, "RIGHT", -LABEL_PAD, 1)
     fs:SetJustifyH("LEFT")
     fs:SetShadowColor(0, 0, 0, 1)
     fs:SetShadowOffset(1, -1)
     fs:SetAlpha(0.85)
-    local labelText = opts.iconText and (opts.iconText .. " " .. opts.label) or opts.label
-    fs:SetText(string.format("|cffffffff%s|r  |cffe8d9a8%s|r", labelText, opts.valueText or tostring(opts.value)))
+    fs:SetText(string.format("|cffffffff%s|r", labelText))
+
+    -- Value text rendered inside the filled bar (right-aligned at the fill's right
+    -- edge). If the fill is too short to hold the text, it's placed just outside, to
+    -- the right of the fill instead. Heavier shadow for readability over the bar.
+    local valFs = row:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    valFs:SetShadowColor(0, 0, 0, 1)
+    valFs:SetShadowOffset(2, -2)
+    valFs:SetText(string.format("|cffe8d9a8%s|r", opts.valueText or tostring(opts.value)))
+    local textW = valFs:GetStringWidth()
+    local labelEnd = LABEL_PAD + fs:GetStringWidth() + LABEL_PAD
+    -- Fits inside the fill ONLY if the fill also clears the label (so right-aligned
+    -- value text can't land on top of the label).
+    if textW + LABEL_PAD * 2 <= barWidth and barWidth >= labelEnd + textW then
+        valFs:SetJustifyH("RIGHT")
+        valFs:SetPoint("RIGHT", bar, "RIGHT", -LABEL_PAD, 0)
+    else
+        -- Spill out to the right, left-justified, clearing BOTH the fill and the label.
+        local startX = math.max(barWidth + LABEL_PAD, labelEnd)
+        valFs:SetJustifyH("LEFT")
+        valFs:SetPoint("LEFT", row, "LEFT", startX, 0)
+    end
 
     if opts.chars and #opts.chars > 0 then
         local r, g, b = opts.r or 1, opts.g or 0.82, opts.b or 0
@@ -1711,6 +1732,9 @@ function EMRosterPageMixin:AddBarRow(content, y, opts)
                 else
                     line = string.format("%s - %s (%d)", c.name or "?", c.realm or "?", c.level or 0)
                 end
+                if c.played and c.played > 0 then
+                    line = line .. " - |cffe8d9a8" .. (EmpireManager:FormatPlaytime(c.played) or "") .. "|r"
+                end
                 GameTooltip:AddLine(line, r2, g2, b2)
             end
             GameTooltip:Show()
@@ -1724,6 +1748,15 @@ function EMRosterPageMixin:AddBarRow(content, y, opts)
 end
 
 local NEUTRAL_RACES = { Pandaren = true, Dracthyr = true, EarthenDwarf = true, Harronir = true }
+
+-- "3 (25%)" for count-share bars. Drops the percent for zero counts (shows "0").
+local function CountPct(count, total)
+    if count <= 0 then
+        return "0"
+    end
+    local pct = total > 0 and (count / total * 100) or 0
+    return string.format("%d (%.0f%%)", count, pct)
+end
 
 function EMRosterPageMixin:BuildInfoContent(content, y)
     local MAX_LEVEL = GetMaxLevelForExpansionLevel(GetExpansionLevel())
@@ -1751,6 +1784,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
             level = entry.level or 0,
             realm = entry.realm or "?",
             class = entry.class or "UNKNOWN",
+            played = entry.playedTotal or 0,
         }
 
         if ci.level >= MAX_LEVEL then
@@ -1877,7 +1911,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         y = self:AddBarRow(content, y, {
             label = data.faction,
             value = data.count,
-            valueText = tostring(data.count),
+            valueText = CountPct(data.count, totalChars),
             maxValue = factionMax,
             r = fc[1],
             g = fc[2],
@@ -1924,7 +1958,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         y = self:AddBarRow(content, y, {
             label = data.guild,
             value = data.count,
-            valueText = tostring(data.count),
+            valueText = CountPct(data.count, totalChars),
             maxValue = guildMax,
             r = r,
             g = g,
@@ -1962,7 +1996,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         y = self:AddBarRow(content, y, {
             label = displayName,
             value = data.count,
-            valueText = tostring(data.count),
+            valueText = CountPct(data.count, totalChars),
             maxValue = classMax,
             r = r,
             g = g,
@@ -2000,6 +2034,10 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
             local r, g, b = cc and cc.r or 0.7, cc and cc.g or 0.7, cc and cc.b or 0.7
             local displayName = EmpireManager.CLASS_NAMES[data.class] or data.class
             local playedStr = EmpireManager:FormatPlaytime(data.secs) or "0h"
+            local pct = totalPlayed > 0 and (data.secs / totalPlayed * 100) or 0
+            if data.secs > 0 then
+                playedStr = string.format("%s (%.0f%%)", playedStr, pct)
+            end
             y = self:AddBarRow(content, y, {
                 label = displayName,
                 value = data.secs,
@@ -2130,7 +2168,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         y = self:AddBarRow(content, y, {
             label = displayName,
             value = data.count,
-            valueText = tostring(data.count),
+            valueText = CountPct(data.count, totalChars),
             maxValue = raceMax,
             r = r,
             g = g,
@@ -2164,7 +2202,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
         y = self:AddBarRow(content, y, {
             label = data.realm,
             value = data.count,
-            valueText = tostring(data.count),
+            valueText = CountPct(data.count, totalChars),
             maxValue = realmMax,
             r = r,
             g = g,
@@ -4479,10 +4517,10 @@ function EmpireManager:InitIOFrame()
     -- Draggable
     f:RegisterForDrag("LeftButton")
 
-    -- ESC registration
-    _G["EmpireManagerIO"] = f
-    if self.db.global.options.escToClose and not tContains(UISpecialFrames, "EmpireManagerIO") then
-        tinsert(UISpecialFrames, "EmpireManagerIO")
+    -- ESC registration. Register the real XML frame name (untainted), not a Lua
+    -- _G alias - a tainted alias taints Blizzard's secure CloseSpecialWindows loop.
+    if self.db.global.options.escToClose and not tContains(UISpecialFrames, "EmpireManagerIOFrame") then
+        tinsert(UISpecialFrames, "EmpireManagerIOFrame")
     end
 
     -- Edit box reference

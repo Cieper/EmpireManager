@@ -708,7 +708,7 @@ local function ScanBagSlot(items, bag, slot)
     end
 
     local _, _, _, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(info.itemID)
-    local _, _, _, _, _, _, _, _, _, _, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
+    local _, _, _, _, _, _, _, maxStack, _, _, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
         C_Item.GetItemInfo(info.hyperlink or info.itemID)
 
     -- Use C_Item.IsBound (live API) as primary bound check - more reliable than
@@ -749,6 +749,7 @@ local function ScanBagSlot(items, bag, slot)
         itemName = info.itemName or "",
         itemLink = info.hyperlink,
         stackCount = info.stackCount or 1,
+        maxStack = maxStack or 1,
         quality = info.quality or 0,
         isBound = isBound,
         isWarbound = isWarbound,
@@ -1447,13 +1448,35 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     -- we surface "All destinations full" instead of generic "No matching Rule".
     -- Skipped for items already in a bank (reorg path) - we shouldn't refuse
     -- to leave items in place when their assigned tab is full of themselves.
+    --
+    -- Capacity is gauged from EMPTY slots only; the snapshot can't see partial
+    -- stacks. Two outcomes when a matching rule's tabs have no empty slot:
+    --   * Non-stackable item: genuinely can't fit -> block it (greyed, warned)
+    --     as "All matching destinations are full".
+    --   * Stackable item: MIGHT still merge into a partial stack already in a
+    --     "full" tab. We remember the first such rule but keep scanning for a
+    --     rule with real free space. If none wins, we route to the remembered
+    --     rule anyway (so the deposit button works and the merge is attempted)
+    --     AND still surface the "may be full" advisory so the user isn't blind
+    --     to it. The deposit engine merges if it can; if not, the move fails
+    --     silently and the item reappears next scan (documented graceful path).
     local capacityBlocked = false
-    local function HasCapacity(assignment)
+    local itemStackable = (item.maxStack or 1) > 1
+    local blockedStackAsn, blockedStackRule = nil, nil
+    local function HasCapacity(assignment, ruleIndex)
         if item.bankType then
             return true -- reorganizing - bind/capacity checks deferred to Blizzard
         end
         if self:HasFreeCapacity(assignment) then
             return true
+        end
+        if itemStackable then
+            -- Remember the first full-but-maybe-mergeable rule; keep looking for
+            -- a rule with real free space before falling back to this one.
+            if not blockedStackAsn then
+                blockedStackAsn, blockedStackRule = assignment, ruleIndex
+            end
+            return false
         end
         capacityBlocked = true
         return false
@@ -1662,7 +1685,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                 if
                     IsBankTypeCompatible(item, assignment)
                     and IsAssignmentEligible(assignment, item)
-                    and HasCapacity(assignment)
+                    and HasCapacity(assignment, ruleIndex)
                 then
                     return self:GetStorageRouting(assignment, entry, itemCategory, ruleIndex, item)
                 end
@@ -1686,7 +1709,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                     elseif item.isWarbound then
                         typeOK = assignment.type == "charbank" or assignment.type == "warbandbank"
                     end
-                    if typeOK and IsAssignmentEligible(assignment, item) and HasCapacity(assignment) then
+                    if typeOK and IsAssignmentEligible(assignment, item) and HasCapacity(assignment, ruleIndex) then
                         return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                     end
                 end
@@ -1779,7 +1802,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                     and assignment.char == guid
                     and matchSet[assignment.profession]
                     and IsAssignmentEligible(assignment, item)
-                    and HasCapacity(assignment)
+                    and HasCapacity(assignment, ruleIndex)
                 then
                     return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                 end
@@ -1883,7 +1906,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                                 eligible = true
                             end
                         end
-                        if eligible and IsAssignmentEligible(assignment, item) and HasCapacity(assignment) then
+                        if eligible and IsAssignmentEligible(assignment, item) and HasCapacity(assignment, ruleIndex) then
                             return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                         end
                     -- Equipment (BoA): only match warbound (account-bound) gear
@@ -1892,14 +1915,14 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                             item.isWarbound
                             and IsBankTypeCompatible(item, assignment)
                             and IsAssignmentEligible(assignment, item)
-                            and HasCapacity(assignment)
+                            and HasCapacity(assignment, ruleIndex)
                         then
                             return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                         end
                     elseif
                         IsBankTypeCompatible(item, assignment)
                         and IsAssignmentEligible(assignment, item)
-                        and HasCapacity(assignment)
+                        and HasCapacity(assignment, ruleIndex)
                     then
                         return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                     end
@@ -2035,6 +2058,25 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     -- When a matching rule was skipped because its destination is full,
     -- surface that instead of the generic fall-through (handled by
     -- WarnOnUnreachableDestinations).
+
+    -- Stackable item, every matching tab is slot-full: it may still merge into a
+    -- partial stack the snapshot can't see. Route to the first such rule so the
+    -- deposit button works and the merge is attempted, but append "(may be full)"
+    -- so the user knows it could bounce. routing is present, so it joins the
+    -- deposit move list; if the merge fails the move fails silently and the item
+    -- reappears next scan. NOT flagged blocked (4th return false) - it's a real,
+    -- attemptable move.
+    if blockedStackAsn then
+        local category, action, routing =
+            self:GetStorageRouting(blockedStackAsn, entry, blockedStackAsn.profession, blockedStackRule, item)
+        if routing then
+            return category, action .. " (may be full)", routing
+        end
+        -- Routing resolved to a non-move outcome (e.g. unreachable banker) - fall
+        -- through to the generic full message below.
+        capacityBlocked = true
+    end
+
     if capacityBlocked then
         -- Render under the Stash section (it IS stash-intent) but flagged blocked
         -- (4th return) so the row gets a red wash and - with routing = nil - is
@@ -2115,9 +2157,25 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                 return CAT_ROUTE,
                     "Mail to " .. bankerEntry.name .. " <" .. guildName .. "> (" .. profLabel .. ")",
                     { profKey = profKey, ruleIndex = ruleIndex }
+            elseif item.isWarbound then
+                -- Cross-realm warbound (BoA): mailable cross-realm AND cross-faction
+                -- on the same Battle.net account. Mail the banker (Name-Realm form);
+                -- they deposit into the guild bank on their end.
+                return CAT_ROUTE,
+                    "Mail to "
+                        .. bankerEntry.name
+                        .. "-"
+                        .. (bankerEntry.realm or "")
+                        .. " <"
+                        .. guildName
+                        .. "> ("
+                        .. profLabel
+                        .. ")",
+                    { profKey = profKey, ruleIndex = ruleIndex }
             else
-                -- Cross-realm: item must transit via warband bank. Warband bank rejects
-                -- truly soulbound items, so there's no physical path - keep in place.
+                -- Cross-realm, not warbound: regular items can't be mailed cross-realm,
+                -- so transit via warband bank. Warband bank rejects truly soulbound
+                -- items, so there's no physical path - keep in place.
                 if item.isBound and not item.isWarbound then
                     return CAT_KEEP, "Soulbound (cross-realm, no path)"
                 end
@@ -2145,8 +2203,16 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
                     return CAT_ROUTE,
                         "Mail to " .. bankerEntry.name .. " (" .. profLabel .. ")",
                         { profKey = profKey, ruleIndex = ruleIndex }
+                elseif item.isWarbound then
+                    -- Cross-realm warbound (BoA): can be mailed cross-realm AND
+                    -- cross-faction on the same Battle.net account. Address with the
+                    -- Name-Realm form so the mail addresses the right server.
+                    return CAT_ROUTE,
+                        "Mail to " .. bankerEntry.name .. "-" .. (bankerEntry.realm or "") .. " (" .. profLabel .. ")",
+                        { profKey = profKey, ruleIndex = ruleIndex }
                 else
-                    -- Cross-realm: item must transit via warband bank. Warband bank
+                    -- Cross-realm, not warbound: regular items can't be mailed
+                    -- cross-realm, so transit via the warband bank. Warband bank
                     -- rejects truly soulbound items, so there's no physical path - keep.
                     if item.isBound and not item.isWarbound then
                         return CAT_KEEP, "Soulbound (cross-realm, no path)"

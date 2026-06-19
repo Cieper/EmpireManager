@@ -992,11 +992,11 @@ function EmpireManager:CreateTriageOverlay()
         EmpireManager._classifyCtx = nil
     end)
 
-    -- ESC to close
-    _G["EmpireManagerTriage"] = f
+    -- ESC to close. Register the real XML frame name (untainted), not a Lua _G
+    -- alias - a tainted alias taints Blizzard's secure CloseSpecialWindows loop.
     if self.db and self.db.global.options.escToClose then
-        if not tContains(UISpecialFrames, "EmpireManagerTriage") then
-            tinsert(UISpecialFrames, "EmpireManagerTriage")
+        if not tContains(UISpecialFrames, "EmpireManagerTriageFrame") then
+            tinsert(UISpecialFrames, "EmpireManagerTriageFrame")
         end
     end
 
@@ -3343,16 +3343,24 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
     f.TitleText:SetText("EmpireManager - Mail")
     f:SetHeight(400)
 
-    -- Look up realm + class from registry (class drives the name color)
+    -- Look up realm + class from registry (class drives the name color).
+    -- Cross-realm warbound recipients arrive as "Name-Realm" (the SendMail
+    -- address form); split off the realm so the registry name match still works.
+    local lookupName, addrRealm = recipient, nil
+    local dashName, dashRealm = recipient:match("^(.+)%-(.+)$")
+    if dashName then
+        lookupName, addrRealm = dashName, dashRealm
+    end
     local recipientRealm, recipientClass = nil, nil
     for _, e in pairs(self.db.global.registry) do
-        if e.name == recipient then
+        if e.name == lookupName and (not addrRealm or e.realm == addrRealm) then
             recipientRealm = e.realm
             recipientClass = e.class
             break
         end
     end
-    local displayName = recipientRealm and recipientRealm ~= "" and (recipient .. " - " .. recipientRealm) or recipient
+    local displayName = recipientRealm and recipientRealm ~= "" and (lookupName .. " - " .. recipientRealm)
+        or recipient
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[recipientClass]
     local displayNameColored = cc
             and string.format("|cff%02x%02x%02x%s|r", cc.r * 255, cc.g * 255, cc.b * 255, displayName)

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.1] - 2026-06-19
+
+### Added
+
+- Secondary professions (Fishing, Cooking, and Archaeology) are now tracked and displayed alongside your primary professions.
+
+### Fixed
+
+- Stackable items now route into bank tabs that are already partially full, instead of being treated as not fitting.
+- Warbound and account-bound items now mail correctly cross-realm.
+- Locked lockboxes no longer show the skip hint.
+- Closing windows with Escape no longer triggers a secret-value crash (untainted the UISpecialFrames registrations).
+
 ## [1.0.0] - 2026-06-10
 
 ### Added

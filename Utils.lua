@@ -1468,9 +1468,12 @@ function EmpireManager:FormatPlaytime(seconds)
     if not seconds or seconds == 0 then
         return nil
     end
-    local days = math.floor(seconds / 86400)
+    local years = math.floor(seconds / 31536000) -- 365-day years
+    local days = math.floor((seconds % 31536000) / 86400)
     local hours = math.floor((seconds % 86400) / 3600)
-    if days > 0 then
+    if years > 0 then
+        return string.format("%dy %dd", years, days)
+    elseif days > 0 then
         return string.format("%dd %dh", days, hours)
     else
         local mins = math.floor((seconds % 3600) / 60)

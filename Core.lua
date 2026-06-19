@@ -1036,9 +1036,13 @@ end
 
 -- Toggle ESC-to-close behavior for all EmpireManager frames and popups
 function EmpireManager:UpdateEscBehavior()
+    -- Use the real XML frame names (untainted globals). Aliases created via
+    -- _G[name] = frame in Lua are tainted; when Blizzard's secure CloseSpecialWindows
+    -- loop reads them on Escape, the secure execution inherits EmpireManager taint,
+    -- which later crashes unrelated secret-value comparisons (e.g. world-map POI widgets).
     local frameNames = {
-        "EmpireManagerDashboard",
-        "EmpireManagerTriage",
+        "EmpireManagerFrame",
+        "EmpireManagerTriageFrame",
         "EmpireManagerSidecar",
         "EmpireManagerKeeplistWindow",
         "EmpireManagerVendorlistWindow",
@@ -1046,6 +1050,7 @@ function EmpireManager:UpdateEscBehavior()
         "EmpireManagerCharBlacklistWindow",
         "EmpireManagerWizardFrame",
         "EmpireManagerRemapDialog",
+        "EmpireManagerIOFrame",
     }
     local enabled = self.db.global.options.escToClose
     if enabled then
@@ -1220,6 +1225,20 @@ function EmpireManager:ShowDebugPopup(text)
         local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
         close:SetPoint("TOPRIGHT", -4, -4)
 
+        -- Escape-to-close via a self-contained key handler instead of
+        -- UISpecialFrames: this frame is CreateFrame'd in Lua (tainted), and a
+        -- tainted UISpecialFrames entry taints Blizzard's secure window-close loop.
+        f:EnableKeyboard(true)
+        f:SetPropagateKeyboardInput(true)
+        f:SetScript("OnKeyDown", function(self_, key)
+            if key == "ESCAPE" then
+                self_:SetPropagateKeyboardInput(false)
+                self_:Hide()
+            else
+                self_:SetPropagateKeyboardInput(true)
+            end
+        end)
+
         -- Plain ScrollFrame (NOT InputScrollFrameTemplate) so there's no
         -- character-counter overlay and no template-imposed font.
         local scroll = CreateFrame("ScrollFrame", nil, f)
@@ -1305,7 +1324,6 @@ function EmpireManager:ShowDebugPopup(text)
 
         f.EditBox = eb
         f.ScrollFrame = scroll
-        tinsert(UISpecialFrames, "EmpireManagerDebugFrame")
     end
     f.EditBox:SetText(text or "")
     f.EditBox:SetTextColor(1, 1, 1, 1)
@@ -1354,7 +1372,17 @@ function EmpireManager:HintOpenableContainers()
         local slots = C_Container.GetContainerNumSlots(bag) or 0
         for slot = 1, slots do
             local info = C_Container.GetContainerItemInfo(bag, slot)
-            if info and info.hasLoot and info.itemID and not self._hintedOpenables[info.itemID] then
+            -- `hasLoot` is also true for LOCKED lockboxes (Umbral Tin Lockbox,
+            -- etc.) - but those can't be right-clicked open; they need a key or a
+            -- Rogue/Lockpicker. Excluding `isLocked` keeps the hint honest (locked
+            -- boxes route to the Lockpicker via triage's isLockbox flag instead).
+            if
+                info
+                and info.hasLoot
+                and not info.isLocked
+                and info.itemID
+                and not self._hintedOpenables[info.itemID]
+            then
                 if not counts[info.itemID] then
                     order[#order + 1] = info.itemID
                     linkByID[info.itemID] = info.hyperlink
@@ -1460,8 +1488,8 @@ end
 -- Used to skip redundant snapshots when SKILL_LINES_CHANGED fires spuriously.
 local function ProfessionSignature()
     local parts = {}
-    local prof1, prof2 = GetProfessions()
-    for _, idx in pairs({ prof1, prof2 }) do
+    local prof1, prof2, archaeology, fishing, cooking = GetProfessions()
+    for _, idx in pairs({ prof1, prof2, archaeology, fishing, cooking }) do
         if idx then
             local name = GetProfessionInfo(idx)
             if name then
@@ -2340,9 +2368,10 @@ function EmpireManager:SnapshotProfessions(entry)
     end
 
     local profs = {}
-    local prof1, prof2 = GetProfessions()
-    -- Check each slot individually: ipairs({prof1, prof2}) would skip prof2 if prof1 is nil
-    for _, idx in pairs({ prof1, prof2 }) do
+    local prof1, prof2, archaeology, fishing, cooking = GetProfessions()
+    -- Check each slot individually: a sparse list (e.g. prof1 nil but fishing set)
+    -- would be skipped by ipairs, so iterate explicit slots with pairs.
+    for _, idx in pairs({ prof1, prof2, archaeology, fishing, cooking }) do
         if idx then
             local name, _, skillLevel, maxSkillLevel, _, _, skillLineID = GetProfessionInfo(idx)
             if name then
@@ -2945,15 +2974,28 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                             if not entry.professions or #entry.professions == 0 then
                                 entry.professions = profs
                             else
-                                -- Merge expansion skills into existing profession entries
+                                -- Merge imported professions into the existing list.
+                                -- Match by name: update skill + expansion skills on an
+                                -- existing entry, or append a profession the registry
+                                -- never captured (e.g. secondary profs like Fishing).
                                 for _, importedProf in ipairs(profs) do
-                                    if importedProf.expansionSkills then
-                                        for _, existingProf in ipairs(entry.professions) do
-                                            if existingProf.name == importedProf.name then
-                                                existingProf.expansionSkills = importedProf.expansionSkills
-                                                break
-                                            end
+                                    local match
+                                    for _, existingProf in ipairs(entry.professions) do
+                                        if existingProf.name == importedProf.name then
+                                            match = existingProf
+                                            break
                                         end
+                                    end
+                                    if match then
+                                        if (importedProf.skill or 0) > 0 then
+                                            match.skill = importedProf.skill
+                                            match.maxSkill = importedProf.maxSkill
+                                        end
+                                        if importedProf.expansionSkills then
+                                            match.expansionSkills = importedProf.expansionSkills
+                                        end
+                                    else
+                                        entry.professions[#entry.professions + 1] = importedProf
                                     end
                                 end
                             end
