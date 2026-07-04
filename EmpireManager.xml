@@ -88,6 +88,40 @@
     </Frame>
 
     <!-- ================================================================== -->
+    <!-- Restock Row Template (Restock tab list; mirrors EMStorageRowTemplate) -->
+    <!-- ================================================================== -->
+    <Button name="EMRestockRowTemplate" virtual="true"
+            registerForClicks="LeftButtonUp,RightButtonUp">
+        <Size x="1" y="24"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.08"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Button>
+
+    <!-- Restock Item-Picker Row Template (Add/Edit dialog item list) -->
+    <Button name="EMRestockItemRowTemplate" virtual="true"
+            registerForClicks="LeftButtonUp">
+        <Size x="1" y="22"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.10"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Button>
+
+    <!-- ================================================================== -->
     <!-- Main Dashboard Frame                                               -->
     <!-- ================================================================== -->
     <Frame name="EmpireManagerFrame"
@@ -320,6 +354,105 @@
                             <Layer level="ARTWORK">
                                 <FontString parentKey="Text" inherits="GameFontNormalMed1"
                                             text="Storage Rules" justifyH="CENTER">
+                                    <Anchors>
+                                        <Anchor point="CENTER" x="26" y="0"/>
+                                    </Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+
+                    <!-- ItemList: shrunk frame; scrollbar sits OUTSIDE on the right (AH-style) -->
+                    <Frame parentKey="Inset" useParentLevel="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"
+                                    relativeKey="$parent.TitleBar"
+                                    relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                            <Anchor point="BOTTOMRIGHT" x="-20"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" x="3" y="-22"/>
+                                        <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="0" y="-19"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="HeaderContainer">
+                                <Size y="19"/>
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" x="4" y="-1"/>
+                                    <Anchor point="TOPRIGHT" x="-4" y="-1"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="BOTTOMLEFT" x="0" y="-6"/>
+                                    <Anchor point="RIGHT"
+                                            relativeKey="$parent.HeaderContainer"
+                                            relativePoint="RIGHT"/>
+                                    <Anchor point="BOTTOM" x="0" y="3"/>
+                                </Anchors>
+                            </Frame>
+                            <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="TOPRIGHT" x="9" y="0"/>
+                                    <Anchor point="BOTTOMLEFT"
+                                            relativeKey="$parent.ScrollBox"
+                                            relativePoint="BOTTOMRIGHT" x="9" y="4"/>
+                                </Anchors>
+                            </EventFrame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ========================================================== -->
+            <!-- Page: Restock (native; mirrors Storage page)              -->
+            <!-- ========================================================== -->
+            <Frame parentKey="RestockPage" parentArray="Pages" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="4" y="-32"/>
+                    <Anchor point="BOTTOMRIGHT" x="-6" y="5"/>
+                </Anchors>
+                <Frames>
+                    <!-- Add Restock Rule icon button (far right) -->
+                    <Button parentKey="AddButton">
+                        <Size x="24" y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT" x="-24" y="-2"/>
+                        </Anchors>
+                        <NormalTexture file="Interface\AddOns\EmpireManager\Textures\add"/>
+                        <HighlightTexture file="Interface\AddOns\EmpireManager\Textures\add" alphaMode="ADD" alpha="0.4"/>
+                        <PushedTexture file="Interface\AddOns\EmpireManager\Textures\add">
+                            <Color r="0.7" g="0.7" b="0.7"/>
+                        </PushedTexture>
+                    </Button>
+
+                    <!-- Title text (centered, matches grid width) -->
+                    <Frame parentKey="TitleBar">
+                        <Size y="24"/>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="0" y="-2"/>
+                            <Anchor point="TOPRIGHT" x="-20" y="-2"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString parentKey="Text" inherits="GameFontNormalMed1"
+                                            text="Restock Rules" justifyH="CENTER">
                                     <Anchors>
                                         <Anchor point="CENTER" x="26" y="0"/>
                                     </Anchors>
@@ -787,6 +920,141 @@
                         <Size x="90"/>
                     </FontString>
                 </Layer></Layers>
+            </Frame>
+
+            <!-- Bottom buttons: [Delete]          [Cancel][Save] -->
+            <Button parentKey="DeleteButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" x="22" y="20"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="SaveButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-22" y="20"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="CancelButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="28"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-126" y="20"/>
+                </Anchors>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnDragStart>self:StartMoving()</OnDragStart>
+            <OnDragStop>self:StopMovingOrSizing()</OnDragStop>
+        </Scripts>
+    </Frame>
+
+    <!-- ================================================================== -->
+    <!-- Restock Add/Edit Dialog (AH-browse style item picker)             -->
+    <!-- Most child widgets (dropdowns, search box, quality segment, target -->
+    <!-- input, destination controls) are created and anchored in Lua,      -->
+    <!-- mirroring EmpireManagerStorageDialog. XML provides the shell + the  -->
+    <!-- scrollable item-list inset + the bottom buttons.                    -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerRestockDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="DIALOG"
+           inherits="BackdropTemplate">
+        <Size x="460" y="508"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-24"/>
+                    </Anchors>
+                </FontString>
+                <FontString parentKey="DescText" inherits="GameFontHighlight" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="TOP" relativeKey="$parent.TitleText" relativePoint="BOTTOM" x="0" y="-18"/>
+                        <Anchor point="LEFT" x="30" y="0"/>
+                        <Anchor point="RIGHT" x="-30" y="0"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+
+            <!-- Filter row: Profession DD + Expansion DD + Search box (created in Lua) -->
+            <Frame parentKey="FilterRow">
+                <Size y="24"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="22" y="-120"/>
+                    <Anchor point="TOPRIGHT" x="-22" y="-120"/>
+                </Anchors>
+            </Frame>
+
+            <!-- Item-list inset: scrollbar sits OUTSIDE on the right (AH-style) -->
+            <Frame parentKey="ListInset" useParentLevel="true">
+                <Size y="180"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.FilterRow"
+                            relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                    <Anchor point="TOPRIGHT" relativeKey="$parent.FilterRow"
+                            relativePoint="BOTTOMRIGHT" x="-16" y="-8"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" x="3" y="-3"/>
+                                <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                        <KeyValues>
+                            <KeyValue key="layoutType" value="InsetFrameTemplate" type="string"/>
+                        </KeyValues>
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="BOTTOMRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                    <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="4" y="-4"/>
+                            <Anchor point="BOTTOMRIGHT" x="-4" y="4"/>
+                        </Anchors>
+                    </Frame>
+                    <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"
+                                    relativeKey="$parent.ScrollBox"
+                                    relativePoint="TOPRIGHT" x="9" y="0"/>
+                            <Anchor point="BOTTOMLEFT"
+                                    relativeKey="$parent.ScrollBox"
+                                    relativePoint="BOTTOMRIGHT" x="9" y="0"/>
+                        </Anchors>
+                    </EventFrame>
+                </Frames>
+            </Frame>
+
+            <!-- Selected echo / Quality / Target / Destination rows are anchored  -->
+            <!-- to this container in Lua (so it can grow as needed).               -->
+            <Frame parentKey="DetailRow">
+                <Size y="24"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.ListInset"
+                            relativePoint="BOTTOMLEFT" x="0" y="-22"/>
+                    <Anchor point="TOPRIGHT" relativeKey="$parent.ListInset"
+                            relativePoint="BOTTOMRIGHT" x="16" y="-22"/>
+                </Anchors>
             </Frame>
 
             <!-- Bottom buttons: [Delete]          [Cancel][Save] -->

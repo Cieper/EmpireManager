@@ -23,6 +23,7 @@ EmpireManager.SLASH_COMMANDS = {
     { cmd = "/em charb", desc = "Open the Character Blacklist window" },
     { cmd = "/em ie", desc = "Open the Import / Export window" },
     { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
+    { cmd = "/em wipe <target>", desc = "|cffff8800Destructive|r: <target> = chars / rules / keeplist / vendorw / restock / all" },
     { cmd = "/em help", desc = "Show all commands in chat" },
 }
 
@@ -59,6 +60,7 @@ local DB_DEFAULTS = {
             repairWithGuildFunds = false, -- prefer guild bank funds for auto-repair, fall back to personal gold
             closeTriageOnLeave = true, -- auto-close triage overlay when leaving bank/vendor/mailbox
             autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
+            autoRestock = false, -- auto top-up restock floors from bags on bank open (off = OK/Cancel dialog). See docs/RESTOCK.md.
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
             vendorBopIlvl = false, -- vendor soulbound gear with lower ilvl than equipped
@@ -95,6 +97,15 @@ function EmpireManager:OnInitialize()
     end
     if not rawget(self.db.global, "vendorWhitelist") then
         self.db.global.vendorWhitelist = {}
+    end
+    -- Bank Restock par-level list (ordered array; position = priority). See docs/RESTOCK.md.
+    if not rawget(self.db.global, "restockList") then
+        self.db.global.restockList = {}
+    end
+    -- Per-item count snapshots for the Restock fill column, keyed by destination
+    -- ("warbandbank", "charbank:<guid>", "bags:<guid>", "guildbank:<key>").
+    if not rawget(self.db.global, "restockCounts") then
+        self.db.global.restockCounts = {}
     end
 
     -- Resolve legacy Keep/Vendor conflicts: items on BOTH lists. Keep List wins
@@ -373,6 +384,14 @@ function EmpireManager:OnInitialize()
         "When you open a Warband Bank, move this character's gold to or from it without asking. "
             .. "Set the per-character Withdraw/Deposit amounts in the character panel (/em config) > Gold tab. "
             .. "When off, you are asked to confirm each transfer."
+    )
+
+    AddCheckbox(
+        generalCat,
+        "autoRestock",
+        "Auto Restock at Bank",
+        "When you open a bank, top up your Restock floors from this character's bags without asking. "
+            .. "Set the floors in the Restock tab. When off, you are asked to confirm each top-up."
     )
 
     local _, autoRepairInit = AddCheckbox(
@@ -880,10 +899,23 @@ function EmpireManager:SlashHandler(input)
         self:OpenWizard()
     elseif cmd == "wipe" then
         local _, sub = self:GetArgs(input, 2)
-        if sub == "chars" or sub == "rules" or sub == "all" then
+        if
+            sub == "chars"
+            or sub == "rules"
+            or sub == "all"
+            or sub == "keeplist"
+            or sub == "vendorw"
+            or sub == "restock"
+        then
             self:ConfirmWipe(sub)
         else
-            self:ChatMsg("Usage: /em wipe chars | rules | all", true)
+            self:ChatMsg("|cffff8800/em wipe|r targets (destructive, prompts to confirm):", true)
+            self:ChatMsg("  chars . . . . Character roster", true)
+            self:ChatMsg("  rules . . . . Storage Rules", true)
+            self:ChatMsg("  keeplist  . . Keep List", true)
+            self:ChatMsg("  vendorw . . . Vendor Whitelist", true)
+            self:ChatMsg("  restock . . . Restock Rules", true)
+            self:ChatMsg("  all . . . . . everything above", true)
         end
     elseif cmd == "inspect" then
         -- Print classID/subClassID of the item currently under the cursor tooltip
@@ -924,14 +956,48 @@ function EmpireManager:SlashHandler(input)
             ),
             true
         )
+        -- Crafting quality tier (what the Restock chevron uses). Print both API
+        -- returns plus the atlas the addon resolves, so we can tell whether a wrong
+        -- chevron is a tier-number issue or an atlas-art issue.
+        do
+            local reagentQ = C_TradeSkillUI and C_TradeSkillUI.GetItemReagentQualityByItemInfo
+                and C_TradeSkillUI.GetItemReagentQualityByItemInfo(itemID)
+            local craftedQ = C_TradeSkillUI and C_TradeSkillUI.GetItemCraftedQualityByItemInfo
+                and C_TradeSkillUI.GetItemCraftedQualityByItemInfo(itemLink)
+            local tier = reagentQ or craftedQ
+            local atlas = "nil"
+            if tier then
+                for _, cand in ipairs({
+                    "Professions-Icon-Quality-Tier" .. tier .. "-Small",
+                    "Professions-Icon-Quality-Tier" .. tier,
+                    "Professions-ChatIcon-Quality-Tier" .. tier,
+                }) do
+                    if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(cand) then
+                        atlas = cand
+                        break
+                    end
+                end
+            end
+            self:ChatMsg(
+                string.format(
+                    "  quality: reagentTier=%s  craftedTier=%s  -> atlas=%s",
+                    tostring(reagentQ or "nil"),
+                    tostring(craftedQ or "nil"),
+                    atlas
+                ),
+                true
+            )
+        end
         -- Tooltip-derived bind flags (what triage actually uses)
         if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
             local td = C_TooltipInfo.GetHyperlink(itemLink)
             local isWarbound, isSoulbound = false, false
             local isConjured = false
+            local isKnownAppearance = false
             local hasUseLine, hasClassLine = false, false
             local usePrefix = (ITEM_SPELL_TRIGGER_ONUSE or "Use: %s"):gsub("%%s.*$", "")
             local classPrefix = (ITEM_CLASSES_ALLOWED or "Classes: %s"):gsub("%%s.*$", "")
+            local knownLine = ITEM_SPELL_KNOWN or "Already known"
             if td and td.lines then
                 for _, line in ipairs(td.lines) do
                     local txt = line.leftText
@@ -946,6 +1012,8 @@ function EmpireManager:SlashHandler(input)
                             isSoulbound = true
                         elseif txt == ITEM_CONJURED then
                             isConjured = true
+                        elseif txt == knownLine then
+                            isKnownAppearance = true
                         end
                         if not hasUseLine and usePrefix ~= "" and txt:find(usePrefix, 1, true) == 1 then
                             hasUseLine = true
@@ -961,11 +1029,12 @@ function EmpireManager:SlashHandler(input)
             end
             self:ChatMsg(
                 string.format(
-                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s",
+                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
                     tostring(isWarbound),
                     tostring(isSoulbound),
                     tostring(isConjured),
-                    tostring(hasUseLine and hasClassLine)
+                    tostring(hasUseLine and hasClassLine),
+                    tostring(isKnownAppearance)
                 ),
                 true
             )
@@ -1024,6 +1093,13 @@ function EmpireManager:SlashHandler(input)
             return
         end
         self:_DumpDebug(target)
+    elseif cmd == "gendata" then
+        -- Dev helper: dump RESTOCK_ITEMS itemIDs from the loaded AH browse results,
+        -- grouped by Trade Goods subclass. Accumulates across runs (one search per
+        -- category); `reset` clears the accumulator. Run at the AH after searching
+        -- Reagents -> <profession> with "Current Expansion Only". See docs/RESTOCK.md.
+        local _, gsub = self:GetArgs(input, 2)
+        self:_GenRestockData(gsub and gsub:lower() or nil)
     elseif cmd == "help" then
         self:ChatMsg("|cffffcc00Available commands:|r", true)
         for _, c in ipairs(EmpireManager.SLASH_COMMANDS) do
@@ -1095,7 +1171,9 @@ local function FormatDumpLine(addon, r)
     local displayName = item.itemName or link or "?"
     local catInfo = CATEGORY_INFO[r.category]
     local catLabel = catInfo and catInfo.label or "?"
-    local count = item.count or 1
+    -- routeCount = units actually moved (surplus above a restock floor); fall back to
+    -- the whole stack when the row moves everything.
+    local count = item.routeCount or item.stackCount or item.count or 1
     local itemID, _, _, itemEquipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
     local bindType, expansionID, _, isCraftingReagent = select(14, C_Item.GetItemInfo(link))
     local cacheKey = (classID or 0) * 1000 + (subClassID or 0)
@@ -1187,6 +1265,127 @@ function EmpireManager:_DumpDebug(target)
                 return r.item.bankType == "guildbank"
             end)
         end)
+    end
+end
+
+-- Dev helper (`/em gendata`): dump RESTOCK_ITEMS itemIDs from the loaded AH browse
+-- results, grouped by Trade Goods subclass. Workflow: at the AH, search Reagents ->
+-- <profession> with the "Current Expansion Only" filter checked, let all pages load,
+-- then run `/em gendata`. Reads the FULL result store (not the visible page) - the set
+-- is more than one screen, so we request remaining pages until HasFullBrowseResults().
+--
+-- ACCUMULATES across runs (session-only, `self._genRestockAcc`): a single broad
+-- "Reagents (all)" search risks an incomplete stream, so do one search PER category
+-- (Cloth, Leather, Metal & Stone, ...) and run `/em gendata` after each - itemIDs merge
+-- into one deduped table. The running unique total lets you sanity-check against a broad
+-- dump: if the per-category union is larger, the broad search truncated.
+--   /em gendata        - merge current AH results, then show the accumulated table
+--   /em gendata reset  - clear the accumulator and start over
+-- See docs/RESTOCK.md §4. Dev-only; not surfaced in /em help.
+function EmpireManager:_GenRestockData(sub)
+    if sub == "reset" then
+        self._genRestockAcc = nil
+        self:ChatMsg("|cffffcc00[gendata]|r Accumulator cleared.", true)
+        return
+    end
+    if not C_AuctionHouse or not C_AuctionHouse.GetBrowseResults then
+        self:ChatMsg("|cffff4444[gendata]|r Open the Auction House first.", true)
+        return
+    end
+
+    -- Merge the current (complete) browse results into the session accumulator, then
+    -- render the full accumulated table. Accumulator: { [itemID] = { sub = "7/9",
+    -- exp = expansionID } }. Tagging by expansionID lets a broad (all-expansion)
+    -- search auto-separate TWW (exp 10) from Midnight (exp 11), etc.
+    local function build()
+        local results = C_AuctionHouse.GetBrowseResults() or {}
+        local complete = not C_AuctionHouse.HasFullBrowseResults or C_AuctionHouse.HasFullBrowseResults()
+        self._genRestockAcc = self._genRestockAcc or {}
+        local acc = self._genRestockAcc
+        local added = 0
+        for _, r in ipairs(results) do
+            local itemID = r.itemKey and r.itemKey.itemID
+            if itemID and not acc[itemID] then
+                local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(itemID)
+                local expID = select(15, C_Item.GetItemInfo(itemID))
+                local sub = (classID == 7) and ("7/" .. tostring(subClassID or "?"))
+                    or ("class" .. tostring(classID or "?"))
+                acc[itemID] = { sub = sub, exp = expID or -1 }
+                added = added + 1
+            end
+        end
+
+        -- Regroup the accumulator by expansion -> subclass for output. Only the three
+        -- modern expansions have the crafting-quality tier system and need a restock
+        -- table: Dragonflight (9), TWW (10), Midnight (11). Older items are skipped.
+        local WANT_EXP = { [9] = true, [10] = true, [11] = true }
+        local byExp, total = {}, 0
+        for itemID, info in pairs(acc) do
+            if WANT_EXP[info.exp] then
+                byExp[info.exp] = byExp[info.exp] or {}
+                byExp[info.exp][info.sub] = byExp[info.exp][info.sub] or {}
+                local bucket = byExp[info.exp][info.sub]
+                bucket[#bucket + 1] = itemID
+                total = total + 1
+            end
+        end
+        local expKeys = {}
+        for e in pairs(byExp) do
+            expKeys[#expKeys + 1] = e
+        end
+        table.sort(expKeys)
+
+        local lines = {
+            string.format(
+                "-- RESTOCK_ITEMS dump - %d new from %d AH results; %d unique in exp 9/10/11%s",
+                added,
+                #results,
+                total,
+                complete and "" or "  |cffff4444(PARTIAL: results not fully loaded)|r"
+            ),
+            "-- Accumulates across /em gendata runs. /em gendata reset to clear.",
+            "-- Paste each block into RESTOCK_ITEMS[<expansionID>][<professionKey>].",
+            "-- Grouped by expansionID, then Trade Goods subclass; map each subclass to a profession.",
+            "-- (TWW = exp 10, Midnight = exp 11. exp -1 = uncached/unknown.)",
+        }
+        for _, e in ipairs(expKeys) do
+            lines[#lines + 1] = string.format("-- === expansion %s ===", tostring(e))
+            local bySub = byExp[e]
+            local subKeys = {}
+            for k in pairs(bySub) do
+                subKeys[#subKeys + 1] = k
+            end
+            table.sort(subKeys)
+            for _, k in ipairs(subKeys) do
+                local ids = bySub[k]
+                table.sort(ids)
+                lines[#lines + 1] = string.format("--   subclass %s (%d items):", k, #ids)
+                lines[#lines + 1] = "{ " .. table.concat(ids, ", ") .. " },"
+            end
+        end
+        self:ShowDebugPopup(table.concat(lines, "\n"))
+        if not complete then
+            self:ChatMsg("|cffff4444[gendata]|r Results were not fully loaded - re-run after they settle.", true)
+        end
+    end
+
+    if C_AuctionHouse.HasFullBrowseResults and not C_AuctionHouse.HasFullBrowseResults() then
+        self:ChatMsg("|cffffcc00[gendata]|r Loading all pages...", true)
+        local frame = CreateFrame("Frame")
+        frame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
+        frame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+        frame:SetScript("OnEvent", function()
+            if C_AuctionHouse.HasFullBrowseResults() then
+                frame:UnregisterAllEvents()
+                frame:SetScript("OnEvent", nil)
+                build()
+            else
+                C_AuctionHouse.RequestMoreBrowseResults()
+            end
+        end)
+        C_AuctionHouse.RequestMoreBrowseResults()
+    else
+        build()
     end
 end
 
@@ -1665,6 +1864,12 @@ function EmpireManager:BANKFRAME_OPENED()
         self:SendMessage("EM_BANK_OPENED", bagActionable)
     end)
 
+    -- Snapshot per-item bank counts for the Restock fill column SYNCHRONOUSLY and
+    -- up-front. Must not depend on the chunked capacity scan finishing: replacement
+    -- bank UIs (Baganator) call CloseBankFrame() immediately, flipping bankIsOpen
+    -- false mid-scan, so a tail write there would be skipped. Cheap (sub-ms).
+    self:SnapshotBankItemCounts()
+
     -- Snapshot bank capacity using slot-level chunked C_Timer processing.
     -- Scans SLOTS_PER_CHUNK slots per frame to stay well under the 16ms budget.
     local SLOTS_PER_CHUNK = 20
@@ -1701,6 +1906,8 @@ function EmpireManager:BANKFRAME_OPENED()
     end
 
     -- Accumulator: { [type_tabIdx] = { total = N, used = N } }
+    -- (Per-item Restock counts are captured synchronously up-front by
+    -- SnapshotBankItemCounts, not here, so a mid-scan bank close can't lose them.)
     local accum = {}
     local cursor = 0
     local selfRef = self
@@ -1823,6 +2030,104 @@ function EmpireManager:BANKFRAME_OPENED()
     end
 
     ProcessChunk()
+    self:SnapshotBagItemCounts()
+
+    -- Bank Restock top-up (Stage B). Delay briefly so bank containers are fully
+    -- populated before we read live counts. Reads live container counts, not the
+    -- snapshot, so it is independent of the chunked capacity scan above.
+    C_Timer.After(0.6, function()
+        if self.bankIsOpen then
+            self:MaybeRestock()
+        end
+    end)
+end
+
+-- Snapshot per-item counts in the currently open bank containers into
+-- db.global.restockCounts, for the Restock fill column. Warband is account-shared
+-- (single key); char bank is keyed per owning character. Reads only containers that
+-- actually have slots, so it is safe to call regardless of which bank type is open.
+-- Synchronous (sub-ms); call up-front so a mid-scan bank close can't lose the data.
+function EmpireManager:SnapshotBankItemCounts()
+    local guid = self.playerGUID
+    if not guid then
+        return
+    end
+    local counts = self.db.global.restockCounts
+    if not counts then
+        counts = {}
+        self.db.global.restockCounts = counts
+    end
+
+    -- Character bank: containers 6-11.
+    local charTally, sawChar = {}, false
+    for bag = 6, 11 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        if numSlots > 0 then
+            sawChar = true
+            for slot = 1, numSlots do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if info and info.itemID then
+                    charTally[info.itemID] = (charTally[info.itemID] or 0) + (info.stackCount or 1)
+                end
+            end
+        end
+    end
+    if sawChar then
+        counts["charbank:" .. guid] = charTally
+    end
+
+    -- Warband bank: containers 12-16 (account-shared).
+    local wbTally, sawWb = {}, false
+    for bag = 12, 16 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        if numSlots > 0 then
+            sawWb = true
+            for slot = 1, numSlots do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if info and info.itemID then
+                    wbTally[info.itemID] = (wbTally[info.itemID] or 0) + (info.stackCount or 1)
+                end
+            end
+        end
+    end
+    if sawWb then
+        counts["warbandbank"] = wbTally
+    end
+end
+
+-- Snapshot the current character's bag item counts (bags 0-5) into
+-- db.global.restockCounts["bags:<guid>"], for the Restock fill column on
+-- "Character Bags" entries. Cheap synchronous read; safe to call any time.
+function EmpireManager:SnapshotBagItemCounts()
+    local guid = self.playerGUID
+    if not guid then
+        return
+    end
+    local tally = {}
+    for bag = 0, 5 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        for slot = 1, numSlots do
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            if info and info.itemID then
+                tally[info.itemID] = (tally[info.itemID] or 0) + (info.stackCount or 1)
+            end
+        end
+    end
+    local counts = self.db.global.restockCounts
+    if not counts then
+        counts = {}
+        self.db.global.restockCounts = counts
+    end
+    counts["bags:" .. guid] = tally
+end
+
+-- Live count of an itemID in the current character's bags (bags 0-5). Used by the
+-- restock engine to decide how many to deposit. Synchronous, sub-ms.
+function EmpireManager:CountItemInBags(itemID)
+    if not itemID then
+        return 0
+    end
+    return C_Item.GetItemCount(itemID, false, false, true, false) or 0
 end
 
 -- Lightweight live rescan of character + warband bank capacity. Synchronous;
@@ -2045,6 +2350,10 @@ function EmpireManager:SnapshotGuildBank()
         guildCap[tab] = nil
     end
 
+    -- Per-item tally for the Restock fill column and the engine's count read.
+    -- Rebuilt from the viewable tabs each scan.
+    local guildItemTally = {}
+
     local listener = self:AcquireListener()
     local finished = false
     local globalTimer
@@ -2070,6 +2379,15 @@ function EmpireManager:SnapshotGuildBank()
             end
         end
         guildCap._scannedAt = time()
+
+        -- Commit the per-item tally for the Restock fill column (display-only).
+        local counts = selfRef.db.global.restockCounts
+        if not counts then
+            counts = {}
+            selfRef.db.global.restockCounts = counts
+        end
+        counts["guildbank:" .. guildKey] = guildItemTally
+
         selfRef:ChatVerbose(
             string.format(
                 "|cff4d99ff[Storage]|r Guild Bank %d tab%s, %d/%d free",
@@ -2114,6 +2432,14 @@ function EmpireManager:SnapshotGuildBank()
         end)
 
         selfRef:SendMessage("EM_TRIAGE_REFRESH")
+
+        -- Bank Restock top-up for guild floors. The snapshot above committed the
+        -- per-item guild count; run after a short delay so tab data is settled.
+        C_Timer.After(0.6, function()
+            if selfRef:IsGuildBankOpen() then
+                selfRef:MaybeRestock()
+            end
+        end)
     end
 
     -- Count filled slots on one tab; event doesn't say which tab fired, so
@@ -2125,14 +2451,23 @@ function EmpireManager:SnapshotGuildBank()
         end
         local used = 0
         for slot = 1, numSlots do
-            if GetGuildBankItemLink(tab, slot) then
+            local link = GetGuildBankItemLink(tab, slot)
+            if link then
                 used = used + 1
+                local itemID = C_Item.GetItemInfoInstant(link)
+                if itemID then
+                    local _, count = GetGuildBankItemInfo(tab, slot)
+                    guildItemTally[itemID] = (guildItemTally[itemID] or 0) + (count or 1)
+                end
             end
         end
         guildCap[tab] = { total = numSlots, used = used }
     end
 
     local function ScanAllTabs()
+        -- Tally is cumulative within one full pass; reset so re-scans after each
+        -- GUILDBANKBAGSLOTS_CHANGED event don't double-count.
+        wipe(guildItemTally)
         for _, tab in ipairs(purchasedTabs) do
             ScanTab(tab)
         end
@@ -2257,12 +2592,19 @@ function EmpireManager:PLAYER_ENTERING_WORLD()
         entry.level = liveLevel
     end
 
+    -- Snapshot bag item counts so "Character Bags" restock entries show a fill
+    -- level for this character without needing a bank open.
+    self:SnapshotBagItemCounts()
+
     -- One-time hint: registry has chars but no storage rules yet.
     if not self.db.global.wizardHintSeen and not self.db.global.wizardSeen then
-        local hasRules = (#(self.db.global.storageAssignments or {})) > 0
+        local hasRules = #(self.db.global.storageAssignments or {}) > 0
         local hasChars = next(self.db.global.registry) ~= nil
         if hasChars and not hasRules then
-            self:ChatMsg("|cffffd100[EmpireManager]|r No storage rules yet. Run |cffffd100/em wizard|r to get started.", true)
+            self:ChatMsg(
+                "|cffffd100[EmpireManager]|r No storage rules yet. Run |cffffd100/em wizard|r to get started.",
+                true
+            )
             self.db.global.wizardHintSeen = true
         end
     end
@@ -2559,8 +2901,14 @@ function EmpireManager:ConfirmWipe(target)
         text = "Wipe the entire character roster?\n\n|cffff4444This cannot be undone.|r"
     elseif target == "rules" then
         text = "Wipe all Storage Rules?\n\n|cffff4444This cannot be undone.|r"
+    elseif target == "keeplist" then
+        text = "Wipe the Keep List?\n\n|cffff4444This cannot be undone.|r"
+    elseif target == "vendorw" then
+        text = "Wipe the Vendor Whitelist?\n\n|cffff4444This cannot be undone.|r"
+    elseif target == "restock" then
+        text = "Wipe all Restock Rules?\n\n|cffff4444This cannot be undone.|r"
     elseif target == "all" then
-        text = "Wipe |cffff4444both|r Storage Rules and the Character Roster?\n\n|cffff4444This cannot be undone.|r"
+        text = "Wipe |cffff4444everything|r: Storage Rules, Restock Rules, Keep List, Vendor Whitelist, and the Character Roster?\n\n|cffff4444This cannot be undone.|r"
     else
         return
     end
@@ -2582,14 +2930,50 @@ function EmpireManager:PerformWipe(target)
         if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
             EmpireManagerFrame.StoragePage:Refresh()
         end
+    elseif target == "keeplist" then
+        self.db.global.keepList = {}
+        self:ChatMsg("|cffff4444Wiped Keep List.|r", true)
+        if self.RefreshKeeplistDisplay and self.keeplistFrame and self.keeplistFrame:IsShown() then
+            self:RefreshKeeplistDisplay()
+        end
+        self._bagsDirty = true
+        if self.RefreshTriageIfOpen then
+            self:RefreshTriageIfOpen()
+        end
+    elseif target == "vendorw" then
+        self.db.global.vendorWhitelist = {}
+        self:ChatMsg("|cffff4444Wiped Vendor Whitelist.|r", true)
+        if self.RefreshVendorlistDisplay and self.vendorlistFrame and self.vendorlistFrame:IsShown() then
+            self:RefreshVendorlistDisplay()
+        end
+        self._bagsDirty = true
+        if self.RefreshTriageIfOpen then
+            self:RefreshTriageIfOpen()
+        end
+    elseif target == "restock" then
+        self.db.global.restockList = {}
+        self:ChatMsg("|cffff4444Wiped Restock Rules.|r", true)
+        self:InvalidateStorageCache()
+        self:SendMessage("EM_DASHBOARD_REFRESH")
+        self._bagsDirty = true
+        if self.RefreshTriageIfOpen then
+            self:RefreshTriageIfOpen()
+        end
     elseif target == "all" then
         self.db.global.storageAssignments = {}
         self.db.global.registry = {}
-        self:ChatMsg("|cffff4444Wiped all Storage Rules and Character Roster.|r", true)
+        self.db.global.keepList = {}
+        self.db.global.vendorWhitelist = {}
+        self.db.global.restockList = {}
+        self:ChatMsg("|cffff4444Wiped everything: Storage, Restock, Keep List, Vendor Whitelist, and Roster.|r", true)
         self:InvalidateStorageCache()
         self:SendMessage("EM_DASHBOARD_REFRESH")
         if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
             EmpireManagerFrame.StoragePage:Refresh()
+        end
+        self._bagsDirty = true
+        if self.RefreshTriageIfOpen then
+            self:RefreshTriageIfOpen()
         end
     end
 end
@@ -2672,15 +3056,9 @@ function EmpireManager:PurgeCharacter(charName)
     -- Ambiguous: bare name matched multiple realms. List them and abort so the
     -- user can re-run with Name-Realm instead of silently purging all of them.
     if #found > 1 and not needleRealm then
-        self:ChatMsg(
-            string.format("Multiple characters named '%s' - specify the realm:", charName),
-            true
-        )
+        self:ChatMsg(string.format("Multiple characters named '%s' - specify the realm:", charName), true)
         for _, match in ipairs(found) do
-            self:ChatMsg(
-                string.format("  /em purge %s-%s", match.entry.name or "?", match.entry.realm or "?"),
-                true
-            )
+            self:ChatMsg(string.format("  /em purge %s-%s", match.entry.name or "?", match.entry.realm or "?"), true)
         end
         return
     end
@@ -2842,11 +3220,21 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                 ilvl = nil
             end
             -- Cap free-text fields to prevent UI breakage from oversized imports
-            if #name > 32 then name = name:sub(1, 32) end
-            if #realm > 64 then realm = realm:sub(1, 64) end
-            if #race > 32 then race = race:sub(1, 32) end
-            if #spec > 32 then spec = spec:sub(1, 32) end
-            if #guild > 64 then guild = guild:sub(1, 64) end
+            if #name > 32 then
+                name = name:sub(1, 32)
+            end
+            if #realm > 64 then
+                realm = realm:sub(1, 64)
+            end
+            if #race > 32 then
+                race = race:sub(1, 32)
+            end
+            if #spec > 32 then
+                spec = spec:sub(1, 32)
+            end
+            if #guild > 64 then
+                guild = guild:sub(1, 64)
+            end
 
             if name ~= "" and realm ~= "" then
                 -- Parse professions: "Alchemy:150/300[Classic=75/300|Midnight=150/150],Herbalism:100/300"
@@ -2882,11 +3270,17 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                             skillStr, maxStr = "", ""
                         end
                         if profName and profName ~= "" then
-                            if #profName > 32 then profName = profName:sub(1, 32) end
+                            if #profName > 32 then
+                                profName = profName:sub(1, 32)
+                            end
                             local pSkill = tonumber(skillStr) or 0
                             local pMax = tonumber(maxStr) or 0
-                            if pSkill < 0 or pSkill > 1000 then pSkill = 0 end
-                            if pMax < 0 or pMax > 1000 then pMax = 0 end
+                            if pSkill < 0 or pSkill > 1000 then
+                                pSkill = 0
+                            end
+                            if pMax < 0 or pMax > 1000 then
+                                pMax = 0
+                            end
                             local profEntry = {
                                 name = profName,
                                 skill = pSkill,
@@ -2925,8 +3319,12 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                                             if tName ~= "" and expID then
                                                 local tSkillN = tonumber(tSkill) or 0
                                                 local tMaxN = tonumber(tMax) or 0
-                                                if tSkillN < 0 or tSkillN > 1000 then tSkillN = 0 end
-                                                if tMaxN < 0 or tMaxN > 1000 then tMaxN = 0 end
+                                                if tSkillN < 0 or tSkillN > 1000 then
+                                                    tSkillN = 0
+                                                end
+                                                if tMaxN < 0 or tMaxN > 1000 then
+                                                    tMaxN = 0
+                                                end
                                                 expSkills[#expSkills + 1] = {
                                                     expansionID = expID,
                                                     expansionName = tName,

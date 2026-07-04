@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.1] - 2026-07-04
+
+### Added
+
+- **Bank Restock (par-level stocking)** - keep a floor of specific items in the Warband Bank, a guild bank, a character's own bank, or in a character's bags. When you open a bank the addon tops up to the target automatically (silent) or with a confirm dialog. New Restock tab on the Dashboard with add / edit / delete / reorder, per-character fill display, and multi-character rules for shared floors. Guild bank floors are supported end-to-end.
+- **Consolidate bags before Triage** - partial stacks of items that have a bags floor are merged into one clean stack before Triage classifies them, so you see one row per item instead of several. Reagent-bag stacks and normal-bag stacks of the same reagent are bridged so they can join up.
+- **Import / Export for the Keep List, Vendor Whitelist, and Restock Rules** - the paste-in Import / Export window handles all three now. Export dropdown has entries for each and an "All" option that includes them.
+- **Dashboard search** also matches faction and race.
+- Illusion appearances (weapon-enchant looks) that you have already learned and are soulbound sell to the vendor as junk; unknown ones are always kept.
+
+### Changed
+
+- **Import / Export** window's "Replace existing rules" checkbox is now "Replace existing" and applies to every list type in the paste (Storage Rules, Keep List, Vendor Whitelist, Restock Rules). This is the recommended way to start clean before importing a snapshot.
+
+### Fixed
+
+- **Restock floor preserved on mail** - when a single stack straddled the floor (e.g. floor of 20 in one stack of 39), Mail All Routable no longer mails the whole stack away. Now it mails exactly the surplus and leaves the floor in your bags.
+- **Restock does not churn bags on every scan** - stack consolidation only runs on a user-initiated Triage refresh, not on the automatic background refresh that fires whenever your bags change.
+- **Storage Rule reorder** takes effect on the next Triage scan without needing an explicit rescan click.
+
 ## [1.0.1] - 2026-06-19
 
 ### Added

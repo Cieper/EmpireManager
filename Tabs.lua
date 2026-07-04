@@ -401,7 +401,7 @@ local function RemapCharLabel(entry)
     local realm = entry.realm or ""
     local text = realm == "" and name or (name .. " - " .. realm)
     if color then
-        return string.format("|cff%02x%02x%02x%s|r", color.r * 255, color.g * 255, color.b * 255, text)
+        return color:WrapTextInColorCode(text)
     end
     return text
 end
@@ -993,6 +993,379 @@ function EmpireManager:ApplyImportedRules(rules)
     return imported, skipped
 end
 
+-------------------------------------------------------------------------------
+-- Keep List / Vendor Whitelist / Restock Rules Import / Export
+--
+-- Same paste-in IE window as characters + storage rules. Sections are recognized
+-- by their header comment (e.g. "# EmpireManager Keep List v1"); unrecognized
+-- sections are silently ignored so old exports still parse.
+--
+-- Skip-reason chat lines are gated behind ChatVerbose so a normal user gets a
+-- clean status line and a verbose user gets per-item diagnostics.
+-------------------------------------------------------------------------------
+
+-- Format helpers ---------------------------------------------------------------
+
+-- "itemID;name" lines. Names are display cache only; the local copy always wins.
+function EmpireManager:ExportKeepList()
+    local list = self.db.global.keepList or {}
+    local lines = {
+        "# EmpireManager Keep List v1",
+        "# itemID;name",
+    }
+    -- Sort by itemID for stable output (diffable exports).
+    local ids = {}
+    for id in pairs(list) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        lines[#lines + 1] = string.format("%d;%s", id, tostring(list[id] or ""))
+    end
+    if #ids == 0 then
+        lines[#lines + 1] = "# (no items)"
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+function EmpireManager:ExportVendorList()
+    local list = self.db.global.vendorWhitelist or {}
+    local lines = {
+        "# EmpireManager Vendor Whitelist v1",
+        "# itemID;name",
+    }
+    local ids = {}
+    for id in pairs(list) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        lines[#lines + 1] = string.format("%d;%s", id, tostring(list[id] or ""))
+    end
+    if #ids == 0 then
+        lines[#lines + 1] = "# (no items)"
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+-- Restock: "itemID;target;dest;chars;guild;realm;name". `chars` is comma-
+-- separated Name-Realm (portable across accounts; GUIDs would break on import).
+function EmpireManager:ExportRestockList()
+    local list = self.db.global.restockList or {}
+    local lines = {
+        "# EmpireManager Restock Rules v1",
+        "# itemID;target;dest;chars;guild;realm;name",
+    }
+    if #list == 0 then
+        lines[#lines + 1] = "# (no rules configured)"
+        return table.concat(lines, "\n") .. "\n"
+    end
+
+    local guidToName = {}
+    for guid, entry in pairs(self.db.global.registry) do
+        guidToName[guid] = (entry.name or "Unknown") .. "-" .. (entry.realm or "Unknown")
+    end
+
+    for _, e in ipairs(list) do
+        if type(e) == "table" and e.itemID and e.target and e.dest then
+            local charStr = ""
+            if e.chars and #e.chars > 0 then
+                local parts = {}
+                for _, g in ipairs(e.chars) do
+                    parts[#parts + 1] = guidToName[g] or g
+                end
+                charStr = table.concat(parts, ",")
+            elseif e.char then
+                charStr = guidToName[e.char] or e.char
+            end
+            lines[#lines + 1] = string.format(
+                "%d;%d;%s;%s;%s;%s;%s",
+                e.itemID,
+                e.target,
+                tostring(e.dest),
+                charStr,
+                tostring(e.guild or ""),
+                tostring(e.realm or ""),
+                tostring(e.name or "")
+            )
+        end
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+-- Parse "itemID;name" lines from a Keep/Vendor list section. Returns
+-- { {itemID=..., name=...}, ... }, skippedCount. Invalid itemIDs are dropped
+-- with a verbose chat warning per line.
+local function ParseItemNameSection(self, text)
+    local out, skipped = {}, 0
+    for line in text:gmatch("[^\r\n]+") do
+        line = line:match("^%s*(.-)%s*$")
+        if line ~= "" and line:sub(1, 1) ~= "#" then
+            local idStr, name = line:match("^([^;]+);(.*)$")
+            local id = tonumber(idStr)
+            if id and id > 0 then
+                if #name > 128 then
+                    name = name:sub(1, 128)
+                end
+                out[#out + 1] = { itemID = id, name = name or "" }
+            else
+                skipped = skipped + 1
+                self:ChatVerbose("|cff88ccff[Import]|r Skipped malformed line: " .. line)
+            end
+        end
+    end
+    return out, skipped
+end
+
+function EmpireManager:ImportKeepList(text)
+    return ParseItemNameSection(self, text or "")
+end
+
+function EmpireManager:ImportVendorList(text)
+    return ParseItemNameSection(self, text or "")
+end
+
+-- Apply Keep entries. Conflict rule (per TRIAGE.md "Keep wins by design"):
+-- an incoming Keep item that's on the local Vendor Whitelist MOVES to Keep
+-- (Vendor entry dropped). Existing Keep entries are left untouched.
+-- Returns imported, skipped, moved.
+function EmpireManager:ApplyImportedKeepList(entries)
+    if not self.db.global.keepList then
+        self.db.global.keepList = {}
+    end
+    if not self.db.global.vendorWhitelist then
+        self.db.global.vendorWhitelist = {}
+    end
+    local keep, vendor = self.db.global.keepList, self.db.global.vendorWhitelist
+    local imported, skipped, moved = 0, 0, 0
+    for _, e in ipairs(entries or {}) do
+        local id, name = e.itemID, e.name ~= "" and e.name or nil
+        if keep[id] then
+            skipped = skipped + 1
+            self:ChatVerbose(string.format(
+                "|cff88ccff[Import]|r Keep List: itemID %d already present, skipped.",
+                id
+            ))
+        else
+            keep[id] = name or ("Item " .. id)
+            imported = imported + 1
+            if vendor[id] then
+                vendor[id] = nil
+                moved = moved + 1
+                self:ChatVerbose(string.format(
+                    "|cff88ccff[Import]|r itemID %d moved from Vendor Whitelist to Keep List.",
+                    id
+                ))
+            end
+        end
+    end
+    return imported, skipped, moved
+end
+
+-- Apply Vendor entries. Conflict rule: Keep wins - vendor entries whose itemID
+-- is already on the Keep List are silently skipped.
+-- Returns imported, skipped.
+function EmpireManager:ApplyImportedVendorList(entries)
+    if not self.db.global.vendorWhitelist then
+        self.db.global.vendorWhitelist = {}
+    end
+    local vendor = self.db.global.vendorWhitelist
+    local keep = self.db.global.keepList or {}
+    local imported, skipped = 0, 0
+    for _, e in ipairs(entries or {}) do
+        local id, name = e.itemID, e.name ~= "" and e.name or nil
+        if keep[id] then
+            skipped = skipped + 1
+            self:ChatVerbose(string.format(
+                "|cff88ccff[Import]|r Vendor Whitelist: itemID %d is on Keep List (Keep wins), skipped.",
+                id
+            ))
+        elseif vendor[id] then
+            skipped = skipped + 1
+            self:ChatVerbose(string.format(
+                "|cff88ccff[Import]|r Vendor Whitelist: itemID %d already present, skipped.",
+                id
+            ))
+        else
+            vendor[id] = name or ("Item " .. id)
+            imported = imported + 1
+        end
+    end
+    return imported, skipped
+end
+
+-- Parse a Restock Rules section. Returns readyRules, unresolvedRules, skipped.
+-- Char/bags rules whose Name-Realm can't be resolved to a local GUID land in
+-- unresolvedRules for the remap dialog. Warband + guild rules never unresolve.
+function EmpireManager:ImportRestockList(text)
+    if not text or text:match("^%s*$") then
+        return {}, {}, 0
+    end
+
+    local nameToGUID = {}
+    for guid, entry in pairs(self.db.global.registry) do
+        local key = ((entry.name or "Unknown") .. "-" .. (entry.realm or "Unknown"))
+        nameToGUID[key] = guid
+        nameToGUID[key:lower()] = guid
+    end
+
+    local ready, unresolved = {}, {}
+    local skipped = 0
+
+    for line in text:gmatch("[^\r\n]+") do
+        line = line:match("^%s*(.-)%s*$")
+        if line ~= "" and line:sub(1, 1) ~= "#" then
+            local parts = {}
+            for f in (line .. ";"):gmatch("([^;]*);") do
+                parts[#parts + 1] = f:match("^%s*(.-)%s*$")
+            end
+
+            local itemID = tonumber(parts[1])
+            local target = tonumber(parts[2])
+            local dest = parts[3] or ""
+            local charStr = parts[4] or ""
+            local guildStr = parts[5] or ""
+            local realmStr = parts[6] or ""
+            local name = parts[7] or ""
+
+            -- Cap free-text fields so a malformed export can't wreck chat/UI.
+            if #guildStr > 64 then guildStr = guildStr:sub(1, 64) end
+            if #realmStr > 64 then realmStr = realmStr:sub(1, 64) end
+            if #charStr > 512 then charStr = charStr:sub(1, 512) end
+            if #name > 128 then name = name:sub(1, 128) end
+
+            if not itemID or itemID <= 0 or not target or target <= 0 then
+                skipped = skipped + 1
+                self:ChatVerbose("|cff88ccff[Import]|r Restock: malformed line: " .. line)
+            elseif
+                dest ~= "warbandbank"
+                and dest ~= "guildbank"
+                and dest ~= "charbank"
+                and dest ~= "bags"
+            then
+                skipped = skipped + 1
+                self:ChatVerbose(string.format(
+                    "|cff88ccff[Import]|r Restock: unknown dest '%s' for itemID %d, skipped.",
+                    dest, itemID
+                ))
+            else
+                local rule = {
+                    itemID = itemID,
+                    target = target,
+                    dest = dest,
+                    name = name ~= "" and name or ("Item " .. itemID),
+                    _origChar = charStr,
+                    _origGuild = guildStr,
+                }
+
+                if dest == "warbandbank" then
+                    ready[#ready + 1] = rule
+                elseif dest == "guildbank" then
+                    if guildStr ~= "" then
+                        rule.guild = guildStr
+                        rule.realm = realmStr ~= "" and realmStr or nil
+                        ready[#ready + 1] = rule
+                    else
+                        skipped = skipped + 1
+                        self:ChatVerbose(string.format(
+                            "|cff88ccff[Import]|r Restock: guildbank rule for itemID %d has no guild, skipped.",
+                            itemID
+                        ))
+                    end
+                else
+                    -- charbank / bags: resolve Name-Realm list to local GUIDs.
+                    -- If NONE resolve, mark unresolved (remap dialog will handle
+                    -- via _origChar). If SOME resolve, keep resolved subset and
+                    -- verbose-log the dropped ones.
+                    if charStr == "" then
+                        unresolved[#unresolved + 1] = rule
+                    else
+                        local resolvedGuids = {}
+                        local dropped = {}
+                        for nm in charStr:gmatch("[^,]+") do
+                            local trimmed = nm:match("^%s*(.-)%s*$")
+                            local g = nameToGUID[trimmed] or nameToGUID[trimmed:lower()]
+                            if g then
+                                resolvedGuids[#resolvedGuids + 1] = g
+                            else
+                                dropped[#dropped + 1] = trimmed
+                            end
+                        end
+                        if #resolvedGuids == 0 then
+                            unresolved[#unresolved + 1] = rule
+                        else
+                            rule.chars = resolvedGuids
+                            ready[#ready + 1] = rule
+                            if #dropped > 0 then
+                                self:ChatVerbose(string.format(
+                                    "|cff88ccff[Import]|r Restock itemID %d: dropped %d unknown char%s (%s).",
+                                    itemID, #dropped, #dropped == 1 and "" or "s",
+                                    table.concat(dropped, ", ")
+                                ))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return ready, unresolved, skipped
+end
+
+-- Restock dedup key = itemID + dest + sorted-chars + guild + realm. Same shape
+-- as the storage-rule dedup (order-insensitive char set).
+local function restockDupKey(rule)
+    local chars = rule.chars or (rule.char and { rule.char } or {})
+    local sorted = {}
+    for _, c in ipairs(chars) do
+        sorted[#sorted + 1] = tostring(c)
+    end
+    table.sort(sorted)
+    return string.format(
+        "%d|%s|%s|%s|%s",
+        rule.itemID or 0,
+        rule.dest or "",
+        table.concat(sorted, ","),
+        rule.guild or "",
+        rule.realm or ""
+    )
+end
+
+-- Append imported restock rules. Duplicates (same key) skip. Returns imported, skipped.
+function EmpireManager:ApplyImportedRestockRules(rules)
+    if not self.db.global.restockList then
+        self.db.global.restockList = {}
+    end
+    local list = self.db.global.restockList
+    local existingKeys = {}
+    for _, r in ipairs(list) do
+        existingKeys[restockDupKey(r)] = true
+    end
+
+    local imported, skipped = 0, 0
+    for _, rule in ipairs(rules or {}) do
+        rule._origChar = nil
+        rule._origGuild = nil
+        local key = restockDupKey(rule)
+        if existingKeys[key] then
+            skipped = skipped + 1
+            self:ChatVerbose(string.format(
+                "|cff88ccff[Import]|r Restock: itemID %d (%s) duplicate, skipped.",
+                rule.itemID or 0, rule.dest or "?"
+            ))
+        else
+            list[#list + 1] = rule
+            existingKeys[key] = true
+            imported = imported + 1
+        end
+    end
+    if imported > 0 then
+        self:InvalidateStorageCache()
+    end
+    return imported, skipped
+end
+
 function EmpireManager:ParseImportSections(text)
     local sections = {}
     local currentType = nil
@@ -1011,6 +1384,24 @@ function EmpireManager:ParseImportSections(text)
                 sections[#sections + 1] = { type = currentType, text = table.concat(currentLines, "\n") }
             end
             currentType = "storage"
+            currentLines = { trimmed }
+        elseif trimmed:find("^# EmpireManager Keep List v") then
+            if currentType then
+                sections[#sections + 1] = { type = currentType, text = table.concat(currentLines, "\n") }
+            end
+            currentType = "keeplist"
+            currentLines = { trimmed }
+        elseif trimmed:find("^# EmpireManager Vendor Whitelist v") then
+            if currentType then
+                sections[#sections + 1] = { type = currentType, text = table.concat(currentLines, "\n") }
+            end
+            currentType = "vendorlist"
+            currentLines = { trimmed }
+        elseif trimmed:find("^# EmpireManager Restock Rules v") then
+            if currentType then
+                sections[#sections + 1] = { type = currentType, text = table.concat(currentLines, "\n") }
+            end
+            currentType = "restock"
             currentLines = { trimmed }
         elseif currentType then
             currentLines[#currentLines + 1] = trimmed
@@ -2770,7 +3161,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         end
         local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[charEntry.class]
         if color then
-            return string.format("%s|cff%02x%02x%02x - %s|r", base, color.r * 255, color.g * 255, color.b * 255, realm)
+            return base .. color:WrapTextInColorCode(" - " .. realm)
         end
         return base .. " - " .. realm
     end
@@ -4472,6 +4863,1652 @@ function EMStoragePageMixin:BuildUnconfiguredText(assignments)
 end
 
 -------------------------------------------------------------------------------
+-- Bank Restock (par-level stocking) - Stage A: data + UI only.
+-- Mirrors the Storage page (list, reorder, fill display) and adds an AH-browse
+-- style Add/Edit item picker. No deposit engine here (see docs/RESTOCK.md Stage B).
+-------------------------------------------------------------------------------
+
+-- EMRestockRowMixin / EMRestockItemRowMixin / EMRestockPageMixin are forward-declared
+-- in Dashboard.lua (loaded first) so the dashboard's nativePages table can reference
+-- them before this file populates their methods. Do not reassign them to {} here.
+
+-- Columns mirror STORAGE_COLUMNS but add Quality + Profession. The Destination
+-- column fills remaining width (fill = true), like Storage.
+local RESTOCK_COLUMNS = {
+    { key = "reorder", width = 60, label = "" },
+    { key = "item", width = 200, label = "Item" },
+    { key = "prof", width = 90, label = "Professions" },
+    { key = "target", width = 56, label = "Target" },
+    { key = "fill", width = 104, label = "Fill Level" },
+    { key = "dest", width = 0, label = "Destination", fill = true },
+}
+local RESTOCK_ROW_HEIGHT = 24
+-- Picker row height (Add/Edit dialog item list)
+local RESTOCK_ITEM_ROW_HEIGHT = 22
+-- Cap of profession icons shown inline before the "+N" overflow indicator.
+local RESTOCK_MAX_PROF_ICONS = 4
+
+-------------------------------------------------------------------------------
+-- Restock helpers (file-local)
+-------------------------------------------------------------------------------
+
+-- Resolve an item's name/icon from cache; returns name, icon (both nil if uncached).
+local function RestockItemInfo(itemID)
+    local name, _, _, _, _, _, _, _, _, icon = C_Item.GetItemInfo(itemID)
+    return name, icon
+end
+
+-- Quality info for an itemID: returns the Blizzard CraftingQualityInfo struct (or
+-- nil for non-quality items). We ask the game for the struct rather than mapping a
+-- tier number to an atlas name ourselves, because the atlas-per-quality mapping is
+-- expansion-specific: Midnight reagents have only 2 qualities (silver/gold), so a
+-- quality of 1 must render the SILVER chevron, not the old 3-tier copper Tier1 art.
+-- This mirrors Blizzard's ItemButtonTemplate (SetItemCraftingQualityOverlay).
+local function RestockQualityInfo(itemID, itemLink)
+    if not C_TradeSkillUI then
+        return nil
+    end
+    local info
+    if C_TradeSkillUI.GetItemReagentQualityInfo then
+        info = C_TradeSkillUI.GetItemReagentQualityInfo(itemID)
+    end
+    if not info and itemLink and C_TradeSkillUI.GetItemCraftedQualityInfo then
+        info = C_TradeSkillUI.GetItemCraftedQualityInfo(itemLink)
+    end
+    return info
+end
+
+-- Tier number (1/2/.. as the game reports it) for tooltips/debug, or nil.
+local function RestockItemTier(itemID, itemLink)
+    local info = RestockQualityInfo(itemID, itemLink)
+    return info and info.quality
+end
+
+-- The small quality chevron atlas for an item, straight from the game's quality
+-- struct (.iconSmall). Correct across expansions including Midnight's 2-tier scale.
+local function RestockTierAtlas(itemID, itemLink)
+    local info = RestockQualityInfo(itemID, itemLink)
+    return info and info.iconSmall
+end
+
+-- All professions whose curated set or subclass match contains the itemID, as an
+-- ordered list of PROF_DISPLAY entries (stable display order). Uses the same match
+-- set triage routing uses so the column stays consistent (RESTOCK.md section 8).
+local function RestockProfList(itemID)
+    local set = EmpireManager:GetItemProfMatchSet(itemID)
+    if not set then
+        return {}
+    end
+    local out = {}
+    for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
+        if set[info.key] then
+            out[#out + 1] = info
+        end
+    end
+    return out
+end
+
+-- The "category" of a restock entry for same-profession shift-jump reordering:
+-- the first matching profession key (best effort - entries store itemID, not a
+-- profKey, so this is derived).
+local function RestockEntryCategory(entry)
+    if not entry or not entry.itemID then
+        return ""
+    end
+    local list = RestockProfList(entry.itemID)
+    return (list[1] and list[1].key) or ""
+end
+
+-- Destination text for a restock entry. Warband is marked account-shared; guild
+-- shows its name; char shows the owner (class-colored).
+-- Resolve a charbank/bags entry's target characters as an array of GUIDs.
+-- New entries store `entry.chars` (multi-select); older entries store a single
+-- `entry.char`. Returns a (possibly empty) array.
+local function RestockEntryChars(entry)
+    if entry.chars and #entry.chars > 0 then
+        return entry.chars
+    end
+    if entry.char then
+        return { entry.char }
+    end
+    return {}
+end
+
+local function RestockDestText(entry)
+    if entry.dest == "warbandbank" then
+        return "|cff66b3ffWarband|r Bank"
+    elseif entry.dest == "guildbank" then
+        local prefix = entry.guild and ("|cff40ff40" .. entry.guild .. "|r ") or ""
+        return prefix .. "|cff40ff40Guild|r Bank"
+    elseif entry.dest == "charbank" or entry.dest == "bags" then
+        local suffix = (entry.dest == "bags") and " Bags" or " Bank"
+        local chars = RestockEntryChars(entry)
+        if #chars == 0 then
+            return "?" .. suffix
+        end
+        if #chars == 1 then
+            local guid = chars[1]
+            if guid == "self" and entry.dest == "charbank" then
+                return "Character Bank"
+            end
+            local e = EmpireManager.db.global.registry[guid]
+            local charName = e and EmpireManager:ClassColoredName(e) or "?"
+            return charName .. suffix
+        end
+        -- Multiple characters: list as many names as fit a plain-text budget,
+        -- then "+N" for the overflow. The Destination column is the fill column,
+        -- so this stays on one line at the row's available width.
+        local CHAR_BUDGET = 32 -- approx plain-text chars before the suffix
+        local parts, plainLen, shown = {}, 0, 0
+        for i, guid in ipairs(chars) do
+            local e = EmpireManager.db.global.registry[guid]
+            local nm = e and e.name or "?"
+            local addLen = (#parts > 0 and 2 or 0) + #nm -- ", " separator
+            if shown > 0 and plainLen + addLen > CHAR_BUDGET then
+                break
+            end
+            parts[#parts + 1] = (e and EmpireManager:ClassColoredName(e)) or "?"
+            plainLen = plainLen + addLen
+            shown = i
+        end
+        local text = table.concat(parts, ", ")
+        if shown < #chars then
+            text = text .. string.format(" |cffffd200+%d|r", #chars - shown)
+        end
+        return text .. suffix
+    end
+    return entry.dest or "?"
+end
+
+-- Per-character snapshot counts for a charbank/bags entry. Returns an ordered
+-- array { {guid, name, count, hasData}, ... } - count is 0 when the char has been
+-- snapshotted but holds none; hasData is false when that char was never snapshotted.
+local function RestockPerCharCounts(entry)
+    local counts = EmpireManager.db.global.restockCounts or {}
+    local prefix = (entry.dest == "bags") and "bags:" or "charbank:"
+    local out = {}
+    for _, guid in ipairs(RestockEntryChars(entry)) do
+        local byDest = counts[prefix .. guid]
+        local reg = EmpireManager.db.global.registry[guid]
+        out[#out + 1] = {
+            guid = guid,
+            name = reg and EmpireManager:ClassColoredName(reg) or "?",
+            count = byDest and (byDest[entry.itemID] or 0) or 0,
+            hasData = byDest ~= nil,
+        }
+    end
+    return out
+end
+
+-- Fill state of an entry, read from the per-item snapshot (db.global.restockCounts).
+-- Returns: current, effectiveTarget (or nil when no data at all).
+--   * warband / guild: a single shared destination - current vs entry.target.
+--   * charbank / bags: target is PER CHARACTER. current = sum across all target
+--     chars; effectiveTarget = entry.target * N (so 54/70 = 54 held across 7 chars
+--     with a floor of 10 each). Color follows the sum ratio.
+-- "0" (snapshotted, item absent) is distinct from nil (never snapshotted -> "No data").
+local function RestockFillState(entry)
+    local counts = EmpireManager.db.global.restockCounts
+    if not counts then
+        return nil
+    end
+    local target = entry.target or 0
+    if entry.dest == "guildbank" and entry.guild then
+        local byDest = counts["guildbank:" .. EmpireManager:GuildKey(entry.guild, entry.realm)]
+        if not byDest then
+            return nil
+        end
+        return byDest[entry.itemID] or 0, target
+    elseif entry.dest == "charbank" or entry.dest == "bags" then
+        local per = RestockPerCharCounts(entry)
+        local n = #per
+        if n == 0 then
+            return nil
+        end
+        local total, any = 0, false
+        for _, c in ipairs(per) do
+            if c.hasData then
+                any = true
+            end
+            total = total + c.count
+        end
+        if not any then
+            return nil
+        end
+        return total, target * n
+    end
+    local byDest = counts[entry.dest]
+    if not byDest then
+        return nil
+    end
+    return byDest[entry.itemID] or 0, target
+end
+
+-------------------------------------------------------------------------------
+-- EMRestockRowMixin (virtualized list row; mirrors EMStorageRowMixin)
+-------------------------------------------------------------------------------
+
+function EMRestockRowMixin:OnLoad()
+    local UP_PATH = "Interface\\AddOns\\EmpireManager\\Textures\\up"
+    local DOWN_PATH = "Interface\\AddOns\\EmpireManager\\Textures\\down"
+
+    -- Shared reorder handler factory (dir = -1 up, +1 down)
+    local function MakeReorder(dir)
+        return function()
+            local d = self._data
+            if not d then
+                return
+            end
+            local a = EmpireManager.db.global.restockList
+            local idx = d.idx
+            -- Target index in the FINAL list (after the move). nil = no-op.
+            local target
+            if IsShiftKeyDown() then
+                -- Jump to just past the next rule of the same category in `dir`.
+                local cat = RestockEntryCategory(d.entry)
+                if dir < 0 then
+                    for i = idx - 1, 1, -1 do
+                        if RestockEntryCategory(a[i]) == cat then
+                            target = i
+                            break
+                        end
+                    end
+                else
+                    for i = idx + 1, #a do
+                        if RestockEntryCategory(a[i]) == cat then
+                            target = i
+                            break
+                        end
+                    end
+                end
+            elseif IsControlKeyDown() then
+                target = idx + dir * 5
+            else
+                target = idx + dir
+            end
+            -- Clamp to a valid slot and ignore no-ops / out-of-range edge clicks
+            -- (e.g. Up on the first row, Down on the last).
+            if target then
+                target = math.max(1, math.min(#a, target))
+            end
+            if not target or target == idx then
+                return
+            end
+            -- remove-then-insert keeps the list contiguous regardless of distance.
+            local rule = table.remove(a, idx)
+            table.insert(a, target, rule)
+            EmpireManager._restockScrollToIdx = target
+            EmpireManager:InvalidateStorageCache() -- priority changed: recalc triage
+            EmpireManager:RefreshTriageIfOpen()
+            EmpireManager:SelectDashboardTab("restock")
+        end
+    end
+
+    -- Up button
+    self.UpBtn = CreateFrame("Button", nil, self)
+    self.UpBtn:SetSize(16, 16)
+    self.UpBtn:SetPoint("LEFT", self, "LEFT", 12, 0)
+    self.UpBtn:SetNormalTexture(UP_PATH)
+    self.UpBtn:GetNormalTexture():SetVertexColor(1, 0.82, 0)
+    self.UpBtn:SetPushedTexture(UP_PATH)
+    self.UpBtn:GetPushedTexture():SetVertexColor(0.8, 0.65, 0)
+    self.UpBtn:SetDisabledTexture(UP_PATH)
+    self.UpBtn:GetDisabledTexture():SetDesaturated(true)
+    self.UpBtn:GetDisabledTexture():SetVertexColor(0.4, 0.4, 0.4)
+    self.UpBtn:SetHighlightTexture(UP_PATH, "ADD")
+    self.UpBtn:GetHighlightTexture():SetVertexColor(1, 1, 0.6)
+    self.UpBtn:GetHighlightTexture():SetAlpha(0.5)
+    self.UpBtn:SetScript("OnClick", MakeReorder(-1))
+
+    -- Down button
+    self.DownBtn = CreateFrame("Button", nil, self)
+    self.DownBtn:SetSize(16, 16)
+    self.DownBtn:SetPoint("LEFT", self.UpBtn, "RIGHT", 6, 0)
+    self.DownBtn:SetNormalTexture(DOWN_PATH)
+    self.DownBtn:GetNormalTexture():SetVertexColor(1, 0.82, 0)
+    self.DownBtn:SetPushedTexture(DOWN_PATH)
+    self.DownBtn:GetPushedTexture():SetVertexColor(0.8, 0.65, 0)
+    self.DownBtn:SetDisabledTexture(DOWN_PATH)
+    self.DownBtn:GetDisabledTexture():SetDesaturated(true)
+    self.DownBtn:GetDisabledTexture():SetVertexColor(0.4, 0.4, 0.4)
+    self.DownBtn:SetHighlightTexture(DOWN_PATH, "ADD")
+    self.DownBtn:GetHighlightTexture():SetVertexColor(1, 1, 0.6)
+    self.DownBtn:GetHighlightTexture():SetAlpha(0.5)
+    self.DownBtn:SetScript("OnClick", MakeReorder(1))
+
+    -- Cells are anchored to the RESTOCK_COLUMNS header edges (cumulative widths:
+    -- reorder 0-60, item 60-260, prof 260-350, target 350-406, fill 406-510,
+    -- dest 510+) so the data lines up with the header row. Do not retune these
+    -- piecemeal; they are derived from the column widths.
+
+    -- Item icon + name (item column: left edge 60)
+    self.ItemIcon = self:CreateTexture(nil, "ARTWORK")
+    self.ItemIcon:SetSize(18, 18)
+    self.ItemIcon:SetPoint("LEFT", self, "LEFT", 66, 0)
+    self.ItemIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+    -- Crafting-quality tier chevron overlaid on the icon corner (Blizzard pattern:
+    -- ProfessionQualityOverlay, TOPLEFT -3,2, native atlas size).
+    self.TierOverlay = self:CreateTexture(nil, "OVERLAY", nil, 7)
+    self.TierOverlay:SetPoint("CENTER", self.ItemIcon, "TOPLEFT", 2, -2)
+    self.TierOverlay:Hide()
+
+    self.NameFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.NameFs:SetPoint("LEFT", self.ItemIcon, "RIGHT", 4, 0)
+    self.NameFs:SetWidth(168) -- ends before the prof column (260)
+    self.NameFs:SetJustifyH("LEFT")
+    self.NameFs:SetWordWrap(false)
+
+    -- Same insets Storage uses: left text at col_left+8 width col_width-4; right
+    -- text at col_left-8 width col_width-4 (right edge = col_right-12); bar col_left+2.
+
+    -- Profession icons (prof column 260-350, left)
+    self.ProfFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.ProfFs:SetPoint("LEFT", self, "LEFT", 268, 0)
+    self.ProfFs:SetWidth(86)
+    self.ProfFs:SetJustifyH("LEFT")
+    self.ProfFs:SetWordWrap(false)
+
+    -- Target count (target column 350-406, right-justified - Storage fill recipe)
+    self.TargetFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.TargetFs:SetPoint("LEFT", self, "LEFT", 342, 0)
+    self.TargetFs:SetWidth(52)
+    self.TargetFs:SetJustifyH("RIGHT")
+    self.TargetFs:SetWordWrap(false)
+
+    -- Fill bar (col_left+2) + fill text (right-justified, Storage recipe) - fill
+    -- column 406-510.
+    self.FillBar = self:CreateTexture(nil, "ARTWORK")
+    self.FillBar:SetPoint("TOPLEFT", self, "TOPLEFT", 408, -2)
+    self.FillBar:SetPoint("BOTTOMLEFT", self, "BOTTOMLEFT", 408, 2)
+    self.FillBar:SetColorTexture(1, 1, 1, 1)
+    self.FillBar:Hide()
+
+    self.FillFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.FillFs:SetPoint("LEFT", self, "LEFT", 398, 0)
+    self.FillFs:SetWidth(100)
+    self.FillFs:SetJustifyH("RIGHT")
+    self.FillFs:SetWordWrap(false)
+
+    -- Destination (dest column left edge 510, fills remaining width; text inset +8)
+    self.DestFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.DestFs:SetPoint("LEFT", self, "LEFT", 518, 0)
+    self.DestFs:SetJustifyH("LEFT")
+    self.DestFs:SetWordWrap(false)
+
+    -- Click handlers (right/double-click -> edit, like Storage rows)
+    self:SetScript("OnClick", function(f, button)
+        if button == "RightButton" and f._data then
+            EmpireManager:OpenRestockDialog(f._data.idx)
+        end
+    end)
+    self:SetScript("OnDoubleClick", function(f)
+        if f._data then
+            EmpireManager:OpenRestockDialog(f._data.idx)
+        end
+    end)
+
+    local function showRowTooltip(f)
+        local d = f._data
+        if not d then
+            return
+        end
+        local entry = d.entry
+        GameTooltip:SetOwner(f, "ANCHOR_CURSOR_RIGHT")
+        local nm = d.resolvedName or entry.name or ("Item " .. tostring(entry.itemID))
+        GameTooltip:AddLine(string.format("Restock #%d  %s", d.idx, nm), 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        local ttTier = RestockItemTier(entry.itemID, select(2, C_Item.GetItemInfo(entry.itemID)))
+        if ttTier then
+            GameTooltip:AddLine("Quality: Tier " .. tostring(ttTier), 1, 1, 1)
+        end
+        GameTooltip:AddLine("Target: " .. tostring(entry.target or 0), 1, 1, 1)
+        if entry.dest == "charbank" or entry.dest == "bags" then
+            -- List every target character (the column / RestockDestText caps with +N).
+            local suffix = (entry.dest == "bags") and "Bags" or "Bank"
+            local chars = RestockEntryChars(entry)
+            if #chars <= 1 then
+                GameTooltip:AddLine("Keep in: " .. RestockDestText(entry):gsub("|cff%x%x%x%x%x%x", ""):gsub("|r", ""), 1, 1, 1)
+            else
+                -- Per-character fill: "8/10  Name" (count colored by met/short/no-data).
+                local target = entry.target or 0
+                GameTooltip:AddLine(string.format("Keep in: %s (%d characters, %d each)", suffix, #chars, target), 1, 1, 1)
+                for _, c in ipairs(RestockPerCharCounts(entry)) do
+                    -- "8/10  Name": fill colored by met (green) / short (red) /
+                    -- no-data (grey), then the class-colored name inline after it.
+                    local hex, fill
+                    if not c.hasData then
+                        hex, fill = "ff808080", "?/" .. target
+                    elseif c.count >= target then
+                        hex, fill = "ff00cc00", c.count .. "/" .. target
+                    else
+                        hex, fill = "ffff3333", c.count .. "/" .. target
+                    end
+                    GameTooltip:AddLine(string.format("   |c%s%s|r  %s", hex, fill, c.name), 1, 1, 1)
+                end
+            end
+        else
+            GameTooltip:AddLine("Keep in: " .. RestockDestText(entry):gsub("|cff%x%x%x%x%x%x", ""):gsub("|r", ""), 1, 1, 1)
+        end
+        -- Full profession list (the column caps with +N)
+        local profs = RestockProfList(entry.itemID)
+        if #profs > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Used by:", 1, 0.82, 0)
+            for _, info in ipairs(profs) do
+                GameTooltip:AddLine(
+                    string.format("|T%s:14:14|t %s", info.icon, info.label),
+                    info.r,
+                    info.g,
+                    info.b
+                )
+            end
+        end
+        GameTooltip:Show()
+    end
+
+    local function inReorderCol(f)
+        local cursorX = GetCursorPosition()
+        local scale = f:GetEffectiveScale()
+        local relX = (cursorX / scale) - f:GetLeft()
+        return relX < 60
+    end
+
+    self:SetScript("OnEnter", function(f)
+        if not f._data then
+            return
+        end
+        f._tooltipShown = not inReorderCol(f)
+        if f._tooltipShown then
+            showRowTooltip(f)
+        end
+        f._tooltipTimer = 0
+        f:SetScript("OnUpdate", function(fr, elapsed)
+            fr._tooltipTimer = (fr._tooltipTimer or 0) + elapsed
+            if fr._tooltipTimer < 0.1 then
+                return
+            end
+            fr._tooltipTimer = 0
+            if not fr._data then
+                return
+            end
+            local inCol = inReorderCol(fr)
+            if inCol and fr._tooltipShown then
+                GameTooltip:Hide()
+                fr._tooltipShown = false
+            elseif not inCol and not fr._tooltipShown then
+                showRowTooltip(fr)
+                fr._tooltipShown = true
+            end
+        end)
+    end)
+    self:SetScript("OnLeave", function(f)
+        f:SetScript("OnUpdate", nil)
+        f._tooltipShown = false
+        GameTooltip:Hide()
+    end)
+end
+
+function EMRestockRowMixin:Populate(data)
+    self._data = data
+    local idx = data.idx
+    local entry = data.entry
+
+    -- Zebra stripe
+    if idx % 2 == 0 then
+        self.Stripe:SetAtlas("auctionhouse-rowstripe-1")
+    else
+        self.Stripe:SetAtlas("auctionhouse-rowstripe-2")
+    end
+
+    -- Up/down enable state
+    self.UpBtn:SetEnabled(idx > 1)
+    self.DownBtn:SetEnabled(idx < data.totalCount)
+
+    -- Item name/icon (load-on-demand; placeholder + request if uncached)
+    local name, icon = RestockItemInfo(entry.itemID)
+    if name then
+        data.resolvedName = name
+        local q = select(3, C_Item.GetItemInfo(entry.itemID))
+        local color = (q and ITEM_QUALITY_COLORS[q]) or HIGHLIGHT_FONT_COLOR
+        self.NameFs:SetText(name)
+        self.NameFs:SetTextColor(color.r, color.g, color.b)
+        self.ItemIcon:SetTexture(icon)
+        self.ItemIcon:Show()
+    else
+        self.NameFs:SetText(entry.name or "Loading...")
+        self.NameFs:SetTextColor(1, 1, 1)
+        self.ItemIcon:SetTexture(134400) -- "?" placeholder
+        self.ItemIcon:Show()
+        C_Item.RequestLoadItemDataByID(entry.itemID)
+        EmpireManager:RestockWatchItem(entry.itemID)
+    end
+
+    -- Tier chevron overlaid on the item icon corner (not a separate column).
+    local rowAtlas = RestockTierAtlas(entry.itemID, select(2, C_Item.GetItemInfo(entry.itemID)))
+    if rowAtlas then
+        self.TierOverlay:SetAtlas(rowAtlas, false)
+        self.TierOverlay:SetSize(16, 16)
+        self.TierOverlay:Show()
+    else
+        self.TierOverlay:Hide()
+    end
+
+    -- Profession icons (capped with +N overflow; full list in row tooltip)
+    local profs = RestockProfList(entry.itemID)
+    local parts = {}
+    local shown = math.min(#profs, RESTOCK_MAX_PROF_ICONS)
+    for i = 1, shown do
+        parts[#parts + 1] = string.format("|T%s:18:18|t", profs[i].icon)
+    end
+    local text = table.concat(parts, " ")
+    if #profs > shown then
+        text = text .. string.format(" |cffffd200+%d|r", #profs - shown)
+    end
+    self.ProfFs:SetText(text)
+
+    -- Target count (always visible, independent of whether a current-count exists)
+    local target = entry.target or 0
+    self.TargetFs:SetText(BreakUpLargeNumbers(target))
+    self.TargetFs:SetTextColor(1, 1, 1)
+
+    -- Fill level (INVERTED colors vs storage: green = at/above target = good).
+    -- For multi-character charbank/bags rules the target is per-character, so the
+    -- effective target is target x (number of chars) and current sums all of them
+    -- (e.g. 54/70 = 54 across 7 chars, floor 10 each). Color follows the sum ratio.
+    local current, effTarget = RestockFillState(entry)
+    if current and effTarget and effTarget > 0 then
+        local pct = math.floor((current / effTarget) * 100)
+        self.FillFs:SetText(string.format("%d/%d", current, effTarget))
+        local r, g, b
+        if pct >= 100 then
+            r, g, b = 0.0, 0.8, 0.0
+        elseif pct >= 50 then
+            r, g, b = 1.0, 0.8, 0.0
+        else
+            r, g, b = 1.0, 0.2, 0.2
+        end
+        self.FillFs:SetTextColor(r, g, b)
+        local frac = math.min(1, current / effTarget)
+        local barWidth = math.max(1, math.floor(100 * frac + 0.5))
+        self.FillBar:SetWidth(barWidth)
+        self.FillBar:SetVertexColor(r, g, b, 0.18)
+        self.FillBar:Show()
+    else
+        self.FillFs:SetText("No data")
+        self.FillFs:SetTextColor(0.5, 0.5, 0.5)
+        self.FillBar:Hide()
+    end
+
+    -- Destination
+    self.DestFs:SetText(RestockDestText(entry))
+    self.DestFs:SetTextColor(1, 1, 1)
+end
+
+-------------------------------------------------------------------------------
+-- EMRestockItemRowMixin (Add/Edit dialog item-picker row)
+-------------------------------------------------------------------------------
+
+function EMRestockItemRowMixin:OnLoad()
+    self.Icon = self:CreateTexture(nil, "ARTWORK")
+    self.Icon:SetSize(18, 18)
+    self.Icon:SetPoint("LEFT", self, "LEFT", 4, 0)
+    self.Icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+
+    -- Tier chevron overlaid on the icon corner (Blizzard ProfessionQualityOverlay).
+    self.TierOverlay = self:CreateTexture(nil, "OVERLAY", nil, 7)
+    self.TierOverlay:SetPoint("CENTER", self.Icon, "TOPLEFT", 2, -2)
+    self.TierOverlay:Hide()
+
+    -- Profession icons for the item (right side), shown regardless of the active
+    -- profession filter so the player can see what each item is used by.
+    self.ProfFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.ProfFs:SetPoint("RIGHT", self, "RIGHT", -6, 0)
+    self.ProfFs:SetJustifyH("RIGHT")
+    self.ProfFs:SetWordWrap(false)
+
+    self.NameFs = self:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    self.NameFs:SetPoint("LEFT", self.Icon, "RIGHT", 4, 0)
+    self.NameFs:SetPoint("RIGHT", self.ProfFs, "LEFT", -6, 0)
+    self.NameFs:SetJustifyH("LEFT")
+    self.NameFs:SetWordWrap(false)
+
+    -- Selected highlight (kept under HIGHLIGHT; tinted gold when selected)
+    self.SelTex = self:CreateTexture(nil, "BACKGROUND", nil, 1)
+    self.SelTex:SetAllPoints(self)
+    self.SelTex:SetColorTexture(1, 0.82, 0, 0.18)
+    self.SelTex:Hide()
+
+    self:SetScript("OnClick", function(f)
+        if f._data and f._data.onSelect then
+            f._data.onSelect(f._data.itemID)
+        end
+    end)
+
+    -- Item tooltip on the right of the dialog (like triage rows).
+    self:SetScript("OnEnter", function(f)
+        if not (f._data and f._data.itemID) then
+            return
+        end
+        GameTooltip:SetOwner(EmpireManagerRestockDialog, "ANCHOR_NONE")
+        GameTooltip:SetPoint("TOPLEFT", EmpireManagerRestockDialog, "TOPRIGHT", 4, 0)
+        GameTooltip:SetItemByID(f._data.itemID)
+        GameTooltip:Show()
+    end)
+    self:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+end
+
+function EMRestockItemRowMixin:Populate(data)
+    self._data = data
+    local idx = data.idx or 1
+    if idx % 2 == 0 then
+        self.Stripe:SetAtlas("auctionhouse-rowstripe-1")
+    else
+        self.Stripe:SetAtlas("auctionhouse-rowstripe-2")
+    end
+
+    local name, icon = RestockItemInfo(data.itemID)
+    if name then
+        local q = select(3, C_Item.GetItemInfo(data.itemID))
+        local color = (q and ITEM_QUALITY_COLORS[q]) or HIGHLIGHT_FONT_COLOR
+        self.NameFs:SetText(name)
+        self.NameFs:SetTextColor(color.r, color.g, color.b)
+        self.Icon:SetTexture(icon)
+        -- Tier chevron overlaid on the icon corner.
+        local atlas = RestockTierAtlas(data.itemID, select(2, C_Item.GetItemInfo(data.itemID)))
+        if atlas then
+            self.TierOverlay:SetAtlas(atlas, false)
+            self.TierOverlay:SetSize(16, 16)
+            self.TierOverlay:Show()
+        else
+            self.TierOverlay:Hide()
+        end
+    else
+        self.NameFs:SetText("Loading...")
+        self.NameFs:SetTextColor(1, 1, 1)
+        self.Icon:SetTexture(134400)
+        self.TierOverlay:Hide()
+        C_Item.RequestLoadItemDataByID(data.itemID)
+        EmpireManager:RestockWatchItem(data.itemID)
+    end
+
+    -- Profession icons (capped; full list is implicit, this is a glance hint).
+    local profs = RestockProfList(data.itemID)
+    local parts = {}
+    local shown = math.min(#profs, 3)
+    for i = 1, shown do
+        parts[#parts + 1] = string.format("|T%s:16:16|t", profs[i].icon)
+    end
+    local profText = table.concat(parts, " ")
+    if #profs > shown then
+        profText = profText .. string.format(" |cffffd200+%d|r", #profs - shown)
+    end
+    self.ProfFs:SetText(profText)
+
+    self.SelTex:SetShown(data.selected and true or false)
+end
+
+-------------------------------------------------------------------------------
+-- EMRestockPageMixin
+-------------------------------------------------------------------------------
+
+function EMRestockPageMixin:OnLoad()
+    self.ScrollBox = self.Inset.ScrollBox
+    self.ScrollBar = self.Inset.ScrollBar
+
+    local view = CreateScrollBoxListLinearView()
+    view:SetElementFactory(function(factory, elementData)
+        if elementData.type == "entry" then
+            factory("EMRestockRowTemplate", function(frame, data)
+                if not frame._mixinApplied then
+                    Mixin(frame, EMRestockRowMixin)
+                    frame:OnLoad()
+                    frame._mixinApplied = true
+                end
+                frame:Populate(data)
+            end)
+        else
+            factory("EMStorageNoticeTemplate", function(frame, data)
+                if not frame._noticeInit then
+                    frame.Text = frame:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+                    frame.Text:SetPoint("TOPLEFT", 8, -4)
+                    frame.Text:SetPoint("RIGHT", -8, 0)
+                    frame.Text:SetJustifyH("LEFT")
+                    frame._noticeInit = true
+                end
+                frame.Text:SetWordWrap(true)
+                frame.Text:SetNonSpaceWrap(true)
+                frame.Text:SetText(data.text or "")
+                frame.Text:SetTextColor(1, 1, 1)
+            end)
+        end
+    end)
+    view:SetElementExtentCalculator(function(_dataIndex, elementData)
+        if elementData.type == "empty_notice" then
+            return 56
+        end
+        return RESTOCK_ROW_HEIGHT
+    end)
+    ScrollUtil.InitScrollBoxListWithScrollBar(self.ScrollBox, self.ScrollBar, view)
+
+    -- Add button
+    EmpireManager:StyleIconButton(self.AddButton, 0.5)
+    self.AddButton:SetScript("OnClick", function()
+        local rd = EmpireManagerRestockDialog
+        if rd and rd:IsShown() then
+            return
+        end
+        EmpireManager:OpenRestockDialog(nil)
+    end)
+    self.AddButton:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Add Restock Rule", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Keep a minimum quantity of an item topped up in a bank.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    self.AddButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
+    -- Column headers
+    self:InitRestockHeaders()
+
+    -- Private GET_ITEM_INFO_RECEIVED listener: refresh the page when item data for
+    -- a watched itemID lands (load-on-demand for names/icons/tiers).
+    self._itemWatch = {}
+    self._itemEvents = CreateFrame("Frame", nil, self)
+    self._itemEvents:SetScript("OnEvent", function(_, _event, itemID)
+        if not self._itemWatch[itemID] then
+            return
+        end
+        self._itemWatch[itemID] = nil
+        if not next(self._itemWatch) then
+            self._itemEvents:UnregisterEvent("GET_ITEM_INFO_RECEIVED")
+        end
+        -- Throttle: coalesce a burst of GET_ITEM_INFO_RECEIVED into one refresh of
+        -- both the page (if shown) and the open Add/Edit dialog item list.
+        if self._refreshThrottle then
+            return
+        end
+        self._refreshThrottle = true
+        C_Timer.After(0.1, function()
+            self._refreshThrottle = nil
+            if self:IsShown() then
+                self:Refresh()
+            end
+            local rd = EmpireManagerRestockDialog
+            if rd and rd:IsShown() and rd._refreshItemList then
+                rd._refreshItemList()
+            end
+        end)
+    end)
+end
+
+function EMRestockPageMixin:InitRestockHeaders()
+    local container = self.Inset.HeaderContainer
+    local xOffset = 0
+    for _, col in ipairs(RESTOCK_COLUMNS) do
+        local btn = CreateFrame("Button", nil, container, "ColumnDisplayButtonShortTemplate")
+        if col.fill then
+            btn:SetPoint("LEFT", container, "LEFT", xOffset, 0)
+            btn:SetPoint("RIGHT", container, "RIGHT", 0, 0)
+            btn:SetHeight(19)
+        else
+            btn:SetSize(col.width, 19)
+            btn:SetPoint("LEFT", container, "LEFT", xOffset, 0)
+        end
+        btn:SetText(col.label)
+        btn:SetNormalFontObject(GameFontHighlightSmall)
+        -- Right-justify numeric columns (Target, Fill) so headers line up with the
+        -- right-aligned cell values; everything else stays left like Storage.
+        local justify = (col.key == "target" or col.key == "fill") and "RIGHT" or "LEFT"
+        btn:GetFontString():SetJustifyH(justify)
+        btn:SetEnabled(false)
+        xOffset = xOffset + col.width
+    end
+end
+
+function EMRestockPageMixin:OnShow()
+    -- Refresh this character's bag counts so "Character Bags" rules show a live
+    -- fill level the moment the tab opens (cheap synchronous read).
+    if EmpireManager.SnapshotBagItemCounts then
+        EmpireManager:SnapshotBagItemCounts()
+    end
+    self:Refresh()
+end
+
+-- Refresh the Restock list if it is currently shown (no-op otherwise). Called by
+-- the restock engine after deposits update the fill counts.
+function EmpireManager:RefreshRestockTab()
+    local page = EmpireManagerFrame and EmpireManagerFrame.RestockPage
+    if page and page:IsShown() and page.Refresh then
+        page:Refresh()
+    end
+end
+
+-- Register an itemID so the page refreshes when its data arrives.
+function EmpireManager:RestockWatchItem(itemID)
+    local page = EmpireManagerFrame and EmpireManagerFrame.RestockPage
+    if page and page._itemEvents then
+        if not next(page._itemWatch) then
+            page._itemEvents:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+        end
+        page._itemWatch[itemID] = true
+    end
+end
+
+function EMRestockPageMixin:Refresh()
+    local list = EmpireManager.db.global.restockList or {}
+    local data = {}
+
+    if #list == 0 then
+        data[#data + 1] = {
+            type = "empty_notice",
+            text = "\nNo restock rules configured yet. Click 'Add Restock Rule' to keep a minimum quantity of an item topped up in a bank.",
+        }
+    else
+        for i, entry in ipairs(list) do
+            data[#data + 1] = {
+                type = "entry",
+                idx = i,
+                entry = entry,
+                totalCount = #list,
+            }
+        end
+    end
+
+    local savedOffset = self.ScrollBox:GetScrollPercentage()
+    local dataProvider = CreateDataProvider(data)
+    self.ScrollBox:SetDataProvider(dataProvider)
+
+    -- Scroll-follow after reorder wins over saved-offset restore.
+    local scrollTo = EmpireManager._restockScrollToIdx
+    EmpireManager._restockScrollToIdx = nil
+    if scrollTo and scrollTo > 0 then
+        C_Timer.After(0, function()
+            local dp = self.ScrollBox:GetDataProvider()
+            if not dp then
+                return
+            end
+            for _, elementData in dp:Enumerate() do
+                if elementData.type == "entry" and elementData.idx == scrollTo then
+                    self.ScrollBox:ScrollToElementData(elementData, ScrollBoxConstants.AlignCenter)
+                    break
+                end
+            end
+        end)
+    elseif savedOffset and savedOffset >= 0 then
+        C_Timer.After(0, function()
+            if self.ScrollBox:GetDataProvider() then
+                self.ScrollBox:SetScrollPercentage(savedOffset)
+            end
+        end)
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Restock Add/Edit Dialog (AH-browse style picker)
+-------------------------------------------------------------------------------
+
+function EmpireManager:InitRestockDialog()
+    local f = EmpireManagerRestockDialog
+    if f._initialized then
+        return f
+    end
+    f._initialized = true
+
+    f:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true,
+        tileSize = 32,
+        edgeSize = 32,
+        insets = { left = 8, right = 8, top = 8, bottom = 8 },
+    })
+    f:SetBackdropColor(0.06, 0.06, 0.09, 1)
+    f:RegisterForDrag("LeftButton")
+
+    f.SaveButton:SetText("Save")
+    f.DeleteButton:SetText("|cffff4444Delete|r")
+    f.CancelButton:SetText("Cancel")
+    f.CancelButton:SetScript("OnClick", function()
+        f:Hide()
+    end)
+    f.CloseButton:SetScript("OnClick", function()
+        f:Hide()
+    end)
+
+    -- ESC closes the dialog (not the dashboard behind it)
+    f:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            self:SetPropagateKeyboardInput(false)
+            self:Hide()
+        else
+            self:SetPropagateKeyboardInput(true)
+        end
+    end)
+
+    -- Filter row: Profession DD + Search box split 50/50 (search is a global find).
+    f.ProfDD = CreateFrame("DropdownButton", nil, f.FilterRow, "WowStyle1DropdownTemplate")
+    f.ProfDD:SetPoint("LEFT", f.FilterRow, "LEFT", 0, 0)
+    f.ProfDD:SetPoint("RIGHT", f.FilterRow, "CENTER", -4, 0)
+
+    f.SearchBox = CreateFrame("EditBox", nil, f.FilterRow, "SearchBoxTemplate")
+    f.SearchBox:SetPoint("LEFT", f.FilterRow, "CENTER", 4, 0)
+    f.SearchBox:SetPoint("RIGHT", f.FilterRow, "RIGHT", 0, 0)
+    f.SearchBox:SetHeight(22)
+
+    -- Item list ScrollBox view
+    f.ListScrollBox = f.ListInset.ScrollBox
+    f.ListScrollBar = f.ListInset.ScrollBar
+    local view = CreateScrollBoxListLinearView()
+    view:SetElementExtent(RESTOCK_ITEM_ROW_HEIGHT)
+    view:SetElementInitializer("EMRestockItemRowTemplate", function(frame, elementData)
+        if not frame._mixinApplied then
+            Mixin(frame, EMRestockItemRowMixin)
+            frame:OnLoad()
+            frame._mixinApplied = true
+        end
+        frame:Populate(elementData)
+    end)
+    ScrollUtil.InitScrollBoxListWithScrollBar(f.ListScrollBox, f.ListScrollBar, view)
+
+    -- Detail rows (anchored to f.DetailRow). "Selected" echo.
+    local detailRow = f.DetailRow
+
+    -- Bordered inset that groups the selected item + target + "Keep in:" controls,
+    -- matching the item-list inset style (Blizzard NineSlice / InsetFrameTemplate).
+    f.DetailInset = CreateFrame("Frame", nil, detailRow)
+    f.DetailInset:SetPoint("TOPLEFT", detailRow, "TOPLEFT", 0, 6)
+    f.DetailInset:SetPoint("TOPRIGHT", detailRow, "TOPRIGHT", 0, 6)
+    f.DetailInset:SetHeight(98)
+    f.DetailInset.Bg = f.DetailInset:CreateTexture(nil, "BACKGROUND")
+    f.DetailInset.Bg:SetPoint("TOPLEFT", 3, -3)
+    f.DetailInset.Bg:SetPoint("BOTTOMRIGHT", -3, 3)
+    f.DetailInset.Bg:SetAtlas("auctionhouse-background-index")
+    f.DetailInset.NineSlice = CreateFrame("Frame", nil, f.DetailInset, "NineSlicePanelTemplate")
+    f.DetailInset.NineSlice:SetAllPoints(f.DetailInset)
+    if NineSliceUtil and NineSliceUtil.ApplyLayout then
+        NineSliceUtil.ApplyLayout(f.DetailInset.NineSlice, NineSliceUtil.GetLayout("InsetFrameTemplate"))
+    end
+
+    -- The inset is a drop target: drag (or click while holding) an item onto it to
+    -- select that itemID, same as dropping on the search box.
+    local function dropSelect()
+        local infoType, id = GetCursorInfo()
+        if infoType == "item" and id and f._selectItemID then
+            f._selectItemID(id)
+            ClearCursor()
+        end
+    end
+    f.DetailInset:EnableMouse(true)
+    f.DetailInset:RegisterForDrag("LeftButton")
+    f.DetailInset:SetScript("OnReceiveDrag", dropSelect)
+    f.DetailInset:SetScript("OnMouseUp", dropSelect)
+
+    -- Controls live INSIDE the inset, padded from its edges.
+    local detail = f.DetailInset
+    local PAD = 12
+
+    -- Rectangle frame around the selected-item icon.
+    f.SelectedIconFrame = CreateFrame("Frame", nil, detail, "BackdropTemplate")
+    f.SelectedIconFrame:SetSize(31, 31)
+    f.SelectedIconFrame:SetPoint("TOPLEFT", detail, "TOPLEFT", PAD, -12)
+    f.SelectedIconFrame:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        edgeSize = 1,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    f.SelectedIconFrame:SetBackdropColor(0, 0, 0, 0)
+    f.SelectedIconFrame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+
+    -- Show the real item tooltip on hover (only when an item is selected).
+    f.SelectedIconFrame:EnableMouse(true)
+    f.SelectedIconFrame:SetScript("OnEnter", function(self)
+        local id = f._state and f._state.itemID
+        if not id then
+            return
+        end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetItemByID(id)
+        GameTooltip:Show()
+    end)
+    f.SelectedIconFrame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    -- Dropping an item directly on the icon slot also selects it.
+    f.SelectedIconFrame:RegisterForDrag("LeftButton")
+    f.SelectedIconFrame:SetScript("OnReceiveDrag", dropSelect)
+    f.SelectedIconFrame:SetScript("OnMouseUp", dropSelect)
+
+    f.SelectedIcon = detail:CreateTexture(nil, "ARTWORK")
+    f.SelectedIcon:SetSize(27, 27)
+    f.SelectedIcon:SetPoint("CENTER", f.SelectedIconFrame, "CENTER", 0, 0)
+    f.SelectedIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    f.SelectedIcon:Hide()
+
+    -- Tier chevron overlaid on the selected-item icon corner.
+    f.SelectedTier = detail:CreateTexture(nil, "OVERLAY", nil, 7)
+    f.SelectedTier:SetPoint("CENTER", f.SelectedIcon, "TOPLEFT", 3, -3)
+    f.SelectedTier:Hide()
+
+    f.SelectedFs = detail:CreateFontString(nil, "OVERLAY", FONT_NORMAL)
+    -- Vertically centered on the icon frame.
+    f.SelectedFs:SetPoint("LEFT", f.SelectedIconFrame, "RIGHT", 6, 0)
+    f.SelectedFs:SetJustifyH("LEFT")
+    f.SelectedFs:SetText("|cff9d9d9dSelect an item above|r")
+
+    -- Quality is implicit in the itemID (each tier is a distinct item), so there is
+    -- no tier selector and entries store no tier field.
+
+    -- Target spinner: Blizzard NumericInputSpinnerTemplate (numeric edit + up/down
+    -- arrows, like the profession create-multiple box). On the same line as the
+    -- selected item. No "Target:" label.
+    f.TargetBox = CreateFrame("EditBox", nil, detail, "NumericInputSpinnerTemplate")
+    -- Right-aligned in the inset; leave room for the increment arrow + padding.
+    f.TargetBox:SetPoint("RIGHT", detail, "RIGHT", -(PAD + 22 + 16), 0)
+    f.TargetBox:SetPoint("TOP", f.SelectedIconFrame, "TOP", 0, -4)
+    f.TargetBox:SetSize(40, 22)
+    f.TargetBox:SetMinMaxValues(1, 9999)
+    f.TargetBox:SetMaxLetters(4) -- allow up to 9999 (4 digits)
+    -- Clamp at the limits (stock behaviour) and grey the arrow you can't use:
+    -- Decrement disabled at 1, Increment disabled at 9999.
+    local function UpdateTargetArrows()
+        local v = f.TargetBox:GetValue() or 1
+        if f.TargetBox.DecrementButton then
+            f.TargetBox.DecrementButton:SetEnabled(v > 1)
+        end
+        if f.TargetBox.IncrementButton then
+            f.TargetBox.IncrementButton:SetEnabled(v < 9999)
+        end
+    end
+    f._updateTargetArrows = UpdateTargetArrows
+    -- Keep the selected-item name from overlapping the spinner.
+    f.SelectedFs:SetPoint("RIGHT", f.TargetBox, "LEFT", -8, 0)
+
+    -- Destination row (label + Bank type DD + conditional Char/Guild/Tabs DD),
+    -- second line of the inset. "Keep in:" aligns under the item icon's left edge.
+    f.BankTypeDD = CreateFrame("DropdownButton", nil, detail, "WowStyle1DropdownTemplate")
+    f.BankTypeDD:SetPoint("TOPLEFT", f.SelectedIconFrame, "BOTTOMLEFT", 60, -12)
+    f.BankTypeDD:SetWidth(140)
+
+    f.DestLabel = detail:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    -- "Keep in:" label, vertically centered on the dropdown, left-padded in the inset.
+    f.DestLabel:SetPoint("RIGHT", f.BankTypeDD, "LEFT", -8, 0)
+    f.DestLabel:SetText("|cffffd200Keep in:|r")
+    f.DestLabel:SetJustifyH("LEFT")
+
+    -- Second destination dropdown reused for Char OR Guild (shown conditionally)
+    f.DestSubDD = CreateFrame("DropdownButton", nil, detail, "WowStyle1DropdownTemplate")
+    f.DestSubDD:SetPoint("LEFT", f.BankTypeDD, "RIGHT", 6, 0)
+    f.DestSubDD:SetWidth(170)
+
+    return f
+end
+
+function EmpireManager:OpenRestockDialog(editIdx)
+    local f = self:InitRestockDialog()
+    local isEdit = editIdx ~= nil
+    local entry = isEdit and self.db.global.restockList[editIdx] or nil
+
+    f.TitleText:SetText(isEdit and "EmpireManager - Edit Restock Rule" or "EmpireManager - Add Restock Rule")
+    if f.DescText then
+        f.DescText:SetText(
+            "Pick an item: click one in the list below, type a name to search, enter an item ID and press Enter, "
+                .. "or drag an item onto the search box or the item frame at the bottom. "
+                .. "Then set a target quantity and choose where to keep it stocked."
+        )
+    end
+    -- Delete stays visible on a new rule but is disabled (nothing to delete yet).
+    f.DeleteButton:SetShown(true)
+    f.DeleteButton:SetEnabled(isEdit)
+
+    -- Dialog state
+    local st = {
+        prof = nil, -- picker filter only
+        search = "",
+        itemID = nil,
+        bankType = nil,
+        char = nil, -- guild banker (single)
+        chars = {}, -- charbank/bags target characters (multi-select set: guid -> true)
+        guild = nil,
+        guildRealm = nil,
+    }
+    if isEdit and entry then
+        st.itemID = entry.itemID
+        st.bankType = entry.dest
+        st.char = entry.char
+        st.guild = entry.guild
+        st.guildRealm = entry.realm
+        for _, guid in ipairs(RestockEntryChars(entry)) do
+            st.chars[guid] = true
+        end
+        f.TargetBox:SetValue(entry.target or 1)
+        -- Default the picker's profession filter to the item's first match
+        local profs = RestockProfList(entry.itemID)
+        st.prof = profs[1] and profs[1].key or nil
+    else
+        f.TargetBox:SetValue(1)
+    end
+    if f._updateTargetArrows then
+        f._updateTargetArrows() -- reflect the loaded value before any change
+    end
+    f._state = st
+
+    -- Forward declarations
+    local UpdateLayout, RefreshItemList
+
+    UpdateLayout = function()
+        -- Selected echo
+        if st.itemID then
+            local name, icon = RestockItemInfo(st.itemID)
+            f.SelectedIcon:SetTexture(icon or 134400)
+            f.SelectedIcon:Show()
+            -- Tier chevron on the selected-item icon (if the item has a quality).
+            local selAtlas = RestockTierAtlas(st.itemID, select(2, C_Item.GetItemInfo(st.itemID)))
+            if selAtlas then
+                f.SelectedTier:SetAtlas(selAtlas, false)
+                f.SelectedTier:SetSize(20, 20)
+                f.SelectedTier:Show()
+            else
+                f.SelectedTier:Hide()
+            end
+            if name then
+                local q = select(3, C_Item.GetItemInfo(st.itemID))
+                -- ITEM_QUALITY_COLORS[q] is a plain {r,g,b,hex} table (no ColorMixin
+                -- methods), so set the text then color it via SetTextColor.
+                local color = (q and ITEM_QUALITY_COLORS[q]) or HIGHLIGHT_FONT_COLOR
+                f.SelectedFs:SetText(name)
+                f.SelectedFs:SetTextColor(color.r, color.g, color.b)
+            else
+                f.SelectedFs:SetTextColor(1, 1, 1)
+                f.SelectedFs:SetText("Loading...")
+                C_Item.RequestLoadItemDataByID(st.itemID)
+                EmpireManager:RestockWatchItem(st.itemID)
+            end
+        else
+            f.SelectedIcon:Hide()
+            f.SelectedTier:Hide()
+            f.SelectedFs:SetTextColor(0.616, 0.616, 0.616)
+            f.SelectedFs:SetText("Select an item above")
+        end
+
+        -- Profession filter display
+        local profLabel = "All Professions"
+        if st.prof then
+            for _, info in ipairs(self.PROF_DISPLAY) do
+                if info.key == st.prof then
+                    profLabel = info.label
+                    break
+                end
+            end
+        end
+        f.ProfDD:OverrideText(profLabel)
+
+        -- Destination
+        local btLabels = {
+            warbandbank = "Warband Bank",
+            guildbank = "Guild Bank",
+            charbank = "Character Bank",
+            bags = "Character Bags",
+        }
+        f.BankTypeDD:OverrideText(st.bankType and btLabels[st.bankType] or "Select destination")
+        local showChar = (st.bankType == "charbank" or st.bankType == "bags")
+        local showGuild = (st.bankType == "guildbank")
+        f.DestSubDD:SetShown(showChar or showGuild)
+        if showChar then
+            local charList = BuildCharList()
+            local picked = {}
+            for guid in pairs(st.chars) do
+                picked[#picked + 1] = guid
+            end
+            if #picked == 0 then
+                f.DestSubDD:OverrideText("Select Characters")
+            elseif #picked == 1 then
+                f.DestSubDD:OverrideText(charList[picked[1]] or picked[1])
+            else
+                f.DestSubDD:OverrideText(string.format("%d characters", #picked))
+            end
+        elseif showGuild then
+            f.DestSubDD:OverrideText(st.guild or "Select Guild")
+        end
+
+        -- Save gating: item + target(>0) + destination valid.
+        local target = f.TargetBox:GetValue()
+        local valid = st.itemID and target and target > 0 and st.bankType
+        if (st.bankType == "charbank" or st.bankType == "bags") and not next(st.chars) then
+            valid = false
+        end
+        if st.bankType == "guildbank" and (not st.guild or st.guild == "") then
+            valid = false
+        end
+        f.SaveButton:SetEnabled(valid and true or false)
+    end
+
+    -- Build the filtered item list for the picker. Filters: profession (defaults
+    -- to all professions across the selected/all expansions), expansion, and a
+    -- substring name search (matched only against resolved names; uncached items
+    -- are request-loaded so they appear after GET_ITEM_INFO_RECEIVED).
+    RefreshItemList = function()
+        local seen = {}
+        local items = {}
+        local search = (st.search or ""):lower()
+
+        local function consider(itemID)
+            if seen[itemID] then
+                return
+            end
+            seen[itemID] = true
+            if search ~= "" then
+                local name = RestockItemInfo(itemID)
+                if not name then
+                    -- Not yet cached: request and skip for now (will reappear on refresh).
+                    C_Item.RequestLoadItemDataByID(itemID)
+                    EmpireManager:RestockWatchItem(itemID)
+                    return
+                end
+                if not name:lower():find(search, 1, true) then
+                    return
+                end
+            end
+            items[#items + 1] = itemID
+        end
+
+        -- Search is a GLOBAL find: when there is search text, the Profession and
+        -- Expansion dropdowns are ignored and the whole RESTOCK_ITEMS set is matched
+        -- by name (consider() applies the substring). The dropdowns only narrow the
+        -- BROWSE list when the search box is empty.
+        local searching = (search ~= "")
+
+        -- An item belongs to the selected profession if its match set (override-aware,
+        -- same as the Profession column) includes it. This surfaces universal "Parts"
+        -- like Aetherlume/Evercore - the AH files them under Parts and the curated
+        -- data under one profession, but the override makes them usable by many, so
+        -- they must appear under every profession that can craft with them.
+        local function matchesProf(itemID)
+            if not st.prof then
+                return true
+            end
+            local set = EmpireManager:GetItemProfMatchSet(itemID)
+            return set and set[st.prof] or false
+        end
+
+        for _, byProf in pairs(self.RESTOCK_ITEMS) do
+            for _, set in pairs(byProf) do
+                for _, itemID in ipairs(set) do
+                    if searching or matchesProf(itemID) then
+                        consider(itemID)
+                    end
+                end
+            end
+        end
+
+        -- Sort by resolved name (cached first, alphabetical), then by itemID.
+        table.sort(items, function(a, b)
+            local na = RestockItemInfo(a)
+            local nb = RestockItemInfo(b)
+            if na and nb then
+                return na:lower() < nb:lower()
+            elseif na then
+                return true
+            elseif nb then
+                return false
+            end
+            return a < b
+        end)
+
+        local data = {}
+        local selectedIdx
+        for i, itemID in ipairs(items) do
+            if itemID == st.itemID then
+                selectedIdx = i
+            end
+            data[#data + 1] = {
+                idx = i,
+                itemID = itemID,
+                selected = (itemID == st.itemID),
+                onSelect = function(id)
+                    -- Just move the highlight; don't rebuild the list (that flickers).
+                    st.itemID = id
+                    f.ListScrollBox:ForEachFrame(function(frame, elementData)
+                        if frame.SelTex then
+                            frame.SelTex:SetShown(elementData.itemID == id)
+                        end
+                    end)
+                    UpdateLayout()
+                end,
+            }
+            -- Request-load uncached items so names/icons fill in.
+            if not RestockItemInfo(itemID) then
+                C_Item.RequestLoadItemDataByID(itemID)
+                EmpireManager:RestockWatchItem(itemID)
+            end
+        end
+        local savedPct = f.ListScrollBox:GetScrollPercentage()
+        f.ListScrollBox:SetDataProvider(CreateDataProvider(data))
+        if f._scrollToSelected and selectedIdx then
+            -- Requested by the caller (dialog open in edit mode): bring the selected
+            -- item into view instead of leaving the list at the top.
+            f._scrollToSelected = nil
+            C_Timer.After(0, function()
+                if f.ListScrollBox.ScrollToElementDataIndex then
+                    f.ListScrollBox:ScrollToElementDataIndex(selectedIdx)
+                end
+            end)
+        elseif savedPct and savedPct >= 0 then
+            -- Preserve scroll position across rebuilds (e.g. selecting an item just
+            -- updates the highlight; the list should not jump back to the top).
+            C_Timer.After(0, function()
+                f.ListScrollBox:SetScrollPercentage(savedPct)
+            end)
+        end
+    end
+    f._refreshItemList = RefreshItemList
+
+    -- Profession filter dropdown (All + each profession)
+    f.ProfDD:SetupMenu(function(_, rootDescription)
+        rootDescription:CreateRadio("All Professions", function()
+            return st.prof == nil
+        end, function()
+            st.prof = nil
+            RefreshItemList()
+            UpdateLayout()
+        end)
+        rootDescription:CreateDivider()
+        for _, info in ipairs(self.PROF_DISPLAY) do
+            -- Only offer professions that have curated items in some expansion.
+            local hasItems = false
+            for _, byProf in pairs(self.RESTOCK_ITEMS) do
+                if byProf[info.key] then
+                    hasItems = true
+                    break
+                end
+            end
+            if hasItems then
+                rootDescription:CreateRadio(string.format("|T%s:14:14|t %s", info.icon, info.label), function()
+                    return st.prof == info.key
+                end, function()
+                    st.prof = info.key
+                    RefreshItemList()
+                    UpdateLayout()
+                end)
+            end
+        end
+    end)
+
+
+    -- Search box doubles as an item drop target: shift-clicking or dragging an item
+    -- onto it (any item, even non-reagents) selects that itemID directly for addition,
+    -- like the Keep List input box. Plain typed text filters the picker list.
+    EmpireManager:SetupItemInputBox(f.SearchBox)
+    -- HookScript (not SetScript) so SearchBoxTemplate's own OnTextChanged still runs
+    -- and hides/shows its instructions placeholder text. No userInput guard: the
+    -- clear (X) button clears text programmatically (userInput=false), and we still
+    -- want that to reset the search and refresh the list.
+    -- Select an itemID directly: used by item drops and by typing a bare number + Enter.
+    local function selectItemID(id)
+        f.SearchBox:SetText("")
+        st.search = ""
+        st.itemID = id
+        if not RestockItemInfo(id) then
+            C_Item.RequestLoadItemDataByID(id)
+            EmpireManager:RestockWatchItem(id)
+        end
+        RefreshItemList()
+        UpdateLayout()
+    end
+    -- Expose for the detail inset's drop handler (created once in InitRestockDialog).
+    f._selectItemID = selectItemID
+    f.SearchBox:HookScript("OnTextChanged", function(box)
+        local text = box:GetText() or ""
+        -- An item link/ID dropped in (contains "item:NNN") selects that item directly.
+        local droppedID = tonumber(text:match("item:(%d+)"))
+        if droppedID then
+            selectItemID(droppedID)
+            return
+        end
+        if text ~= (st.search or "") then
+            st.search = text
+            RefreshItemList()
+        end
+    end)
+    -- Enter on a bare itemID number selects that item (lets you add any item by ID).
+    f.SearchBox:HookScript("OnEnterPressed", function(box)
+        local text = (box:GetText() or ""):gsub("%s", "")
+        local id = tonumber(text:match("^(%d+)$"))
+        if id then
+            selectItemID(id)
+            box:ClearFocus()
+        end
+    end)
+    f.SearchBox:SetText("")
+
+    -- Target spinner: re-validate Save on every value change (typed or arrows).
+    f.TargetBox:SetOnValueChangedCallback(function()
+        if f._updateTargetArrows then
+            f._updateTargetArrows()
+        end
+        UpdateLayout()
+    end)
+
+    -- Bank type dropdown (REUSES the storage destination model)
+    f.BankTypeDD:SetupMenu(function(_, rootDescription)
+        local labels = {
+            warbandbank = "Warband Bank",
+            guildbank = "Guild Bank",
+            charbank = "Character Bank",
+            bags = "Character Bags",
+        }
+        for _, bt in ipairs({ "warbandbank", "guildbank", "charbank", "bags" }) do
+            rootDescription:CreateRadio(labels[bt], function()
+                return st.bankType == bt
+            end, function()
+                st.bankType = bt
+                st.char = nil
+                wipe(st.chars)
+                st.guild = nil
+                st.guildRealm = nil
+                C_Timer.After(0, UpdateLayout)
+            end)
+        end
+    end)
+
+    -- Destination sub dropdown (Char when charbank; Guild when guildbank). Mirrors
+    -- the storage rule editor's Char/Guild dropdowns.
+    local subSelIdx
+    f.DestSubDD:SetupMenu(function(_, rootDescription)
+        subSelIdx = nil
+        if st.bankType == "charbank" or st.bankType == "bags" then
+            rootDescription:SetScrollMode(20 * 20)
+            local charList, charOrder = BuildCharList()
+            for i, guid in ipairs(charOrder) do
+                if st.chars[guid] then
+                    subSelIdx = subSelIdx or i
+                end
+                rootDescription:CreateCheckbox(charList[guid], function()
+                    return st.chars[guid] == true
+                end, function()
+                    if st.chars[guid] then
+                        st.chars[guid] = nil
+                    else
+                        st.chars[guid] = true
+                    end
+                    C_Timer.After(0, UpdateLayout)
+                end)
+            end
+        elseif st.bankType == "guildbank" then
+            rootDescription:SetScrollMode(20 * 20)
+            local guilds = BuildGuildList()
+            for i, item in ipairs(guilds) do
+                if item.guild == st.guild and item.realm == st.guildRealm then
+                    subSelIdx = i
+                end
+                rootDescription:CreateRadio(item.label, function()
+                    return st.guild == item.guild and st.guildRealm == item.realm
+                end, function()
+                    st.guild = item.guild
+                    st.guildRealm = item.realm
+                    local banker = self:FindCharInGuild(item.guild, nil, item.realm)
+                    if banker then
+                        st.char = banker
+                    end
+                    C_Timer.After(0, UpdateLayout)
+                end)
+            end
+        end
+    end)
+    self:EnableDropdownScrollToSelected(f.DestSubDD, function()
+        return subSelIdx
+    end)
+
+    -- Save button
+    f.SaveButton:SetScript("OnClick", function()
+        local target = f.TargetBox:GetValue()
+        if not st.itemID then
+            self:ChatMsg("Select an item", true)
+            return
+        end
+        if not target or target <= 0 then
+            self:ChatMsg("Enter a target quantity", true)
+            return
+        end
+        if not st.bankType then
+            self:ChatMsg("Select a bank type", true)
+            return
+        end
+        if (st.bankType == "charbank" or st.bankType == "bags") and not next(st.chars) then
+            self:ChatMsg("Select at least one character", true)
+            return
+        end
+        if st.bankType == "guildbank" and (not st.guild or st.guild == "") then
+            self:ChatMsg("Select a guild", true)
+            return
+        end
+
+        local newEntry = {
+            itemID = st.itemID,
+            target = target,
+            dest = st.bankType,
+            name = RestockItemInfo(st.itemID) or (entry and entry.name) or ("Item " .. st.itemID),
+        }
+        if st.bankType == "guildbank" then
+            newEntry.guild = st.guild
+            newEntry.realm = st.guildRealm
+        elseif st.bankType == "charbank" or st.bankType == "bags" then
+            -- Multi-select: keep a stable, char-list-ordered array of GUIDs.
+            local _, charOrder = BuildCharList()
+            local chars = {}
+            for _, guid in ipairs(charOrder) do
+                if st.chars[guid] then
+                    chars[#chars + 1] = guid
+                end
+            end
+            newEntry.chars = chars
+        end
+
+        -- Duplicate check (same item+tier+destination), skip self in edit mode. For
+        -- char/bags the destination is the *set* of characters, so a rule differing
+        -- only by which characters it targets is not a duplicate.
+        local function sameChars(a, b)
+            local ca, cb = RestockEntryChars(a), RestockEntryChars(b)
+            if #ca ~= #cb then
+                return false
+            end
+            local set = {}
+            for _, g in ipairs(ca) do
+                set[g] = true
+            end
+            for _, g in ipairs(cb) do
+                if not set[g] then
+                    return false
+                end
+            end
+            return true
+        end
+        local list = self.db.global.restockList
+        for i, ex in ipairs(list) do
+            if
+                (not isEdit or i ~= editIdx)
+                and ex.itemID == newEntry.itemID
+                and tostring(ex.tier) == tostring(newEntry.tier)
+                and ex.dest == newEntry.dest
+                and ex.guild == newEntry.guild
+                and (ex.realm or "") == (newEntry.realm or "")
+                and sameChars(ex, newEntry)
+            then
+                self:ChatMsg("A restock rule for this item and destination already exists", true)
+                return
+            end
+        end
+
+        if isEdit then
+            list[editIdx] = newEntry
+            EmpireManager._restockScrollToIdx = editIdx
+        else
+            list[#list + 1] = newEntry
+            EmpireManager._restockScrollToIdx = #list
+        end
+
+        -- A restock rule change alters the floor, so the triage classification is
+        -- stale. Drop the cached results and repaint (same as storage-rule edits).
+        self:InvalidateStorageCache()
+        self:RefreshTriageIfOpen()
+
+        if newEntry.dest == "charbank" then
+            -- Char-bank deposits require a banker on each target character.
+            for _, guid in ipairs(newEntry.chars or {}) do
+                if guid ~= "self" then
+                    self:SyncBankerRole(guid)
+                end
+            end
+        elseif newEntry.char and newEntry.char ~= "self" then
+            self:SyncBankerRole(newEntry.char)
+        end
+        f:Hide()
+        self:SelectDashboardTab("restock")
+    end)
+
+    -- Delete button (edit only)
+    f.DeleteButton:SetScript("OnClick", function()
+        if not isEdit then
+            return
+        end
+        StaticPopupDialogs["EM_DELETE_RESTOCK_RULE"] = StaticPopupDialogs["EM_DELETE_RESTOCK_RULE"]
+            or {
+                text = "Delete this restock rule?",
+                button1 = "Delete",
+                button2 = "Cancel",
+                OnAccept = function() end,
+                timeout = 0,
+                whileDead = true,
+                hideOnEscape = true,
+                showAlert = true,
+                preferredIndex = 3,
+            }
+        StaticPopupDialogs["EM_DELETE_RESTOCK_RULE"].OnAccept = function()
+            table.remove(self.db.global.restockList, editIdx)
+            self:InvalidateStorageCache() -- floor removed: recalc triage
+            self:RefreshTriageIfOpen()
+            f:Hide()
+            self:SelectDashboardTab("restock")
+        end
+        StaticPopup_Show("EM_DELETE_RESTOCK_RULE")
+    end)
+
+    -- On open, bring the pre-selected item (edit mode) into view in the picker.
+    if st.itemID then
+        f._scrollToSelected = true
+    end
+    RefreshItemList()
+    UpdateLayout()
+    f:Show()
+end
+
+-------------------------------------------------------------------------------
 -- Import / Export
 -------------------------------------------------------------------------------
 
@@ -4593,19 +6630,22 @@ function EmpireManager:InitIOFrame()
     f._replaceRules = replaceCB
 
     local replaceLabel = replaceCB:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    replaceLabel:SetText("Replace existing rules")
+    replaceLabel:SetText("Replace existing")
     replaceLabel:SetPoint("LEFT", replaceCB, "RIGHT", 2, 0)
     local function showReplaceTip(anchor)
         GameTooltip:SetOwner(anchor, "ANCHOR_CURSOR")
-        GameTooltip:AddLine("Replace Existing Rules", 1, 0.82, 0)
+        GameTooltip:AddLine("Replace Existing", 1, 0.82, 0)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(
-            "When checked, imported storage rules will replace all existing ones. When unchecked, new rules are merged (duplicates skipped).",
-            1,
-            1,
-            1,
-            true
+            "When checked, each section present in the paste wipes its target list before importing:",
+            1, 1, 1, true
         )
+        GameTooltip:AddLine("  " .. "|cffffd200Storage Rules|r wipes Storage Rules", 1, 1, 1)
+        GameTooltip:AddLine("  " .. "|cffffd200Keep List|r wipes Keep List", 1, 1, 1)
+        GameTooltip:AddLine("  " .. "|cffffd200Vendor Whitelist|r wipes Vendor Whitelist", 1, 1, 1)
+        GameTooltip:AddLine("  " .. "|cffffd200Restock Rules|r wipes Restock Rules", 1, 1, 1)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("When unchecked, entries merge (duplicates skipped).", 1, 1, 1, true)
         GameTooltip:Show()
     end
     local function hideReplaceTip()
@@ -4626,6 +6666,9 @@ function EmpireManager:InitIOFrame()
         local types = {
             { key = "chars", label = "Characters" },
             { key = "storage", label = "Storage Rules" },
+            { key = "keeplist", label = "Keep List" },
+            { key = "vendorlist", label = "Vendor Whitelist" },
+            { key = "restock", label = "Restock Rules" },
             { key = "all", label = "All" },
         }
         for _, t in ipairs(types) do
@@ -4652,8 +6695,22 @@ function EmpireManager:InitIOFrame()
                 return self:ExportRegistry()
             elseif val == "storage" then
                 return self:ExportStorageAssignments()
+            elseif val == "keeplist" then
+                return self:ExportKeepList()
+            elseif val == "vendorlist" then
+                return self:ExportVendorList()
+            elseif val == "restock" then
+                return self:ExportRestockList()
             elseif val == "all" then
-                return self:ExportRegistry() .. "\n" .. self:ExportStorageAssignments()
+                return self:ExportRegistry()
+                    .. "\n"
+                    .. self:ExportStorageAssignments()
+                    .. "\n"
+                    .. self:ExportKeepList()
+                    .. "\n"
+                    .. self:ExportVendorList()
+                    .. "\n"
+                    .. self:ExportRestockList()
             end
         end)
         if not ok then
@@ -4780,6 +6837,92 @@ function EmpireManager:InitIOFrame()
                     statusParts[#statusParts + 1] = "|cff88ccffStorage:|r "
                         .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")
                 end
+            elseif section.type == "keeplist" then
+                if doReplace then
+                    self.db.global.keepList = {}
+                end
+                local entries, parseSkipped = self:ImportKeepList(section.text)
+                local imp, dup, moved = self:ApplyImportedKeepList(entries)
+                local parts = {}
+                if imp > 0 then
+                    parts[#parts + 1] = string.format("|cff00cc00%d imported|r", imp)
+                end
+                if moved > 0 then
+                    parts[#parts + 1] = string.format("|cff88ccff%d moved from Vendor|r", moved)
+                end
+                local totalSkipped = (parseSkipped or 0) + dup
+                if totalSkipped > 0 then
+                    parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
+                end
+                statusParts[#statusParts + 1] = "|cff88ccffKeep List:|r "
+                    .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")
+                -- Refresh the Keep List window if it's open.
+                if self.keeplistFrame and self.keeplistFrame:IsShown() and self.RefreshKeeplistDisplay then
+                    self:RefreshKeeplistDisplay()
+                end
+                if self.vendorlistFrame and self.vendorlistFrame:IsShown() and self.RefreshVendorlistDisplay then
+                    self:RefreshVendorlistDisplay()
+                end
+                self._bagsDirty = true
+                if self.RefreshTriageIfOpen then
+                    self:RefreshTriageIfOpen()
+                end
+            elseif section.type == "vendorlist" then
+                if doReplace then
+                    self.db.global.vendorWhitelist = {}
+                end
+                local entries, parseSkipped = self:ImportVendorList(section.text)
+                local imp, dup = self:ApplyImportedVendorList(entries)
+                local parts = {}
+                if imp > 0 then
+                    parts[#parts + 1] = string.format("|cff00cc00%d imported|r", imp)
+                end
+                local totalSkipped = (parseSkipped or 0) + dup
+                if totalSkipped > 0 then
+                    parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
+                end
+                statusParts[#statusParts + 1] = "|cff88ccffVendor Whitelist:|r "
+                    .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")
+                if self.vendorlistFrame and self.vendorlistFrame:IsShown() and self.RefreshVendorlistDisplay then
+                    self:RefreshVendorlistDisplay()
+                end
+                self._bagsDirty = true
+                if self.RefreshTriageIfOpen then
+                    self:RefreshTriageIfOpen()
+                end
+            elseif section.type == "restock" then
+                if doReplace then
+                    self.db.global.restockList = {}
+                end
+                local readyRules, unresolvedRules, parseSkipped =
+                    self:ImportRestockList(section.text)
+                -- v1: silent-skip unresolved char/bags rules with a verbose log.
+                -- Reusing the storage remap dialog would need dialog refactoring
+                -- (it hard-codes storage rule shape); flagged as follow-up.
+                local unresolvedN = unresolvedRules and #unresolvedRules or 0
+                if unresolvedN > 0 then
+                    for _, r in ipairs(unresolvedRules) do
+                        self:ChatVerbose(string.format(
+                            "|cff88ccff[Import]|r Restock: itemID %d (%s) unresolved char '%s', skipped.",
+                            r.itemID or 0, r.dest or "?", r._origChar or ""
+                        ))
+                    end
+                end
+                local imp, dup = self:ApplyImportedRestockRules(readyRules)
+                local parts = {}
+                if imp > 0 then
+                    parts[#parts + 1] = string.format("|cff00cc00%d imported|r", imp)
+                end
+                local totalSkipped = (parseSkipped or 0) + dup + unresolvedN
+                if totalSkipped > 0 then
+                    parts[#parts + 1] = string.format("|cffdddd00%d skipped|r", totalSkipped)
+                end
+                statusParts[#statusParts + 1] = "|cff88ccffRestock:|r "
+                    .. (#parts > 0 and table.concat(parts, " ") or "|cff00cc00OK|r")
+                self._bagsDirty = true
+                if self.RefreshTriageIfOpen then
+                    self:RefreshTriageIfOpen()
+                end
             end
         end
 
@@ -4811,30 +6954,54 @@ function EmpireManager:InitIOFrame()
         end
 
         -- Build a short summary of what will be imported, then confirm.
-        local charSections, ruleSections = 0, 0
-        local charLines, ruleLines = 0, 0
+        -- Line counts here are raw payload lines (comments excluded) - a rough
+        -- upper bound on entries. Actual import de-dups against the current DB.
+        local counts = { registry = 0, storage = 0, keeplist = 0, vendorlist = 0, restock = 0 }
+        local function countPayload(section)
+            local n = 0
+            for line in section.text:gmatch("[^\r\n]+") do
+                local trimmed = line:match("^%s*(.-)%s*$")
+                if trimmed ~= "" and trimmed:sub(1, 1) ~= "#" then
+                    n = n + 1
+                end
+            end
+            return n
+        end
         for _, section in ipairs(sections) do
-            if section.type == "registry" then
-                charSections = charSections + 1
-                for _ in section.text:gmatch("[^\r\n]+") do
-                    charLines = charLines + 1
-                end
-            elseif section.type == "storage" then
-                ruleSections = ruleSections + 1
-                for _ in section.text:gmatch("[^\r\n]+") do
-                    ruleLines = ruleLines + 1
-                end
+            if counts[section.type] ~= nil then
+                counts[section.type] = counts[section.type] + countPayload(section)
             end
         end
         local summary = {}
-        if charSections > 0 then
-            summary[#summary + 1] = string.format("%d Character%s", charLines, charLines == 1 and "" or "s")
+        if counts.registry > 0 then
+            summary[#summary + 1] = string.format("%d Character%s",
+                counts.registry, counts.registry == 1 and "" or "s")
         end
-        if ruleSections > 0 then
-            summary[#summary + 1] = string.format("%d Storage Rule%s", ruleLines, ruleLines == 1 and "" or "s")
+        if counts.storage > 0 then
+            summary[#summary + 1] = string.format("%d Storage Rule%s",
+                counts.storage, counts.storage == 1 and "" or "s")
         end
-        if replaceCB:GetChecked() and ruleSections > 0 then
-            summary[#summary + 1] = "|cffff8800replace existing rules|r"
+        if counts.keeplist > 0 then
+            summary[#summary + 1] = string.format("%d Keep List item%s",
+                counts.keeplist, counts.keeplist == 1 and "" or "s")
+        end
+        if counts.vendorlist > 0 then
+            summary[#summary + 1] = string.format("%d Vendor Whitelist item%s",
+                counts.vendorlist, counts.vendorlist == 1 and "" or "s")
+        end
+        if counts.restock > 0 then
+            summary[#summary + 1] = string.format("%d Restock Rule%s",
+                counts.restock, counts.restock == 1 and "" or "s")
+        end
+        if replaceCB:GetChecked() then
+            local replacing = {}
+            if counts.storage > 0 then replacing[#replacing + 1] = "Storage" end
+            if counts.keeplist > 0 then replacing[#replacing + 1] = "Keep List" end
+            if counts.vendorlist > 0 then replacing[#replacing + 1] = "Vendor Whitelist" end
+            if counts.restock > 0 then replacing[#replacing + 1] = "Restock" end
+            if #replacing > 0 then
+                summary[#summary + 1] = "|cffff8800replace: " .. table.concat(replacing, ", ") .. "|r"
+            end
         end
         local summaryText = #summary > 0 and (table.concat(summary, ", ") .. ".") or "no recognized data."
 

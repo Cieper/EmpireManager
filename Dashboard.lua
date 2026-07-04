@@ -25,6 +25,9 @@ EMMapRowMixin = {}
 EMRosterPageMixin = {}
 EMStoragePageMixin = {}
 EMStorageRowMixin = {}
+EMRestockPageMixin = {}
+EMRestockRowMixin = {}
+EMRestockItemRowMixin = {}
 EMSidecarMixin = {}
 
 -------------------------------------------------------------------------------
@@ -450,6 +453,7 @@ function EmpireManagerFrameMixin:OnLoad()
     self.tabIDs = {}
     self.tabIDs.ledger = self:AddNamedTab("Characters", self.CharactersPage)
     self.tabIDs.storage = self:AddNamedTab("Storage", self.StoragePage)
+    self.tabIDs.restock = self:AddNamedTab("Restock", self.RestockPage)
     self.tabIDs.roster = self:AddNamedTab("Roster", self.RosterPage)
     self.tabIDs.map = self:AddNamedTab("Map", self.MapPage)
     self.tabIDs.about = self:AddNamedTab("About", self.AboutPage)
@@ -478,6 +482,21 @@ function EmpireManagerFrameMixin:OnLoad()
             "Use the up/down arrows to reorder.",
             "Ctrl-click an arrow to move 5 positions.",
             "Shift-click to jump to the next rule of the same category.",
+        },
+        restock = {
+            "Restock",
+            "Keep a minimum quantity (a floor) of specific items topped up in a bank.",
+            " ",
+            "Right-click or double-click a rule to edit it.",
+            " ",
+            "Each rule keeps at least the target amount in its destination. The Warband Bank is a shared pool any alt can fill and craft from.",
+            "Fill Level shows current vs target: green is at or above target, red is well below.",
+            " ",
+            "Restock runs first and wins over Storage Rules: the floor is protected and stays put, and anything above the floor follows your Storage Rules. Character Bags floors are kept in bags and never vendored or routed away.",
+            " ",
+            "Use the up/down arrows to reorder priority. Higher rules top up first.",
+            "Ctrl-click an arrow to move 5 positions.",
+            "Shift-click to jump to the next rule of the same profession.",
         },
         roster = {
             Info = {
@@ -568,6 +587,7 @@ function EmpireManagerFrameMixin:OnLoad()
     -- Native tab callbacks (lazy-init mixin on first select)
     local nativePages = {
         storage = { page = self.StoragePage, mixin = EMStoragePageMixin },
+        restock = { page = self.RestockPage, mixin = EMRestockPageMixin },
         about = { page = self.AboutPage, mixin = EMAboutPageMixin },
         map = { page = self.MapPage, mixin = EMMapPageMixin },
         roster = { page = self.RosterPage, mixin = EMRosterPageMixin },

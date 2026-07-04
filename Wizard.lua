@@ -102,7 +102,7 @@ local function CharLabel(entry)
     local realm = entry.realm or ""
     local text = realm == "" and name or (name .. " - " .. realm)
     if color then
-        return string.format("|cff%02x%02x%02x%s|r", color.r * 255, color.g * 255, color.b * 255, text)
+        return color:WrapTextInColorCode(text)
     end
     return text
 end

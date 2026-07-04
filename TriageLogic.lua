@@ -389,6 +389,20 @@ local function GetProfMatchSet(item)
     return profMatchCache[classID * 1000 + (item.itemSubClassID or 0)]
 end
 
+-- Public wrapper around GetProfMatchSet keyed by itemID alone (Bank Restock UI).
+-- Builds the minimal item record GetProfMatchSet needs (itemID + class/subclass via
+-- GetItemInfoInstant) and returns the same profKey->true set triage routing uses, so
+-- the Restock tab's Profession column stays consistent with routing. Returns nil if
+-- the item has no profession match (or the itemID can't be resolved).
+function EmpireManager:GetItemProfMatchSet(itemID)
+    if not itemID then
+        return nil
+    end
+    self:EnsureStorageCache()
+    local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(itemID)
+    return GetProfMatchSet({ itemID = itemID, itemClassID = classID, itemSubClassID = subClassID })
+end
+
 -- Check if an item matches a storage assignment's subcategory filter.
 -- No subcategories = match all (backward compatible).
 local RECIPE_SUBCLASS_TO_PROF = EmpireManager.RECIPE_SUBCLASS_TO_PROF
@@ -594,10 +608,13 @@ end
 local CLASSES_ALLOWED_PREFIX = (ITEM_CLASSES_ALLOWED or "Classes: %s"):gsub("%%s.*$", "")
 -- Prefix of ITEM_SPELL_TRIGGER_ONUSE ("Use: %s") - same stripping.
 local USE_LINE_PREFIX = (ITEM_SPELL_TRIGGER_ONUSE or "Use: %s"):gsub("%%s.*$", "")
+-- Red "Already known" line shown on a learnable item the player has collected
+-- (illusions, etc.). Used to vendor known cosmetics that can't be relearned.
+local KNOWN_LINE = ITEM_SPELL_KNOWN or "Already known"
 
 local function ParseTooltipBind(tooltipData)
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
-        false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isKnownAppearance =
+        false, false, false, false, false, false, false
     -- A "Use:" line AND a "Classes:" restriction together mark an equipment token
     -- (e.g. Unsullied Leather Belt): a consumable-classed item that grants gear on
     -- use. Real consumables (potions/flasks) have a Use line but no class line.
@@ -623,6 +640,8 @@ local function ParseTooltipBind(tooltipData)
                     isUnique = true
                 elseif txt == ITEM_CONJURED then
                     isConjured = true
+                elseif txt == KNOWN_LINE then
+                    isKnownAppearance = true
                 end
                 if not isTeleport and txt:find("[Tt]eleport") then
                     isTeleport = true
@@ -630,7 +649,11 @@ local function ParseTooltipBind(tooltipData)
                 if not hasUseLine and USE_LINE_PREFIX ~= "" and txt:find(USE_LINE_PREFIX, 1, true) == 1 then
                     hasUseLine = true
                 end
-                if not hasClassLine and CLASSES_ALLOWED_PREFIX ~= "" and txt:find(CLASSES_ALLOWED_PREFIX, 1, true) == 1 then
+                if
+                    not hasClassLine
+                    and CLASSES_ALLOWED_PREFIX ~= ""
+                    and txt:find(CLASSES_ALLOWED_PREFIX, 1, true) == 1
+                then
                     hasClassLine = true
                 end
             end
@@ -640,7 +663,7 @@ local function ParseTooltipBind(tooltipData)
         isWarbound = false
     end
     local isEquipToken = hasUseLine and hasClassLine
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance
 end
 
 -- Parse bag slot count from an item's tooltip. Returns slot count or nil.
@@ -668,7 +691,7 @@ end
 
 -- Per-scan tooltip cache: avoids re-parsing tooltips for the same itemID.
 -- Cleared at the start of each async scan via ResetTooltipCache().
--- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken }
+-- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance }
 -- isSoulbound is NOT cached: it is per-slot state (one stack of an itemID may
 -- be bound while another slot of the same itemID is a fresh BoE), so we must
 -- re-parse the tooltip each call to get the slot-specific soulbound flag.
@@ -679,21 +702,22 @@ end
 
 local function CachedTooltipBind(itemID, tooltipDataFn)
     local tooltipData = tooltipDataFn()
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance =
         ParseTooltipBind(tooltipData)
     local cached = tooltipCache[itemID]
     if cached then
         -- Per-slot soulbound from the live tooltip; static flags from the cache.
-        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5], cached[6]
+        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5], cached[6], cached[7]
     end
     -- Only cache when the tooltip actually returned data; an empty `lines`
     -- table means the client hasn't fetched item data yet and parsing returned
     -- all-false flags. Caching that would lock in a wrong answer for the
     -- session.
     if tooltipData and tooltipData.lines and #tooltipData.lines > 0 then
-        tooltipCache[itemID] = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken }
+        tooltipCache[itemID] =
+            { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance }
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken
+    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance
 end
 
 -------------------------------------------------------------------------------
@@ -716,15 +740,17 @@ local function ScanBagSlot(items, bag, slot)
     local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
-        false, false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance =
+        false, false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local bagRef, slotRef = bag, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken =
-                CachedTooltipBind(info.itemID, function()
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance = CachedTooltipBind(
+                info.itemID,
+                function()
                     return C_TooltipInfo.GetBagItem(bagRef, slotRef)
-                end)
+                end
+            )
         end
     end
 
@@ -758,6 +784,7 @@ local function ScanBagSlot(items, bag, slot)
         isTeleport = isTeleport,
         isConjured = isConjured,
         isEquipToken = isEquipToken,
+        isKnownAppearance = isKnownAppearance,
         iconID = info.iconFileID,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -809,14 +836,17 @@ local function ScanGuildBankSlot(items, tab, slot)
     local itemName, _, quality, _, _, _, _, _, _, icon, sellPrice, _, _, bindType, expansionID, _, isCraftingReagent =
         C_Item.GetItemInfo(link)
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
-        false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance =
+        false, false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
             local linkRef = link -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(itemID, function()
-                return C_TooltipInfo.GetHyperlink(linkRef)
-            end)
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance = CachedTooltipBind(
+                itemID,
+                function()
+                    return C_TooltipInfo.GetHyperlink(linkRef)
+                end
+            )
         end
     end
 
@@ -833,6 +863,7 @@ local function ScanGuildBankSlot(items, tab, slot)
         isLockbox = isLockbox,
         isTeleport = isTeleport,
         isConjured = isConjured,
+        isKnownAppearance = isKnownAppearance,
         iconID = icon,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -864,14 +895,17 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
     local loc = ItemLocation:CreateFromBagAndSlot(container, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured =
-        false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance =
+        false, false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local cRef, sRef = container, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured = CachedTooltipBind(info.itemID, function()
-                return C_TooltipInfo.GetBagItem(cRef, sRef)
-            end)
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance = CachedTooltipBind(
+                info.itemID,
+                function()
+                    return C_TooltipInfo.GetBagItem(cRef, sRef)
+                end
+            )
         end
     end
 
@@ -895,6 +929,7 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
         isLockbox = isLockbox,
         isTeleport = isTeleport,
         isConjured = isConjured,
+        isKnownAppearance = isKnownAppearance,
         iconID = info.iconFileID,
         itemClassID = classID or -1,
         itemSubClassID = subClassID or -1,
@@ -1425,6 +1460,86 @@ local function PrepareClassificationContext(addon)
     addon._classifyCtx = ctx
 end
 
+-- True if a restock entry targets the current character (charbank/bags are
+-- per-character; warband/guild are shared so always "true" for the matching dest).
+local function RestockEntryTargetsMe(addon, e)
+    if e.dest == "charbank" or e.dest == "bags" then
+        local guid = addon.playerGUID
+        if e.chars then
+            for _, g in ipairs(e.chars) do
+                if g == guid then
+                    return true
+                end
+            end
+            return false
+        end
+        return e.char == guid
+    end
+    return true
+end
+
+-- The Restock floor target for `itemID` in destination `dest` (the bank type the
+-- item sits in, or "bags"), or 0 if no matching floor. Restock is a floor: up to
+-- `target` of the item is protected from being moved/vendored; the surplus above it
+-- is free to follow Storage Rules. The running per-scan count lives in the classify
+-- context (ctx.restockUsed) so protection releases once the floor is met.
+function EmpireManager:RestockFloorTarget(itemID, dest)
+    if not itemID or not dest then
+        return 0
+    end
+    local list = self.db.global.restockList
+    if not list or #list == 0 then
+        return 0
+    end
+    local total = 0
+    for _, e in ipairs(list) do
+        if e.itemID == itemID and e.dest == dest and RestockEntryTargetsMe(self, e) then
+            total = total + (e.target or 0)
+        end
+    end
+    return total
+end
+
+-- Restock floor for an item, per-scan running tally. Quantity-aware, NO scan-time bag
+-- manipulation:
+--   remaining = target - used (units the floor still wants)
+--   remaining <= 0  : floor met -> route whole slot (false)
+--   qty <= remaining: whole slot is floor -> KEEP (true), consume qty
+--   qty >  remaining: slot STRADDLES -> keep `remaining` units, set
+--                     item._restockSurplus = qty - remaining, return false so the slot
+--                     routes; the surplus quantity is split off at ACTION time (mail/
+--                     deposit), never on scan. This keeps exactly the floor (e.g. 208)
+--                     and sends the rest, with no scan churn.
+local function RestockProtectWithinFloor(addon, item, dest)
+    local itemID = item.itemID
+    local target = addon:RestockFloorTarget(itemID, dest)
+    if target <= 0 then
+        return false
+    end
+    local ctx = addon._classifyCtx
+    local used = (ctx and ctx.restockUsed and ctx.restockUsed[dest] and ctx.restockUsed[dest][itemID]) or 0
+    local remaining = target - used
+    if remaining <= 0 then
+        return false -- floor already met by earlier slots: route this surplus slot
+    end
+    local qty = item.stackCount or 1
+    local function consume(n)
+        if ctx then
+            ctx.restockUsed = ctx.restockUsed or {}
+            ctx.restockUsed[dest] = ctx.restockUsed[dest] or {}
+            ctx.restockUsed[dest][itemID] = used + n
+        end
+    end
+    if qty <= remaining then
+        consume(qty)
+        return true -- entire slot is within the floor: keep it
+    end
+    -- Straddles: keep `remaining`, release the surplus (split at action time).
+    consume(remaining)
+    item._restockSurplus = qty - remaining
+    return false
+end
+
 -- Public entry point. Wraps the classification logic so a per-character
 -- "Skip all Storage Rules" opt-out (entry.ignoreStorageRules) can neutralize any
 -- storage-routing outcome in one place, no matter which inner rule produced it.
@@ -1488,6 +1603,15 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         return CAT_KEEP, "Keep List"
     end
 
+    -- Character Bags restock floor: keeps whole slots up to `floor` in bags (may
+    -- over-keep the straddling slot; never routes the floor away). Slots above the
+    -- floor route as surplus per the storage rules. See RESTOCK.md.
+    if not item.bankType then
+        if RestockProtectWithinFloor(self, item, "bags") then
+            return CAT_KEEP, "Restock floor (bags)"
+        end
+    end
+
     -- Teleport guard: trinkets/rings/cloaks with "Use: Teleport" effects are
     -- irreplaceable utility (Cloak of Coordination, Runed Signet of the Kirin
     -- Tor, Time-Lost Artifact). Wins over vendor whitelist and gear-vendor
@@ -1517,6 +1641,24 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     -- player should keep the token and open it. Keep in bags.
     if item.isEquipToken and item.itemClassID == 0 then
         return CAT_KEEP, "Equipment token (right-click to open)"
+    end
+
+    -- Learnable appearance (weapon enchant illusions, etc.): classed as a
+    -- Consumable (0/8 "Other") but really a right-click-to-learn cosmetic. The
+    -- tooltip carries the red "Already known" line once collected.
+    --   * Known + soulbound + sellable → VENDOR: can't be relearned or traded,
+    --     so a known duplicate is dead weight (mirrors "Mount already known").
+    --   * Not yet known → KEEP: the player should learn it, never route it to a
+    --     consumables banker or legacy-stash it.
+    -- Checked before the consumables subclass match below.
+    if item.itemClassID == 0 and item.itemSubClassID == 8 then
+        if item.isKnownAppearance then
+            if item.isBound and not item.isWarbound and item.sellPrice > 0 then
+                return CAT_VENDOR, "Illusion already known"
+            end
+        else
+            return CAT_KEEP, "Learnable appearance"
+        end
     end
 
     -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books)
@@ -1761,7 +1903,11 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         and item.expansionID < GetExpansionLevel()
         and (
             (item.itemClassID == 15 and (item.itemSubClassID == 0 or item.itemSubClassID == 4))
-            or (item.itemClassID == 0 and (item.itemSubClassID == 0 or item.itemSubClassID == 8) and not item.isWarbound)
+            or (
+                item.itemClassID == 0
+                and (item.itemSubClassID == 0 or item.itemSubClassID == 8)
+                and not item.isWarbound
+            )
         )
     then
         return CAT_STASH, "Move to Bank (Legacy item)", { destType = "charbank", profKey = "quest_old" }
@@ -1775,7 +1921,12 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     -- considered by the earlier ITEM_CATEGORY_MAP loop.
     if item.isBound and not item.isWarbound and not item.bankType and not itemCategory and item.itemClassID >= 0 then
         local matchSet = GetProfMatchSet(item)
-        if matchSet and item.itemClassID == 7 and item.isCraftingReagent == false and not profOverrideCache[item.itemID or 0] then
+        if
+            matchSet
+            and item.itemClassID == 7
+            and item.isCraftingReagent == false
+            and not profOverrideCache[item.itemID or 0]
+        then
             matchSet = nil
         end
         if matchSet then
@@ -1822,8 +1973,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         and (item.itemSubClassID == ITEM_SUBCLASS_COMPANION or item.itemSubClassID == ITEM_SUBCLASS_MOUNT)
         and self:IsKnownCollectible(item)
     then
-        local reason = (item.itemSubClassID == ITEM_SUBCLASS_MOUNT) and "Mount already known"
-            or "Pet already collected"
+        local reason = (item.itemSubClassID == ITEM_SUBCLASS_MOUNT) and "Mount already known" or "Pet already collected"
         return CAT_VENDOR, reason
     end
 
@@ -1861,7 +2011,12 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         -- Note: this is distinct from nil, which means the cache isn't populated yet;
         -- only `== false` is a definitive "not a reagent" signal.
         -- Itemid overrides bypass this guard - they're explicit reagent declarations.
-        if matchSet and item.itemClassID == 7 and item.isCraftingReagent == false and not profOverrideCache[item.itemID or 0] then
+        if
+            matchSet
+            and item.itemClassID == 7
+            and item.isCraftingReagent == false
+            and not profOverrideCache[item.itemID or 0]
+        then
             matchSet = nil
         end
         if matchSet then
@@ -1906,7 +2061,11 @@ function EmpireManager:_ClassifyItemInner(item, entry)
                                 eligible = true
                             end
                         end
-                        if eligible and IsAssignmentEligible(assignment, item) and HasCapacity(assignment, ruleIndex) then
+                        if
+                            eligible
+                            and IsAssignmentEligible(assignment, item)
+                            and HasCapacity(assignment, ruleIndex)
+                        then
                             return self:GetStorageRouting(assignment, entry, assignment.profession, ruleIndex, item)
                         end
                     -- Equipment (BoA): only match warbound (account-bound) gear
@@ -2273,7 +2432,16 @@ function EmpireManager:RunTriage()
     PrepareClassificationContext(self)
 
     for _, item in ipairs(bagItems) do
+        item._restockSurplus = nil -- reset per scan; set by the restock-floor rule
         local category, action, routing, blocked = self:ClassifyItem(item, entry)
+        -- routeCount = units this row actually moves. Whole stack normally; when a slot
+        -- straddles the restock floor, only the surplus above the floor (the floor stays
+        -- in bags). Display + mail/deposit read routeCount and split at action time.
+        if (category == CAT_ROUTE or category == CAT_STASH) and item._restockSurplus then
+            item.routeCount = item._restockSurplus
+        else
+            item.routeCount = nil
+        end
         results[#results + 1] = {
             item = item,
             category = category,
@@ -2439,6 +2607,16 @@ local function FindIntraBankDests(item, routing)
 end
 
 function EmpireManager:ClassifyBankItem(item, entry)
+    -- Restock floor protection (decision A): keep up to the floor in the bank it
+    -- pins the item to; surplus above the floor falls through to Storage Rules
+    -- (reorganize / take out / route as normal). Restock and Storage work together -
+    -- Restock guards the minimum, Storage governs everything above it.
+    if item.itemID and item.bankType then
+        if RestockProtectWithinFloor(self, item, item.bankType) then
+            return CAT_KEEP, "Restock floor", nil
+        end
+    end
+
     -- Keep own profession mats in character bank
     if item.bankType == "charbank" and entry.keepOwnProfMatsInBank then
         local matchSet = GetProfMatchSet(item)
@@ -2522,7 +2700,7 @@ function EmpireManager:RunTriageAsync(callback)
         return
     end
 
-    -- Cache hit: bags haven't changed since last scan, skip the work.
+    -- Cache hit: bags haven't changed since last scan, serve cached results.
     if not self._bagsDirty and self.triageResults then
         callback(self.triageResults)
         return
@@ -2538,7 +2716,15 @@ function EmpireManager:RunTriageAsync(callback)
         PrepareClassificationContext(addon)
         local results = {}
         for _, item in ipairs(bagItems) do
+            item._restockSurplus = nil -- reset per scan; set by the restock-floor rule
             local category, action, routing, blocked = addon:ClassifyItem(item, entry)
+            -- routeCount = surplus above a straddled restock floor (floor stays in bags),
+            -- else nil = whole stack. Display + mail/deposit split at action time.
+            if (category == CAT_ROUTE or category == CAT_STASH) and item._restockSurplus then
+                item.routeCount = item._restockSurplus
+            else
+                item.routeCount = nil
+            end
             results[#results + 1] = {
                 item = item,
                 category = category,

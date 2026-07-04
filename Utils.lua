@@ -760,6 +760,91 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [30817] = { "cooking" },                   -- Simple Flour
 }
 
+-- RESTOCK_ITEMS: curated reagent itemIDs per expansion -> profession, used by the
+-- Bank Restock picker (docs/RESTOCK.md). itemIDs only; name/icon/tier resolved on
+-- demand via C_Item.GetItemInfo + C_TradeSkillUI.GetItemReagentQualityByItemInfo.
+--
+-- v1 = base raw mats only (Trade Goods subclasses 7/1,4,5,6,7,8,9,12,16). Optional
+-- (7/18) and Finishing (7/19) reagents and the 7/11 "Other" bucket are excluded for
+-- now (add later if needed). Shared subclasses are DUPLICATED under each profession
+-- (herbs -> herbalism/alchemy/inscription, metal -> mining/blacksmithing) so the
+-- picker's profession filter is a direct lookup with no live resolution.
+--
+-- Generated via `/em gendata` at the AH (Reagents -> <category>, "Current Expansion
+-- Only"). May contain a few old-expansion strays (low itemIDs) pending in-game
+-- curation - harmless, they just show as extra picker rows.
+EmpireManager.RESTOCK_ITEMS = {
+    [11] = { -- Midnight
+        -- 7/4 Gems
+        jewelcrafting = {
+            240972, 240973, 240974, 240975, 242553, 242554, 242606, 242607, 242608, 242610,
+            242611, 242612, 242613, 242620, 242621, 242712, 242720, 242721, 242722, 242723,
+            242724, 242725, 242726, 242727, 242786, 242787, 242788, 242789, 253307,
+        },
+        -- 7/5 Cloth
+        tailoring = {
+            2321, 8343, 14341, 38426, 236963, 236965, 237015, 237016, 237017, 237018,
+            239198, 239200, 239201, 239202, 239700, 239701, 239702, 239703,
+        },
+        -- 7/6 Leather (shared: leatherworking + skinning)
+        leatherworking = {
+            238511, 238512, 238513, 238514, 238518, 238519, 238520, 238521, 238522, 238523,
+            238525, 238528, 238529, 238530, 244631, 244632, 244633, 244634, 244635, 244636,
+            244637, 244638,
+        },
+        skinning = {
+            238511, 238512, 238513, 238514, 238518, 238519, 238520, 238521, 238522, 238523,
+            238525, 238528, 238529, 238530, 244631, 244632, 244633, 244634, 244635, 244636,
+            244637, 244638,
+        },
+        -- 7/7 Metal & Stone (shared: mining + blacksmithing)
+        mining = {
+            18567, 180733, 237359, 237361, 237362, 237363, 237364, 237365, 237366, 238197,
+            238198, 238202, 238203, 238204, 238205, 243060,
+        },
+        blacksmithing = {
+            18567, 180733, 237359, 237361, 237362, 237363, 237364, 237365, 237366, 238197,
+            238198, 238202, 238203, 238204, 238205, 243060,
+        },
+        -- 7/8 Cooking
+        cooking = {
+            17194, 238365, 238366, 238367, 238368, 238369, 238370, 238371, 238372, 238373,
+            238374, 238375, 238376, 238377, 238378, 238379, 238380, 238381, 238382, 238383,
+            238384, 242639, 242640, 242641, 242642, 242643, 242644, 242645, 242646, 242647,
+            253403, 259894,
+        },
+        -- 7/9 Herb (shared: herbalism + alchemy + inscription)
+        herbalism = {
+            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
+            236779, 236780,
+        },
+        alchemy = {
+            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
+            236779, 236780,
+        },
+        -- 7/12 Enchanting
+        enchanting = { 243599, 243600, 243602, 243603, 243605, 243606 },
+        -- 7/9 Herb + 7/16 Pigments/Inks (inscription gets both)
+        inscription = {
+            -- 7/9 herbs
+            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
+            236779, 236780,
+            -- 7/16 pigments/inks (includes some missives pending in-game curation)
+            245764, 245765, 245766, 245767, 245801, 245802, 245803, 245804, 245805, 245806,
+            245807, 245808, 245830, 245831, 245832, 245833, 245834, 245835, 245836, 245837,
+            245838, 245839, 245840, 245841, 245842, 245843, 245844, 245845, 245847, 245848,
+            245849, 245850, 245851, 245852, 245853, 245854, 245856, 245857, 245858, 245859,
+            245860, 245861, 245862, 245863, 245864, 245865, 245866, 245867, 245881, 245882,
+            251923,
+        },
+        -- 7/1 Parts (Midnight: Aetherlume + Evercore; low IDs are old-expansion strays)
+        engineering = {
+            4400, 39684, 40533, 52188, 90146, 243574, 243575, 243576, 243577, 243578,
+            243579, 243581, 243582,
+        },
+    },
+}
+
 -- Profession display: crafting, gathering, and secondary professions
 EmpireManager.PROF_DISPLAY = {
     -- Crafting professions
@@ -1256,7 +1341,7 @@ function EmpireManager:ClassColoredName(entry)
     local name = entry.name or "?"
     local display = name
     if color then
-        return string.format("|cff%02x%02x%02x%s|r", color.r * 255, color.g * 255, color.b * 255, display)
+        return color:WrapTextInColorCode(display)
     end
     return display
 end

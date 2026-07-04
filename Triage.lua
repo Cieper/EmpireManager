@@ -579,10 +579,13 @@ local function _PerformVendorlistAdd(itemID, itemName)
     end
     EmpireManager.db.global.vendorWhitelist[itemID] = itemName
     EmpireManager:Print(string.format("Whitelisted %s - will always be vendored.", itemName))
+    EmpireManager._bagsDirty = true -- force reclassification on next scan
     EmpireManager.bankTriageResults = nil
     if EmpireManager._triageActiveTab == "bags" then
-        EmpireManager:RefreshTriageDisplay()
+        EmpireManager._triageFingerprint = nil
+        EmpireManager:RefreshTriageDisplay(true)
     else
+        EmpireManager._bankTriageFingerprint = nil
         EmpireManager:RefreshBankTriageDisplay(true)
     end
     if EmpireManager.vendorlistFrame and EmpireManager.vendorlistFrame:IsShown() then
@@ -1539,8 +1542,29 @@ end
 -- Bags Tab: Refresh Display
 -------------------------------------------------------------------------------
 
+-- Refresh the bags tab of the Triage overlay if it is open. Used by
+-- restock-rule edits (add/save/delete/reorder) so a floor change reflects
+-- immediately. No-op when the overlay is hidden or on a different tab.
+function EmpireManager:RefreshTriageIfOpen()
+    if not (self.triageFrame and self.triageFrame:IsShown()) then
+        return
+    end
+    if self._triageActiveTab ~= "bags" then
+        return
+    end
+    self:RefreshTriageDisplay(true)
+end
+
 function EmpireManager:RefreshTriageDisplay(forceRescan, silent)
     if self._triageBulkOperating then
+        return
+    end
+    -- Consolidation in progress: skip ALL refreshes (silent AND non-silent). Each
+    -- merge fires BAG_UPDATE_DELAYED; the 0.3s debounce sends EM_TRIAGE_REFRESH ->
+    -- silent RefreshTriageDisplay, but on first open `_triageBagsBuilt` is false
+    -- so the silent path falls through to the non-silent branch and starts a
+    -- SECOND consolidation racing against the first, corrupting bags.
+    if self._triageConsolidating then
         return
     end
     local f = self.triageFrame
@@ -1602,17 +1626,35 @@ function EmpireManager:RefreshTriageDisplay(forceRescan, silent)
     f.SummaryBar.SummaryLabel:Show()
     f.SummaryBar.SummaryLabel:SetText("|cffffffffScanning bags...|r")
 
-    self:RunTriageAsync(function(results)
-        self._triageScanning = false
-        self:_SetAllTriageActionsLocked(false)
+    -- Pre-scan step: consolidate partial stacks of every bags-floor itemID for
+    -- this character so the classifier and display see one clean stack instead
+    -- of N partials. User-initiated path only (not silent auto-refresh). No-op
+    -- when nothing to merge, so cheap to always run.
+    self._triageConsolidating = true
+    self:ConsolidateBagsFloors(function()
+        self._triageConsolidating = false
         if not self.triageFrame or not self.triageFrame:IsShown() then
+            self._triageScanning = false
+            self:_SetAllTriageActionsLocked(false)
             return
         end
         if self._triageActiveTab ~= "bags" then
+            self._triageScanning = false
+            self:_SetAllTriageActionsLocked(false)
             return
         end
+        self:RunTriageAsync(function(results)
+            self._triageScanning = false
+            self:_SetAllTriageActionsLocked(false)
+            if not self.triageFrame or not self.triageFrame:IsShown() then
+                return
+            end
+            if self._triageActiveTab ~= "bags" then
+                return
+            end
 
-        self:_BuildBagTriageUI(results, savedOffset)
+            self:_BuildBagTriageUI(results, savedOffset)
+        end)
     end)
 end
 
@@ -1976,7 +2018,10 @@ function EmpireManager:BuildTriageRow(content, y, result, TrackRow, opts)
     nameFs:SetWidth(contentW * 0.5 - 12)
     local qc = ITEM_QUALITY_COLORS[result.item.quality]
     local nr, ng, nb = qc and qc.r or catInfo.r, qc and qc.g or catInfo.g, qc and qc.b or catInfo.b
-    local qty = result.item.stackCount > 1 and (" x" .. result.item.stackCount) or ""
+    -- Show the moved count: routeCount (surplus above a restock floor) when set,
+    -- otherwise the full stack.
+    local shownCount = result.item.routeCount or result.item.stackCount
+    local qty = shownCount > 1 and (" x" .. shownCount) or ""
     local icon = result.item.iconID or (result.item.itemID and C_Item.GetItemIconByID(result.item.itemID))
     local iconStr = icon and string.format("|T%s:14:14:0:0:64:64:5:59:5:59|t ", icon) or ""
     nameFs:SetText(
@@ -2909,7 +2954,7 @@ function EmpireManager:ShowVendorConfirmDialog(autoItems, confirmItems)
         local text = "  " .. (item.itemName or "?") .. qty
         local qc = ITEM_QUALITY_COLORS[item.quality]
         if qc then
-            text = string.format("|cff%02x%02x%02x%s|r", qc.r * 255, qc.g * 255, qc.b * 255, text)
+            text = qc.hex .. text .. "|r"
         end
         fs:SetText(text)
         btn:SetScript("OnEnter", function(self)
@@ -3235,6 +3280,10 @@ end
 -- Mail Routable Items (groups by recipient, sends one mail per destination)
 -------------------------------------------------------------------------------
 
+-- The restock floor is protected by classification (RestockProtectWithinFloor keeps
+-- whole slots up to the floor); routable slots are entirely surplus, so mailing moves
+-- whole stacks - no per-slot splitting here.
+
 function EmpireManager:MailTriageRoutable()
     if not self:IsMailboxOpen() then
         self:ChatMsg("Open a mailbox first to mail routable items", true)
@@ -3298,7 +3347,14 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         self:_SetAllTriageActionsLocked(false)
         if totalSent > 0 then
             self:ChatMsg(string.format("|cffffcc00[Triage]|r Mailed %d items", totalSent))
-            C_Timer.After(0, function()
+            -- Drop the cache and rescan after the last send's bag update settles, so
+            -- the list reflects post-mail bags (not the stale pre-mail rows).
+            self._bagsDirty = true
+            self.triageResults = nil
+            C_Timer.After(0.5, function()
+                self._triageBulkOperating = false -- ensure the refresh isn't bailed
+                self._bagsDirty = true
+                self.triageResults = nil
                 self:RefreshTriageDisplay(true)
             end)
         end
@@ -3363,7 +3419,7 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         or recipient
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[recipientClass]
     local displayNameColored = cc
-            and string.format("|cff%02x%02x%02x%s|r", cc.r * 255, cc.g * 255, cc.b * 255, displayName)
+            and cc:WrapTextInColorCode(displayName)
         or ("|cffffffff" .. displayName .. "|r")
 
     -- Clear previous content
@@ -3414,7 +3470,10 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
 
     -- Item list
     for _, item in ipairs(items) do
-        local qty = item.stackCount and item.stackCount > 1 and (" x" .. item.stackCount) or ""
+        -- Show the amount actually mailed: routeCount (surplus above a restock floor)
+        -- when set, else the whole stack.
+        local shownCount = item.routeCount or item.stackCount or 0
+        local qty = shownCount > 1 and (" x" .. shownCount) or ""
         local btn = Track(CreateFrame("Button", nil, content))
         btn:SetSize(content:GetWidth() - 16, 16)
         btn:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
@@ -3424,7 +3483,7 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
         local text = "  " .. (item.itemName or "?") .. qty
         local qc = ITEM_QUALITY_COLORS[item.quality]
         if qc then
-            text = string.format("|cff%02x%02x%02x%s|r", qc.r * 255, qc.g * 255, qc.b * 255, text)
+            text = qc.hex .. text .. "|r"
         end
         fs:SetText(text)
         btn:SetScript("OnEnter", function(self)
@@ -3519,6 +3578,137 @@ function EmpireManager:ShowMailPerCharDialog(byRecipient, recipients, index, tot
 end
 
 -------------------------------------------------------------------------------
+-- Restock floor mail prep: consolidate -> split off the floor -> callback.
+-- For each floored itemID: merge all its bag stacks (cross-bag; a reagent-bag stack
+-- can only merge onto another reagent-bag stack), then split off exactly `floor` into
+-- its own stack. Result: [floor stack] + clean full surplus stacks. One settled move
+-- at a time (waits BAG_UPDATE_DELAYED), so no split race and no per-scan churn.
+-------------------------------------------------------------------------------
+function EmpireManager:PrepMailFloors(flooredIDs, onDone)
+    local ids = {}
+    for id in pairs(flooredIDs) do
+        ids[#ids + 1] = id
+    end
+
+    -- All bag stacks of an itemID: { {bag, slot, count}, ... }, skipping locked.
+    local function stacksOf(id)
+        local out = {}
+        for bag = 0, 5 do
+            local n = C_Container.GetContainerNumSlots(bag) or 0
+            for slot = 1, n do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if info and info.itemID == id and not info.isLocked then
+                    out[#out + 1] = { bag = bag, slot = slot, count = info.stackCount or 1 }
+                end
+            end
+        end
+        return out
+    end
+
+    -- Run `fn` after the next BAG_UPDATE_DELAYED settles (fallback timer if it doesn't).
+    local function afterSettle(fn)
+        local listener = self:AcquireListener()
+        local fired = false
+        local function go()
+            if fired then
+                return
+            end
+            fired = true
+            listener:UnregisterAllEvents()
+            self:ReleaseListener(listener)
+            fn()
+        end
+        listener:SetScript("OnEvent", function()
+            listener:UnregisterAllEvents()
+            C_Timer.After(0.05, go)
+        end)
+        listener:RegisterEvent("BAG_UPDATE_DELAYED")
+        C_Timer.NewTimer(1.0, go)
+    end
+
+    local idIdx = 0
+    local nextId -- fwd
+
+    -- Consolidation lives on EmpireManager:ConsolidateBagStacksFor (Restock.lua),
+    -- shared with the pre-Triage-scan step so both paths use identical logic.
+
+    -- Split off exactly `floor` of `id` into its own stack (kept), leaving surplus as
+    -- whole stacks. Walk consolidated stacks; the one crossing the floor is split.
+    -- Fast path: if a stack already equals the floor exactly, it IS the floor - no
+    -- carve needed. Consolidate preserves such stacks (skips them from the merge
+    -- pool), so this is the common case after a settled prep pass.
+    local function carveFloor(id, floor, after)
+        for _, s in ipairs(stacksOf(id)) do
+            if s.count == floor then
+                after()
+                return
+            end
+        end
+        local running = 0
+        for _, s in ipairs(stacksOf(id)) do
+            if running + s.count == floor then
+                after() -- already aligned
+                return
+            elseif running + s.count > floor then
+                local keep = floor - running
+                -- free slot: source bag first, then any bag (reagent stays reagent).
+                local order = { s.bag }
+                for _, b in ipairs({ 0, 1, 2, 3, 4, 5 }) do
+                    if b ~= s.bag then
+                        order[#order + 1] = b
+                    end
+                end
+                local fb, fs
+                for _, bag in ipairs(order) do
+                    local n = C_Container.GetContainerNumSlots(bag) or 0
+                    for slot = 1, n do
+                        if not C_Container.GetContainerItemInfo(bag, slot) then
+                            fb, fs = bag, slot
+                            break
+                        end
+                    end
+                    if fb then
+                        break
+                    end
+                end
+                if keep > 0 and fb then
+                    -- Split the KEEP portion into a fresh slot so the floor is its own
+                    -- clean stack; the surplus stays where it was.
+                    ClearCursor()
+                    C_Container.SplitContainerItem(s.bag, s.slot, keep)
+                    C_Container.PickupContainerItem(fb, fs)
+                    ClearCursor()
+                    afterSettle(after)
+                    return
+                end
+                after()
+                return
+            end
+            running = running + s.count
+        end
+        after() -- floor >= total: nothing to carve
+    end
+
+    nextId = function()
+        idIdx = idIdx + 1
+        local id = ids[idIdx]
+        if not id then
+            onDone()
+            return
+        end
+        local floor = self:RestockFloorTarget(id, "bags")
+        if floor <= 0 then
+            nextId()
+            return
+        end
+        self:ConsolidateBagStacksFor(id, function()
+            carveFloor(id, floor, nextId)
+        end)
+    end
+    nextId()
+end
+
+-------------------------------------------------------------------------------
 -- Send mail for a single recipient (batches if > ATTACHMENTS_MAX_SEND)
 -------------------------------------------------------------------------------
 
@@ -3530,6 +3720,44 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
         end
         return
     end
+
+    -- Restock floor prep (once per send): for each floored item that has a surplus,
+    -- CONSOLIDATE its stacks, then SPLIT off exactly the floor to keep, so what remains
+    -- to mail is clean whole stacks and the floor is one stack left behind. Done as a
+    -- settled step BEFORE mailing (SplitContainerItem is async; doing it inline in the
+    -- attach loop races and mails the whole stack). After prep we re-run and mail whole.
+    if not self._mailFloorPrepDone then
+        -- Which itemIDs here straddle their floor (surplus present)?
+        local floored = {}
+        for _, item in ipairs(items) do
+            if item.routeCount and item.itemID then
+                floored[item.itemID] = true
+            end
+        end
+        if next(floored) then
+            self._mailFloorPrepDone = true
+            self:PrepMailFloors(floored, function()
+                -- Re-run after prep. Bags now: [floor stack] + [clean surplus stacks].
+                -- Keep _mailFloorPrepDone = true so the re-run SKIPS prep and goes
+                -- straight to send (setting it false here re-entered prep -> endless
+                -- consolidate/split loop). The floor is now a Keep stack; only surplus
+                -- routes, mailed whole. The flag is reset AFTER this recipient sends.
+                self:RunTriage()
+                local fresh = {}
+                for _, r in ipairs(self.triageResults) do
+                    if r.category == CAT_ROUTE then
+                        local rc = r.action and r.action:match("^Mail to ([^<%(]+)")
+                        if rc and strtrim(rc) == recipient then
+                            fresh[#fresh + 1] = r.item
+                        end
+                    end
+                end
+                self:ExecuteMailForRecipient(recipient, fresh, onComplete)
+            end)
+            return
+        end
+    end
+    self._mailFloorPrepDone = nil -- reset for the next recipient/run
 
     -- Filter to only mailable (unlocked, still present) items
     local mailable = {}
@@ -3598,7 +3826,17 @@ function EmpireManager:ExecuteMailForRecipient(recipient, items, onComplete)
             local loc = ItemLocation:CreateFromBagAndSlot(item.bag, item.slot)
             if loc and loc:IsValid() and C_Item.DoesItemExist(loc) and not C_Item.IsLocked(loc) then
                 ClearCursor()
-                C_Container.PickupContainerItem(item.bag, item.slot)
+                -- Honor routeCount when a restock floor straddler survived PrepMailFloors
+                -- (scan order can re-flag the surplus slot as a straddler even after
+                -- carve). Split off exactly the surplus, else whole-stack pickup.
+                local sInfo = C_Container.GetContainerItemInfo(item.bag, item.slot)
+                local have = sInfo and sInfo.stackCount or 0
+                local send = item.routeCount or have
+                if send > 0 and send < have then
+                    C_Container.SplitContainerItem(item.bag, item.slot, send)
+                else
+                    C_Container.PickupContainerItem(item.bag, item.slot)
+                end
                 if CursorHasItem() then
                     ClickSendMailItemButton()
                     if CursorHasItem() then
@@ -4006,6 +4244,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                     itemName = r.item.itemName or "?",
                     itemLink = r.item.itemLink,
                     routing = r.routing,
+                    routeCount = r.item.routeCount, -- surplus above a restock floor, or nil
                 }
                 movesByType[dType][#movesByType[dType] + 1] = move
                 attemptedMoves[#attemptedMoves + 1] = move
@@ -4185,8 +4424,17 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         for _, destAddr in ipairs(candidates) do
             local destSlot = FindDestSlot(ctx, destAddr, move.itemID, allocated)
             if destSlot then
-                -- Execute the move: pick up from bag, place in bank
-                C_Container.PickupContainerItem(move.srcBag, move.srcSlot)
+                -- Execute the move: pick up from bag, place in bank. A restock-floor
+                -- straddling slot carries routeCount = surplus above the floor; split
+                -- off exactly that many (leave the floor in bags), else move the whole.
+                local sInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
+                local have = sInfo and sInfo.stackCount or 0
+                local send = move.routeCount or have
+                if send > 0 and send < have then
+                    C_Container.SplitContainerItem(move.srcBag, move.srcSlot, send)
+                else
+                    C_Container.PickupContainerItem(move.srcBag, move.srcSlot)
+                end
                 ctx.PickupItem(destAddr, destSlot)
                 ClearCursor()
                 if not allocated[destAddr] then
@@ -4427,6 +4675,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                         itemID = r.item.itemID,
                         itemName = r.item.itemName or "?",
                         routing = r.routing,
+                        routeCount = r.item.routeCount, -- surplus above a restock floor, or nil
                     }
                 end
             end
@@ -4696,8 +4945,16 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                                 tabWasTargeted = true
                                 local destSlot = FindGuildSlot(emptySlots, filledSlots, usedSlots, move.itemID)
                                 if destSlot then
-                                    -- Execute the move: PickupGuildBankItem takes tab param directly
-                                    C_Container.PickupContainerItem(move.srcBag, move.srcSlot)
+                                    -- Execute the move: PickupGuildBankItem takes tab param directly.
+                                    -- Restock straddle: split off routeCount (surplus), else whole.
+                                    local gInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
+                                    local gHave = gInfo and gInfo.stackCount or 0
+                                    local gSend = move.routeCount or gHave
+                                    if gSend > 0 and gSend < gHave then
+                                        C_Container.SplitContainerItem(move.srcBag, move.srcSlot, gSend)
+                                    else
+                                        C_Container.PickupContainerItem(move.srcBag, move.srcSlot)
+                                    end
                                     PickupGuildBankItem(tab, destSlot)
                                     ClearCursor()
                                     -- Save move to verify after events
@@ -6604,16 +6861,20 @@ end
 
 do
     local itemInputBoxes = {}
-    local origInsertLink = ChatFrameUtil.InsertLink
-    ChatFrameUtil.InsertLink = function(link, ...)
+    -- hooksecurefunc avoids tainting ChatFrameUtil (which would propagate into
+    -- secure Blizzard code like PopOutChat that compares secret-number accessIDs).
+    -- The original InsertLink returns false when no chat box is active (ACTIVE_CHAT_EDIT_BOX
+    -- is nil while our plain EditBox has focus), so the link is not inserted into chat
+    -- and our hook below is the only handler that fires.
+    hooksecurefunc(ChatFrameUtil, "InsertLink", function(link)
+        if not link then return end
         for _, box in ipairs(itemInputBoxes) do
             if box:HasFocus() then
-                box:SetText(link or "")
-                return true
+                box:SetText(link)
+                return
             end
         end
-        return origInsertLink(link, ...)
-    end
+    end)
 
     function EmpireManager:SetupItemInputBox(box)
         itemInputBoxes[#itemInputBoxes + 1] = box
@@ -6809,7 +7070,7 @@ function EmpireManager:RefreshKeeplistDisplay()
             nameFs:SetWidth(row:GetWidth() - 30)
             nameFs:SetJustifyH("LEFT")
             nameFs:SetText(
-                string.format("%s|cff%02x%02x%02x%s|r", iconStr, qc.r * 255, qc.g * 255, qc.b * 255, entry.name)
+                iconStr .. qc.hex .. entry.name .. "|r"
             )
 
             row:SetScript("OnEnter", function(self)
@@ -6968,7 +7229,7 @@ function EmpireManager:RefreshVendorlistDisplay()
             nameFs:SetWidth(row:GetWidth() - 30)
             nameFs:SetJustifyH("LEFT")
             nameFs:SetText(
-                string.format("%s|cff%02x%02x%02x%s|r", iconStr, qc.r * 255, qc.g * 255, qc.b * 255, entry.name)
+                iconStr .. qc.hex .. entry.name .. "|r"
             )
 
             row:SetScript("OnEnter", function(self)
@@ -6997,10 +7258,12 @@ function EmpireManager:RefreshVendorlistDisplay()
                     popup.data = {
                         onConfirm = function()
                             wl[entry.id] = nil
+                            self._bagsDirty = true -- force reclassification on next scan
+                            self.bankTriageResults = nil
                             self:ChatMsg(string.format("Removed %s from Vendor Whitelist.", entry.name), true)
                             self:RefreshVendorlistDisplay()
                             if self.triageFrame and self.triageFrame:IsShown() then
-                                self:RefreshTriageDisplay()
+                                self:RefreshTriageDisplay(true)
                             end
                         end,
                     }

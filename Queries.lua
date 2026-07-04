@@ -63,7 +63,7 @@ function EmpireManager:FilterRegistry(filterState)
             pass = false
         end
 
-        -- Search filter: space-separated tokens, AND logic across name/realm/guild/note/level/class/professions
+        -- Search filter: space-separated tokens, AND logic across name/realm/guild/note/level/class/race/faction/professions
         if pass and state.searchText ~= "" then
             local haystack = {}
             if entry.name then
@@ -87,6 +87,16 @@ function EmpireManager:FilterRegistry(filterState)
             local className = (self.CLASS_NAMES and self.CLASS_NAMES[entry.class]) or ""
             if className ~= "" then
                 haystack[#haystack + 1] = className:lower()
+            end
+            if entry.faction then
+                haystack[#haystack + 1] = entry.faction:lower()
+            end
+            if entry.race then
+                haystack[#haystack + 1] = entry.race:lower()
+                local raceName = (self.RACE_NAMES and self.RACE_NAMES[entry.race]) or ""
+                if raceName ~= "" then
+                    haystack[#haystack + 1] = raceName:lower()
+                end
             end
             if entry.professions then
                 for _, p in ipairs(entry.professions) do
