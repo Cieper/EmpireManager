@@ -1127,6 +1127,7 @@ function EmpireManager:UpdateEscBehavior()
         "EmpireManagerWizardFrame",
         "EmpireManagerRemapDialog",
         "EmpireManagerIOFrame",
+        "EmpireManagerRestockConfirmDialog",
     }
     local enabled = self.db.global.options.escToClose
     if enabled then
@@ -1344,8 +1345,8 @@ function EmpireManager:_GenRestockData(sub)
                 complete and "" or "  |cffff4444(PARTIAL: results not fully loaded)|r"
             ),
             "-- Accumulates across /em gendata runs. /em gendata reset to clear.",
-            "-- Paste each block into RESTOCK_ITEMS[<expansionID>][<professionKey>].",
-            "-- Grouped by expansionID, then Trade Goods subclass; map each subclass to a profession.",
+            "-- Paste each block into RESTOCK_ITEMS[<expansionID>]. The picker categorizes by",
+            "-- subclass at render time (GetItemInfoInstant); no per-profession bucketing needed.",
             "-- (TWW = exp 10, Midnight = exp 11. exp -1 = uncached/unknown.)",
         }
         for _, e in ipairs(expKeys) do
@@ -1641,6 +1642,22 @@ function EmpireManager:BAG_UPDATE_DELAYED()
     -- BAG_UPDATE_DELAYED event (already coalesced by the client).
     if self.bankIsOpen then
         self:RefreshBankCapacity()
+    end
+    -- Also re-snapshot the per-item counts that feed the Restock tab's Fill
+    -- column, and refresh the tab. Covers manual drag-out from warband/char
+    -- bank and Triage Take Out: the bank stayed open, only bags changed, so
+    -- the ledger was stale until the bank got closed and reopened.
+    -- Guild bank is deliberately skipped here: SnapshotGuildBank does a full
+    -- multi-tab query with server round-trips (~300ms + QueryGuildBankTab per
+    -- tab), too expensive to fire on every BAG_UPDATE_DELAYED. Guild-bank
+    -- restock deposits already re-snapshot in ExecuteRestockPlan's completion
+    -- callback; manual guild-bank withdrawals stay stale until close/reopen.
+    if self.bankIsOpen then
+        self:SnapshotBankItemCounts()
+        self:SnapshotBagItemCounts()
+        if self.RefreshRestockTab then
+            self:RefreshRestockTab()
+        end
     end
 end
 

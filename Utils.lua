@@ -720,8 +720,8 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [241138] = { "jewelcrafting" },            -- Harandar Peridot Prism (variant)
     [251665] = { "tailoring" },                -- Silverleaf Thread
     [251691] = { "tailoring" },                -- Embroidery Floss
-    [251283] = { "blacksmithing" },            -- Tormented Tantalum
-    [251285] = { "blacksmithing" },            -- Petrified Root
+    [251283] = { "blacksmithing", "inscription", "engineering", "alchemy", "tailoring", "leatherworking", "jewelcrafting" }, -- Tormented Tantalum (cross-profession Midnight reagent)
+    [251285] = { "alchemy", "leatherworking", "enchanting", "blacksmithing", "jewelcrafting", "tailoring", "cooking" }, -- Petrified Root (cross-profession Midnight reagent)
     [237505] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Moxie (universal Midnight crafting reagent)
     -- Note: Soul Cipher (245766), Codified Azeroot (245764, 245765), Thalassian Songwater (245882),
     -- pigments, inks, and Darkmoon cards are all classID 7 / subClassID 16 (Inscription)
@@ -760,90 +760,121 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [30817] = { "cooking" },                   -- Simple Flour
 }
 
--- RESTOCK_ITEMS: curated reagent itemIDs per expansion -> profession, used by the
--- Bank Restock picker (docs/RESTOCK.md). itemIDs only; name/icon/tier resolved on
--- demand via C_Item.GetItemInfo + C_TradeSkillUI.GetItemReagentQualityByItemInfo.
+-- RESTOCK_ITEMS: curated reagent itemIDs per expansion, used as the source pool by
+-- the Bank Restock picker (docs/RESTOCK.md). itemIDs only; name/icon/tier resolved
+-- on demand via C_Item.GetItemInfo + C_TradeSkillUI.GetItemReagentQualityByItemInfo.
 --
--- v1 = base raw mats only (Trade Goods subclasses 7/1,4,5,6,7,8,9,12,16). Optional
--- (7/18) and Finishing (7/19) reagents and the 7/11 "Other" bucket are excluded for
--- now (add later if needed). Shared subclasses are DUPLICATED under each profession
--- (herbs -> herbalism/alchemy/inscription, metal -> mining/blacksmithing) so the
--- picker's profession filter is a direct lookup with no live resolution.
+-- Flat list per expansion. The picker categorizes each itemID at render time via
+-- GetItemInfoInstant (classID/subClassID -> AH_SECTIONS label), so no per-profession
+-- bucketing or duplication is needed here. Subclass comments below are for reader
+-- orientation only; they are not part of the schema.
 --
 -- Generated via `/em gendata` at the AH (Reagents -> <category>, "Current Expansion
 -- Only"). May contain a few old-expansion strays (low itemIDs) pending in-game
--- curation - harmless, they just show as extra picker rows.
+-- curation - harmless; the picker's Expansion filter uses GetItemInfo's expansionID
+-- return so strays surface only under "All Expansions".
 EmpireManager.RESTOCK_ITEMS = {
     [11] = { -- Midnight
-        -- 7/4 Gems
-        jewelcrafting = {
-            240972, 240973, 240974, 240975, 242553, 242554, 242606, 242607, 242608, 242610,
-            242611, 242612, 242613, 242620, 242621, 242712, 242720, 242721, 242722, 242723,
-            242724, 242725, 242726, 242727, 242786, 242787, 242788, 242789, 253307,
-        },
+        -- 7/1 Parts (Aetherlume + Evercore; low IDs are old-expansion strays)
+        4400, 39684, 40533, 52188, 90146,
+        243574, 243575, 243576, 243577, 243578, 243579, 243581, 243582,
+        -- 7/4 Gems (Jewelcrafting)
+        240972, 240973, 240974, 240975, 242553, 242554, 242606, 242607, 242608, 242610,
+        242611, 242612, 242613, 242620, 242621, 242712, 242720, 242721, 242722, 242723,
+        242724, 242725, 242726, 242727, 242786, 242787, 242788, 242789, 253307,
         -- 7/5 Cloth
-        tailoring = {
-            2321, 8343, 14341, 38426, 236963, 236965, 237015, 237016, 237017, 237018,
-            239198, 239200, 239201, 239202, 239700, 239701, 239702, 239703,
-        },
-        -- 7/6 Leather (shared: leatherworking + skinning)
-        leatherworking = {
-            238511, 238512, 238513, 238514, 238518, 238519, 238520, 238521, 238522, 238523,
-            238525, 238528, 238529, 238530, 244631, 244632, 244633, 244634, 244635, 244636,
-            244637, 244638,
-        },
-        skinning = {
-            238511, 238512, 238513, 238514, 238518, 238519, 238520, 238521, 238522, 238523,
-            238525, 238528, 238529, 238530, 244631, 244632, 244633, 244634, 244635, 244636,
-            244637, 244638,
-        },
-        -- 7/7 Metal & Stone (shared: mining + blacksmithing)
-        mining = {
-            18567, 180733, 237359, 237361, 237362, 237363, 237364, 237365, 237366, 238197,
-            238198, 238202, 238203, 238204, 238205, 243060,
-        },
-        blacksmithing = {
-            18567, 180733, 237359, 237361, 237362, 237363, 237364, 237365, 237366, 238197,
-            238198, 238202, 238203, 238204, 238205, 243060,
-        },
+        2321, 8343, 14341, 38426, 236963, 236965, 237015, 237016, 237017, 237018,
+        239198, 239200, 239201, 239202, 239700, 239701, 239702, 239703,
+        -- 7/6 Leather
+        238511, 238512, 238513, 238514, 238518, 238519, 238520, 238521, 238522, 238523,
+        238525, 238528, 238529, 238530, 244631, 244632, 244633, 244634, 244635, 244636,
+        244637, 244638,
+        -- 7/7 Metal & Stone
+        18567, 180733, 237359, 237361, 237362, 237363, 237364, 237365, 237366, 238197,
+        238198, 238202, 238203, 238204, 238205, 243060,
         -- 7/8 Cooking
-        cooking = {
-            17194, 238365, 238366, 238367, 238368, 238369, 238370, 238371, 238372, 238373,
-            238374, 238375, 238376, 238377, 238378, 238379, 238380, 238381, 238382, 238383,
-            238384, 242639, 242640, 242641, 242642, 242643, 242644, 242645, 242646, 242647,
-            253403, 259894,
-        },
-        -- 7/9 Herb (shared: herbalism + alchemy + inscription)
-        herbalism = {
-            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
-            236779, 236780,
-        },
-        alchemy = {
-            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
-            236779, 236780,
-        },
+        17194, 238365, 238366, 238367, 238368, 238369, 238370, 238371, 238372, 238373,
+        238374, 238375, 238376, 238377, 238378, 238379, 238380, 238381, 238382, 238383,
+        238384, 242639, 242640, 242641, 242642, 242643, 242644, 242645, 242646, 242647,
+        253403, 259894,
+        -- 7/9 Herb
+        13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
+        236779, 236780,
+        -- 7/11 Other (cross-profession). 256559 (Galactic Combatant's Heraldry) is a
+        -- PvP token, not a reagent - excluded.
+        2325, 2604, 2605, 3371, 4341, 4342, 4470, 6260, 10290, 11291,
+        30817, 38682, 39354, 177062, 183955, 236949, 236950, 236951, 236952, 240990,
+        240991, 241280, 241281, 241282, 241283, 251283, 251285, 251665, 251691, 253302,
+        253303, 260947, 262625, 262628, 262639, 262642, 262643, 262647, 262648, 262655,
+        262656,
         -- 7/12 Enchanting
-        enchanting = { 243599, 243600, 243602, 243603, 243605, 243606 },
-        -- 7/9 Herb + 7/16 Pigments/Inks (inscription gets both)
-        inscription = {
-            -- 7/9 herbs
-            13468, 236761, 236767, 236770, 236771, 236774, 236775, 236776, 236777, 236778,
-            236779, 236780,
-            -- 7/16 pigments/inks (includes some missives pending in-game curation)
-            245764, 245765, 245766, 245767, 245801, 245802, 245803, 245804, 245805, 245806,
-            245807, 245808, 245830, 245831, 245832, 245833, 245834, 245835, 245836, 245837,
-            245838, 245839, 245840, 245841, 245842, 245843, 245844, 245845, 245847, 245848,
-            245849, 245850, 245851, 245852, 245853, 245854, 245856, 245857, 245858, 245859,
-            245860, 245861, 245862, 245863, 245864, 245865, 245866, 245867, 245881, 245882,
-            251923,
-        },
-        -- 7/1 Parts (Midnight: Aetherlume + Evercore; low IDs are old-expansion strays)
-        engineering = {
-            4400, 39684, 40533, 52188, 90146, 243574, 243575, 243576, 243577, 243578,
-            243579, 243581, 243582,
-        },
+        243599, 243600, 243602, 243603, 243605, 243606,
+        -- 7/16 Inscription (pigments, inks, missives)
+        245764, 245765, 245766, 245767, 245801, 245802, 245803, 245804, 245805, 245806,
+        245807, 245808, 245830, 245831, 245832, 245833, 245834, 245835, 245836, 245837,
+        245838, 245839, 245840, 245841, 245842, 245843, 245844, 245845, 245847, 245848,
+        245849, 245850, 245851, 245852, 245853, 245854, 245856, 245857, 245858, 245859,
+        245860, 245861, 245862, 245863, 245864, 245865, 245866, 245867, 245881, 245882,
+        251923,
+        -- 7/18 Optional Reagents (cross-profession)
+        180055, 180057, 180058, 180059, 180060, 228368, 244603, 244604, 244607, 244608,
+        244674, 244675, 244697, 244698, 244699, 244701, 244703, 245781, 245783, 245784,
+        245785, 245786, 245787, 245789, 245790, 245791, 245792, 245814, 245815, 245816,
+        245818, 245820, 245821, 245822, 245823, 245824, 245826, 248130, 248132, 248133,
+        248135, 248136, 248592, 251487, 251489, 255843, 255844, 257735, 257741,
+        -- 7/19 Finishing Reagents (cross-profession)
+        246447, 246448, 246449, 265800, 265801, 265803,
     },
 }
+
+-- AH_SECTIONS: Trade Goods (classID 7) subclass -> AH Reagents category label + icon.
+-- Used by the Restock picker's Category filter to group items the way the Auction
+-- House does, avoiding per-item profession attribution for cross-profession reagents.
+-- Keyed as "classID/subClassID" strings so future non-tradegoods sections could be
+-- added without a schema change. Icons picked from Blizzard's atlas/interface icons.
+EmpireManager.AH_SECTIONS = {
+    ["7/1"]  = { label = "Parts",              icon = "Interface\\Icons\\INV_Misc_Wrench_01" },
+    ["7/4"]  = { label = "Jewelcrafting",      icon = "Interface\\Icons\\INV_Misc_Gem_02" },
+    ["7/5"]  = { label = "Cloth",              icon = "Interface\\Icons\\INV_Fabric_Silk_01" },
+    ["7/6"]  = { label = "Leather",            icon = "Interface\\Icons\\INV_Misc_LeatherScrap_02" },
+    ["7/7"]  = { label = "Metal & Stone",      icon = "Interface\\Icons\\INV_Ore_Copper_01" },
+    ["7/8"]  = { label = "Cooking",            icon = "Interface\\Icons\\INV_Misc_Food_15" },
+    ["7/9"]  = { label = "Herb",               icon = "Interface\\Icons\\INV_Misc_Herb_02" },
+    ["7/10"] = { label = "Elemental",          icon = "Interface\\Icons\\INV_Elemental_Primal_Fire" },
+    ["7/11"] = { label = "Other",              icon = "Interface\\Icons\\INV_Misc_Gear_08" },
+    ["7/12"] = { label = "Enchanting",         icon = "Interface\\Icons\\Trade_Engraving" },
+    ["7/16"] = { label = "Inscription",        icon = "Interface\\Icons\\INV_Inscription_Tradeskill01" },
+    ["7/18"] = { label = "Optional Reagents",  icon = "Interface\\Icons\\INV_Misc_Gear_02" },
+    ["7/19"] = { label = "Finishing Reagents", icon = "Interface\\Icons\\INV_Misc_Gear_05" },
+}
+
+-- Display order for the Category dropdown - mirrors the live AH Reagents sidebar
+-- so users see the same order they know from browsing at an Auctioneer.
+EmpireManager.AH_SECTION_ORDER = {
+    "7/5",  -- Cloth
+    "7/6",  -- Leather
+    "7/7",  -- Metal & Stone
+    "7/8",  -- Cooking
+    "7/9",  -- Herb
+    "7/12", -- Enchanting
+    "7/16", -- Inscription
+    "7/4",  -- Jewelcrafting
+    "7/1",  -- Parts
+    "7/10", -- Elemental
+    "7/18", -- Optional Reagents
+    "7/19", -- Finishing Reagents
+    "7/11", -- Other
+}
+
+-- Resolve an itemID to its AH section key ("classID/subClassID") via GetItemInfoInstant.
+-- Returns nil for uncached itemIDs (rare - the source pool comes from prior AH scrapes).
+function EmpireManager.GetAHSectionKey(itemID)
+    local _, _, _, _, _, classID, subClassID = C_Item.GetItemInfoInstant(itemID)
+    if not classID or not subClassID then
+        return nil
+    end
+    return tostring(classID) .. "/" .. tostring(subClassID)
+end
 
 -- Profession display: crafting, gathering, and secondary professions
 EmpireManager.PROF_DISPLAY = {

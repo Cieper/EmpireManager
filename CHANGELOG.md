@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.2] - 2026-07-11
+
+### Added
+
+- **More items in the Restock picker** - the "Other", "Optional Reagents", and "Finishing Reagents" Auction House sections are now included, so cross-profession reagents (Petrified Root, Tormented Tantalum, Motes, and the like) can be stocked.
+
+### Changed
+
+- **Restock picker organizes by Auction House category** (Cloth, Herb, Metal & Stone, Other, Optional Reagents, Finishing Reagents, and so on, in the same order as the Auction House sidebar) instead of by profession. Cross-profession reagents now appear in the right bucket automatically.
+- **New Restock confirm dialog** - the top-up prompt is now a scrollable list grouped by destination (Warband Bank, Guild Bank, Character Bank) with item icons, quality colors, and hover tooltips, replacing the old plain-text popup that capped at six lines.
+
+### Fixed
+
+- **Restock fill count updates live** while a bank is open: dragging items out by hand or using Take Out now refreshes the current-vs-target count right away, instead of staying stale until you close and reopen the bank.
+- **Honest deposit reporting** - if a restock deposit is rejected by the destination and the item returns to your bags, the addon now reports "N x Item bounced back" and corrects the count, instead of falsely counting it as deposited.
+- **Editing a Restock rule** scrolls the item into view and highlights it on the first open (previously you had to reopen the dialog to see it).
+- **Non-reagent items** (food, potions, and other items added by shift-click) open the picker under "All Categories" with a full list, instead of showing nothing.
+- **Rule dialog state resets cleanly** - adding a rule, cancelling, then editing another no longer leaks the cancelled item, target, or destination, and rapid add/cancel/edit cycles no longer show a stale target value.
+- **Switching Dashboard tabs** now closes the open Restock or Storage rule editor.
+- The Restock edit dialog title now shows the rule number ("Edit Restock Rule #N").
+- Removed the picker's Expansion dropdown, which only ever offered the current expansion.
+- The Inscription category icon now renders in the picker.
+
 ## [1.1.1] - 2026-07-04
 
 ### Added

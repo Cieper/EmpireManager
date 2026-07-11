@@ -5480,6 +5480,13 @@ function EMRestockItemRowMixin:OnLoad()
     self.SelTex:Hide()
 
     self:SetScript("OnClick", function(f)
+        -- Ignore clicks while dragging an item on the cursor. Without this the
+        -- click both selects the row AND WoW's default drop behavior fires,
+        -- causing the picked-up item to land somewhere unexpected and the
+        -- row's onSelect to run with a mismatched itemID.
+        if GetCursorInfo() then
+            return
+        end
         if f._data and f._data.onSelect then
             f._data.onSelect(f._data.itemID)
         end
@@ -5593,12 +5600,43 @@ function EMRestockPageMixin:OnLoad()
     end)
     ScrollUtil.InitScrollBoxListWithScrollBar(self.ScrollBox, self.ScrollBar, view)
 
+    -- Import/Export button (icon-only, texture set in XML) - mirrors the Storage
+    -- tab's IEButton: opens the shared IE window, hiding the Add dialog first if
+    -- it is up so the two modals don't fight for focus.
+    local ieBtn = self.IEButton
+    EmpireManager:StyleIconButton(ieBtn, 0.5)
+    ieBtn:SetScript("OnClick", function()
+        local ie = EmpireManagerIOFrame
+        if ie and ie:IsShown() then
+            return
+        end
+        local rd = EmpireManagerRestockDialog
+        if rd and rd:IsShown() then
+            rd:Hide()
+        end
+        EmpireManager:ToggleIOWindow()
+    end)
+    ieBtn:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Import / Export", 1, 0.82, 0)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Import or export restock rules.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    ieBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
     -- Add button
     EmpireManager:StyleIconButton(self.AddButton, 0.5)
     self.AddButton:SetScript("OnClick", function()
         local rd = EmpireManagerRestockDialog
         if rd and rd:IsShown() then
             return
+        end
+        local ie = EmpireManagerIOFrame
+        if ie and ie:IsShown() then
+            ie:Hide()
         end
         EmpireManager:OpenRestockDialog(nil)
     end)
@@ -5642,6 +5680,9 @@ function EMRestockPageMixin:OnLoad()
             local rd = EmpireManagerRestockDialog
             if rd and rd:IsShown() and rd._refreshItemList then
                 rd._refreshItemList()
+                if rd._updateLayout then
+                    rd._updateLayout()
+                end
             end
         end)
     end)
@@ -5791,10 +5832,43 @@ function EmpireManager:InitRestockDialog()
         end
     end)
 
-    -- Filter row: Profession DD + Search box split 50/50 (search is a global find).
-    f.ProfDD = CreateFrame("DropdownButton", nil, f.FilterRow, "WowStyle1DropdownTemplate")
-    f.ProfDD:SetPoint("LEFT", f.FilterRow, "LEFT", 0, 0)
-    f.ProfDD:SetPoint("RIGHT", f.FilterRow, "CENTER", -4, 0)
+    -- On close (Cancel / X / ESC), blank the visible widgets and drop the
+    -- attached state so nothing lingers when the dialog is reopened.
+    f:SetScript("OnHide", function()
+        if f.SelectedIcon then
+            f.SelectedIcon:Hide()
+        end
+        if f.SelectedTier then
+            f.SelectedTier:Hide()
+        end
+        if f.SelectedFs then
+            f.SelectedFs:SetText("|cff9d9d9dSelect an item above|r")
+        end
+        if f.SearchBox then
+            f.SearchBox:SetText("")
+            f.SearchBox:ClearFocus()
+        end
+        -- Drop the session's spinner callback. The next Open sets a fresh one,
+        -- but the first Open-time SetValue (edit branch) fires BEFORE the new
+        -- callback is registered - the still-attached previous-session callback
+        -- would run with a wiped st and schedule a deferred UpdateLayout that
+        -- lands after the new session's UpdateLayout, blanking the visible state.
+        if f.TargetBox and f.TargetBox.SetOnValueChangedCallback then
+            f.TargetBox:SetOnValueChangedCallback(nil)
+        end
+        if f._state then
+            wipe(f._state)
+            f._state = nil
+        end
+    end)
+
+    -- Filter row: Category DD + Search box split 50/50. Category filter uses the
+    -- AH's Trade Goods subclass tree (Herb / Cloth / Other / Optional Reagents /
+    -- etc.) so cross-profession reagents don't need per-item PROF_ITEM_OVERRIDES
+    -- entries - the picker groups by GetItemInfoInstant subclass at render time.
+    f.SectionDD = CreateFrame("DropdownButton", nil, f.FilterRow, "WowStyle1DropdownTemplate")
+    f.SectionDD:SetPoint("LEFT", f.FilterRow, "LEFT", 0, 0)
+    f.SectionDD:SetPoint("RIGHT", f.FilterRow, "CENTER", -4, 0)
 
     f.SearchBox = CreateFrame("EditBox", nil, f.FilterRow, "SearchBoxTemplate")
     f.SearchBox:SetPoint("LEFT", f.FilterRow, "CENTER", 4, 0)
@@ -5955,7 +6029,11 @@ function EmpireManager:OpenRestockDialog(editIdx)
     local isEdit = editIdx ~= nil
     local entry = isEdit and self.db.global.restockList[editIdx] or nil
 
-    f.TitleText:SetText(isEdit and "EmpireManager - Edit Restock Rule" or "EmpireManager - Add Restock Rule")
+    f.TitleText:SetText(
+        isEdit
+            and string.format("EmpireManager - Edit Restock Rule #%d", editIdx)
+            or "EmpireManager - Add Restock Rule"
+    )
     if f.DescText then
         f.DescText:SetText(
             "Pick an item: click one in the list below, type a name to search, enter an item ID and press Enter, "
@@ -5969,7 +6047,7 @@ function EmpireManager:OpenRestockDialog(editIdx)
 
     -- Dialog state
     local st = {
-        prof = nil, -- picker filter only
+        section = nil, -- AH category filter ("classID/subClassID" key), nil = all
         search = "",
         itemID = nil,
         bankType = nil,
@@ -5988,9 +6066,16 @@ function EmpireManager:OpenRestockDialog(editIdx)
             st.chars[guid] = true
         end
         f.TargetBox:SetValue(entry.target or 1)
-        -- Default the picker's profession filter to the item's first match
-        local profs = RestockProfList(entry.itemID)
-        st.prof = profs[1] and profs[1].key or nil
+        -- Default the picker's Category filter to the item's own AH section so
+        -- the rest of the same-bucket items are the initial browse view - but
+        -- only if the item falls into a known AH Reagents subclass. Items
+        -- outside Trade Goods (e.g. Consumables like potions, added via shift-
+        -- click) have no matching bucket in the picker; leave the filter at
+        -- "All Categories" so the list isn't empty.
+        local key = EmpireManager.GetAHSectionKey(entry.itemID)
+        if key and self.AH_SECTIONS[key] then
+            st.section = key
+        end
     else
         f.TargetBox:SetValue(1)
     end
@@ -6037,17 +6122,17 @@ function EmpireManager:OpenRestockDialog(editIdx)
             f.SelectedFs:SetText("Select an item above")
         end
 
-        -- Profession filter display
-        local profLabel = "All Professions"
-        if st.prof then
-            for _, info in ipairs(self.PROF_DISPLAY) do
-                if info.key == st.prof then
-                    profLabel = info.label
-                    break
-                end
+        -- Category filter display. If the section key is unknown (e.g. an item
+        -- outside AH_SECTIONS somehow got picked), fall back to "All Categories"
+        -- instead of rendering the raw "classID/subClassID" string.
+        local sectionLabel = "All Categories"
+        if st.section then
+            local info = self.AH_SECTIONS[st.section]
+            if info then
+                sectionLabel = info.label
             end
         end
-        f.ProfDD:OverrideText(profLabel)
+        f.SectionDD:OverrideText(sectionLabel)
 
         -- Destination
         local btLabels = {
@@ -6089,10 +6174,11 @@ function EmpireManager:OpenRestockDialog(editIdx)
         f.SaveButton:SetEnabled(valid and true or false)
     end
 
-    -- Build the filtered item list for the picker. Filters: profession (defaults
-    -- to all professions across the selected/all expansions), expansion, and a
-    -- substring name search (matched only against resolved names; uncached items
-    -- are request-loaded so they appear after GET_ITEM_INFO_RECEIVED).
+    -- Build the filtered item list for the picker. Filters: AH Category (Trade Goods
+    -- subclass, from GetItemInfoInstant) and a substring name search. Search is a
+    -- GLOBAL find: when there is text, the Category dropdown is ignored and the
+    -- whole RESTOCK_ITEMS pool is matched by name. Uncached items are request-loaded
+    -- and reappear on refresh.
     RefreshItemList = function()
         local seen = {}
         local items = {}
@@ -6118,31 +6204,22 @@ function EmpireManager:OpenRestockDialog(editIdx)
             items[#items + 1] = itemID
         end
 
-        -- Search is a GLOBAL find: when there is search text, the Profession and
-        -- Expansion dropdowns are ignored and the whole RESTOCK_ITEMS set is matched
-        -- by name (consider() applies the substring). The dropdowns only narrow the
-        -- BROWSE list when the search box is empty.
         local searching = (search ~= "")
 
-        -- An item belongs to the selected profession if its match set (override-aware,
-        -- same as the Profession column) includes it. This surfaces universal "Parts"
-        -- like Aetherlume/Evercore - the AH files them under Parts and the curated
-        -- data under one profession, but the override makes them usable by many, so
-        -- they must appear under every profession that can craft with them.
-        local function matchesProf(itemID)
-            if not st.prof then
+        -- AH section filter: classID/subClassID from GetItemInfoInstant (synchronous,
+        -- no cache wait). Items whose subclass doesn't resolve fall into no bucket
+        -- and only surface when the Category filter is "All".
+        local function matchesSection(itemID)
+            if not st.section then
                 return true
             end
-            local set = EmpireManager:GetItemProfMatchSet(itemID)
-            return set and set[st.prof] or false
+            return EmpireManager.GetAHSectionKey(itemID) == st.section
         end
 
-        for _, byProf in pairs(self.RESTOCK_ITEMS) do
-            for _, set in pairs(byProf) do
-                for _, itemID in ipairs(set) do
-                    if searching or matchesProf(itemID) then
-                        consider(itemID)
-                    end
+        for _, pool in pairs(self.RESTOCK_ITEMS) do
+            for _, itemID in ipairs(pool) do
+                if searching or matchesSection(itemID) then
+                    consider(itemID)
                 end
             end
         end
@@ -6192,11 +6269,30 @@ function EmpireManager:OpenRestockDialog(editIdx)
         f.ListScrollBox:SetDataProvider(CreateDataProvider(data))
         if f._scrollToSelected and selectedIdx then
             -- Requested by the caller (dialog open in edit mode): bring the selected
-            -- item into view instead of leaving the list at the top.
-            f._scrollToSelected = nil
+            -- item into view. Two subtleties:
+            --  1. Use ScrollToElementData(..., AlignCenter) instead of
+            --     ScrollToElementDataIndex(idx). Without an alignment, the ScrollBox
+            --     may treat the top-of-list default position as "close enough" and
+            --     skip the scroll entirely when the target is technically off-screen;
+            --     AlignCenter forces the row to the middle of the viewport.
+            --  2. Keep the flag alive until the selected item's own name has resolved,
+            --     since the list re-sorts alphabetically each time
+            --     GET_ITEM_INFO_RECEIVED fires - if we cleared the flag now, the
+            --     target row would move on the next refresh and never re-scroll.
+            if RestockItemInfo(st.itemID) then
+                f._scrollToSelected = nil
+            end
+            local targetItemID = st.itemID
             C_Timer.After(0, function()
-                if f.ListScrollBox.ScrollToElementDataIndex then
-                    f.ListScrollBox:ScrollToElementDataIndex(selectedIdx)
+                local dp = f.ListScrollBox:GetDataProvider()
+                if not dp then
+                    return
+                end
+                for _, elementData in dp:Enumerate() do
+                    if elementData.itemID == targetItemID then
+                        f.ListScrollBox:ScrollToElementData(elementData, ScrollBoxConstants.AlignCenter)
+                        break
+                    end
                 end
             end)
         elseif savedPct and savedPct >= 0 then
@@ -6208,50 +6304,60 @@ function EmpireManager:OpenRestockDialog(editIdx)
         end
     end
     f._refreshItemList = RefreshItemList
+    f._updateLayout = UpdateLayout
 
-    -- Profession filter dropdown (All + each profession)
-    f.ProfDD:SetupMenu(function(_, rootDescription)
-        rootDescription:CreateRadio("All Professions", function()
-            return st.prof == nil
+    -- Category filter dropdown (All + each AH Trade Goods subclass present in the
+    -- source pool). Uses GetItemInfoInstant at menu-build time to compute which
+    -- sections have items - no static profession -> subclass map needed.
+    f.SectionDD:SetupMenu(function(_, rootDescription)
+        rootDescription:CreateRadio("All Categories", function()
+            return st.section == nil
         end, function()
-            st.prof = nil
+            st.section = nil
             RefreshItemList()
             UpdateLayout()
         end)
         rootDescription:CreateDivider()
-        for _, info in ipairs(self.PROF_DISPLAY) do
-            -- Only offer professions that have curated items in some expansion.
-            local hasItems = false
-            for _, byProf in pairs(self.RESTOCK_ITEMS) do
-                if byProf[info.key] then
-                    hasItems = true
-                    break
+
+        -- Compute which section keys are present in the current RESTOCK_ITEMS pool.
+        local present = {}
+        for _, pool in pairs(self.RESTOCK_ITEMS) do
+            for _, itemID in ipairs(pool) do
+                local key = EmpireManager.GetAHSectionKey(itemID)
+                if key then
+                    present[key] = true
                 end
             end
-            if hasItems then
-                rootDescription:CreateRadio(string.format("|T%s:14:14|t %s", info.icon, info.label), function()
-                    return st.prof == info.key
-                end, function()
-                    st.prof = info.key
-                    RefreshItemList()
-                    UpdateLayout()
-                end)
+        end
+
+        for _, key in ipairs(self.AH_SECTION_ORDER) do
+            if present[key] then
+                local info = self.AH_SECTIONS[key]
+                rootDescription:CreateRadio(
+                    string.format("|T%s:14:14|t %s", info.icon, info.label),
+                    function()
+                        return st.section == key
+                    end,
+                    function()
+                        st.section = key
+                        RefreshItemList()
+                        UpdateLayout()
+                    end
+                )
             end
         end
     end)
 
 
-    -- Search box doubles as an item drop target: shift-clicking or dragging an item
-    -- onto it (any item, even non-reagents) selects that itemID directly for addition,
-    -- like the Keep List input box. Plain typed text filters the picker list.
-    EmpireManager:SetupItemInputBox(f.SearchBox)
-    -- HookScript (not SetScript) so SearchBoxTemplate's own OnTextChanged still runs
-    -- and hides/shows its instructions placeholder text. No userInput guard: the
-    -- clear (X) button clears text programmatically (userInput=false), and we still
-    -- want that to reset the search and refresh the list.
-    -- Select an itemID directly: used by item drops and by typing a bare number + Enter.
+
+    -- Search box doubles as an item drop target: dragging an item onto it (any
+    -- item, even non-reagents) selects that itemID directly. Plain typed text
+    -- filters the picker list. Handled directly (not via SetupItemInputBox)
+    -- so no SetText(link)->OnTextChanged detour leaves the SearchBox in a
+    -- state Blizzard's spinner arrow-click chain could clobber.
     local function selectItemID(id)
         f.SearchBox:SetText("")
+        f.SearchBox:ClearFocus()
         st.search = ""
         st.itemID = id
         if not RestockItemInfo(id) then
@@ -6263,36 +6369,80 @@ function EmpireManager:OpenRestockDialog(editIdx)
     end
     -- Expose for the detail inset's drop handler (created once in InitRestockDialog).
     f._selectItemID = selectItemID
-    f.SearchBox:HookScript("OnTextChanged", function(box)
-        local text = box:GetText() or ""
-        -- An item link/ID dropped in (contains "item:NNN") selects that item directly.
-        local droppedID = tonumber(text:match("item:(%d+)"))
-        if droppedID then
-            selectItemID(droppedID)
-            return
-        end
-        if text ~= (st.search or "") then
-            st.search = text
-            RefreshItemList()
-        end
-    end)
-    -- Enter on a bare itemID number selects that item (lets you add any item by ID).
-    f.SearchBox:HookScript("OnEnterPressed", function(box)
-        local text = (box:GetText() or ""):gsub("%s", "")
-        local id = tonumber(text:match("^(%d+)$"))
-        if id then
+    -- Direct drop handlers on SearchBox: drag-drop and click-with-item-on-cursor
+    -- route through selectItemID, same as a click on the DetailInset.
+    local function searchDropSelect()
+        local infoType, id = GetCursorInfo()
+        if infoType == "item" and id then
             selectItemID(id)
-            box:ClearFocus()
+            ClearCursor()
         end
-    end)
+    end
+    f.SearchBox:SetScript("OnReceiveDrag", searchDropSelect)
+    f.SearchBox:SetScript("OnMouseDown", searchDropSelect)
+    -- Type-to-filter and itemID+Enter hooks were previously HookScript'd inside
+    -- OpenRestockDialog, but HookScript ACCUMULATES - every reopen added another
+    -- closure over the current-then st, and old ones kept firing on later opens
+    -- against wiped state. Register them ONCE via f._initHooksDone flag, and
+    -- route through f._state / f._selectItemID which the current session sets.
+    if not f._initHooksDone then
+        f.SearchBox:HookScript("OnTextChanged", function(box)
+            local s = f._state
+            if not s then
+                return
+            end
+            local text = box:GetText() or ""
+            if text ~= (s.search or "") then
+                s.search = text
+                if f._refreshItemList then
+                    f._refreshItemList()
+                end
+            end
+        end)
+        f.SearchBox:HookScript("OnEnterPressed", function(box)
+            local text = (box:GetText() or ""):gsub("%s", "")
+            local id = tonumber(text:match("^(%d+)$"))
+            if id and f._selectItemID then
+                f._selectItemID(id)
+                box:ClearFocus()
+            end
+        end)
+        f._initHooksDone = true
+    end
     f.SearchBox:SetText("")
 
+    -- Session-ID guard: each OpenRestockDialog call bumps f._sessionId; the
+    -- callback and its deferred timer capture this session's ID and bail if
+    -- the current session has moved on. Without this, a pending C_Timer.After
+    -- from the previous session's arrow-callback would fire after the new
+    -- session's UpdateLayout, overwriting the new item with the previous
+    -- session's (from savedItemID) - which is exactly the "edit/cancel cycle"
+    -- bug: the arrows the user pressed in the Add session left a timer
+    -- pending that fired inside the following Edit session.
+    f._sessionId = (f._sessionId or 0) + 1
+    local mySession = f._sessionId
+
     -- Target spinner: re-validate Save on every value change (typed or arrows).
+    -- Defer UpdateLayout one frame to avoid a same-frame race in Blizzard's
+    -- spinner event chain that clobbered st.itemID; save/restore + session
+    -- guard together keep the selection intact regardless.
     f.TargetBox:SetOnValueChangedCallback(function()
+        if f._sessionId ~= mySession then
+            return
+        end
+        local savedItemID = st.itemID
         if f._updateTargetArrows then
             f._updateTargetArrows()
         end
-        UpdateLayout()
+        C_Timer.After(0, function()
+            if f._sessionId ~= mySession then
+                return
+            end
+            if savedItemID and not st.itemID then
+                st.itemID = savedItemID
+            end
+            UpdateLayout()
+        end)
     end)
 
     -- Bank type dropdown (REUSES the storage destination model)
@@ -6503,9 +6653,16 @@ function EmpireManager:OpenRestockDialog(editIdx)
     if st.itemID then
         f._scrollToSelected = true
     end
+    -- Show() FIRST so the ScrollBox has real layout metrics before RefreshItemList
+    -- schedules its C_Timer.After(0) scroll-to-selected. Building the list before
+    -- Show() made the initial scroll no-op because ScrollToElementDataIndex ran on
+    -- an unlaid-out frame - the picked item would sit off-screen until a second
+    -- refresh (triggered by GET_ITEM_INFO_RECEIVED) fired the scroll on a settled
+    -- frame. The scroll flag is kept alive across refreshes until the item's own
+    -- name resolves (see RefreshItemList), so any lingering race resolves itself.
+    f:Show()
     RefreshItemList()
     UpdateLayout()
-    f:Show()
 end
 
 -------------------------------------------------------------------------------

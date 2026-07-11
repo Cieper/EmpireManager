@@ -173,6 +173,7 @@ function EmpireManager:ComputeRestockPlan()
                             itemID = entry.itemID,
                             name = entry.name or ("Item " .. entry.itemID),
                             move = move,
+                            entry = entry, -- source rule (guild/char for dialog headers)
                         }
                     end
                 end
@@ -322,11 +323,10 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
 
         local isGuild = (item.destType == "guildbank")
 
-        local function finishBatch()
-            clearTimers()
-            listener:UnregisterAllEvents()
-            local after = self:CountItemInBags(item.itemID)
-            local moved = before - after
+        -- Apply a verified move count: chat, tally, then either re-enter the
+        -- same item if it still has a deficit or advance. Extracted so the
+        -- verification-delay branch can call it with the corrected count.
+        local function applyMoved(moved)
             if moved > 0 then
                 totalDeposited = totalDeposited + moved
                 depositedSoFar = depositedSoFar + moved
@@ -348,6 +348,40 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             else
                 processNext()
             end
+        end
+
+        local function finishBatch()
+            clearTimers()
+            listener:UnregisterAllEvents()
+            local afterSettle = self:CountItemInBags(item.itemID)
+            local movedProvisional = before - afterSettle
+            if movedProvisional <= 0 then
+                applyMoved(0)
+                return
+            end
+            -- Verification pass. WoW's rejected-placement recovery leaves the
+            -- item on the cursor and returns it to bags asynchronously (~1-2s
+            -- after ClearCursor). The `after` count at settle time reads that
+            -- transient "not in bags" state as a successful move; a second
+            -- count 1.5s later catches the cursor-return so we don't report a
+            -- deposit that never actually landed. If some units did bounce
+            -- back, chat says so and the corrected count feeds applyMoved,
+            -- which triggers the existing noProgress retry path.
+            C_Timer.After(1.5, function()
+                local afterVerify = self:CountItemInBags(item.itemID)
+                local movedReal = before - afterVerify
+                if movedReal < 0 then
+                    movedReal = 0
+                end
+                if movedReal < movedProvisional then
+                    local bounced = movedProvisional - movedReal
+                    self:ChatMsg(string.format(
+                        "|cffff8800[Restock]|r %d x %s bounced back (destination rejected)",
+                        bounced, item.name
+                    ))
+                end
+                applyMoved(movedReal)
+            end)
         end
 
         -- Each settle event resets a short debounce so we wait until moves stop
@@ -379,14 +413,21 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             cleanup()
             if totalDeposited > 0 then
                 self:IncrementStat("itemsStashed", totalDeposited)
-                self:ChatMsg(
-                    string.format("|cff4d99ff[Restock]|r Topped up %d item%s.", totalDeposited, totalDeposited == 1 and "" or "s")
-                )
             end
-            -- Re-snapshot so the fill column reflects the new counts.
+            -- Re-snapshot so the Fill column reflects the new counts. Bag
+            -- counts feed "Character Bags" rules; SnapshotBankItemCounts writes
+            -- the per-itemID ledger for warband + char bank Fill;
+            -- SnapshotGuildBank writes guildbank Fill (clearing the once-per-open
+            -- dedup guard first). Without these the Restock tab keeps showing
+            -- the pre-deposit counts until the bank is closed and reopened.
             C_Timer.After(0.5, function()
                 self:SnapshotOpenBankCapacity()
                 self:SnapshotBagItemCounts()
+                self:SnapshotBankItemCounts()
+                if self:IsGuildBankOpen() and self.SnapshotGuildBank then
+                    self._guildBankSnapshotDone = nil
+                    self:SnapshotGuildBank()
+                end
                 if self.RefreshRestockTab then
                     self:RefreshRestockTab()
                 end
@@ -398,6 +439,202 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
     end
 
     processNext()
+end
+
+-- Header label for a plan destination: "Warband Bank", "Guild Bank (Foo)",
+-- "Character Bank (Ax)". Used as a section heading in the confirm dialog so the
+-- user can see where each batch is going at a glance.
+local function DestHeaderText(self, item)
+    if item.destType == "warbandbank" then
+        return "Warband Bank"
+    elseif item.destType == "guildbank" then
+        local guild = item.entry and item.entry.guild or "Guild"
+        return string.format("Guild Bank (%s)", guild)
+    elseif item.destType == "charbank" then
+        -- charbank rules are owner-only in the engine, so item.entry.chars must
+        -- include the current player. Show that name for clarity.
+        local myGuid = UnitGUID("player")
+        if item.entry and item.entry.chars and item.entry.chars[myGuid] then
+            local entry = self.db.global.registry[myGuid]
+            if entry and entry.name then
+                return string.format("Character Bank (%s)", entry.name)
+            end
+        end
+        return "Character Bank"
+    end
+    return item.destType or "?"
+end
+
+-- Custom confirm dialog: scrollable list of top-ups grouped by destination, each
+-- row rendered with quality color + item icon + hover tooltip. Replaces the old
+-- StaticPopup which capped at 6 lines and had no colors/icons/destinations.
+function EmpireManager:ShowRestockConfirmDialog(plan)
+    local f = EmpireManagerRestockConfirmDialog
+    if not f then
+        -- Defensive fallback: XML frame missing -> just execute the plan.
+        self:ExecuteRestockPlan(plan)
+        return
+    end
+
+    if not f._initialized then
+        f:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true,
+            tileSize = 32,
+            edgeSize = 32,
+            insets = { left = 8, right = 8, top = 8, bottom = 8 },
+        })
+        f:SetBackdropColor(0.06, 0.06, 0.09, 0.95)
+        f:RegisterForDrag("LeftButton")
+        f.ScrollFrame:SetScrollChild(f.ScrollFrame.Content)
+        f._initialized = true
+    end
+
+    f.TitleText:SetText("EmpireManager - Confirm Restock")
+
+    -- Clear previous widgets (rows and section headers pooled implicitly by GC-
+    -- friendly hide-and-forget; same pattern the vendor dialog uses).
+    if f._widgets then
+        for _, w in ipairs(f._widgets) do
+            if w.Hide then
+                w:Hide()
+            end
+            if w.SetScript then
+                pcall(w.SetScript, w, "OnEnter", nil)
+                pcall(w.SetScript, w, "OnLeave", nil)
+            end
+        end
+    end
+    f._widgets = {}
+    local function Track(obj)
+        f._widgets[#f._widgets + 1] = obj
+        return obj
+    end
+
+    local sf = f.ScrollFrame
+    local content = sf.Content
+    content:SetWidth(sf:GetWidth())
+
+    local y = 8
+
+    -- Header
+    local hdr = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
+    hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+    hdr:SetText(string.format(
+        "|cffffcc00Top up %d Restock floor%s?|r",
+        #plan,
+        #plan == 1 and "" or "s"
+    ))
+    y = y + 26
+
+    -- Sub-header
+    local sub = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
+    sub:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+    sub:SetText("|cffffffffDeposit from your bags:|r")
+    y = y + 22
+
+    y = y + 4
+
+    -- Group by destination header so the user sees each bank's batch separately.
+    -- Plan order already reflects restockList priority; grouping preserves it by
+    -- emitting a new section header whenever the destination text changes.
+    local lastHeader
+    for _, item in ipairs(plan) do
+        local headerText = DestHeaderText(self, item)
+        if headerText ~= lastHeader then
+            lastHeader = headerText
+            y = y + 4 -- spacer above each group
+            local grp = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+            grp:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+            grp:SetText("|cffffcc00" .. headerText .. "|r")
+            y = y + 18
+        end
+
+        -- Row: icon + "N x colored name"
+        local _, itemLink, quality, _, _, _, _, _, _, icon = C_Item.GetItemInfo(item.itemID)
+        icon = icon or 134400
+        local btn = Track(CreateFrame("Button", nil, content))
+        btn:SetSize(content:GetWidth() - 16, 18)
+        btn:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
+
+        local iconTex = btn:CreateTexture(nil, "ARTWORK")
+        iconTex:SetSize(16, 16)
+        iconTex:SetPoint("LEFT", btn, "LEFT", 0, 0)
+        iconTex:SetTexture(icon)
+
+        local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        fs:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
+        fs:SetPoint("RIGHT", btn, "RIGHT", 0, 0)
+        fs:SetJustifyH("LEFT")
+        local qc = quality and ITEM_QUALITY_COLORS[quality]
+        local coloredName = (qc and qc.hex or "|cffffffff") .. (item.name or "?") .. "|r"
+        fs:SetText(string.format("%d x %s", item.move, coloredName))
+
+        local hoverLink = itemLink or item.itemID
+        btn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+            if type(hoverLink) == "string" then
+                GameTooltip:SetHyperlink(hoverLink)
+            else
+                GameTooltip:SetItemByID(hoverLink)
+            end
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+        y = y + 18
+    end
+
+    content:SetHeight(y + 10)
+
+    -- Fit the frame to content up to a cap so 3-item plans don't render an
+    -- awkwardly tall dialog and 30-item plans use the scrollbar.
+    local desiredHeight = math.min(math.max(200, y + 120), 500)
+    f:SetHeight(desiredHeight)
+
+    -- Rebuild the two action buttons every time (their closures capture `plan`).
+    if f._btns then
+        for _, btn in ipairs(f._btns) do
+            btn:Hide()
+        end
+    end
+    f._btns = {}
+
+    local intentionalClose = false
+
+    local okBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    okBtn:SetSize(100, 28)
+    okBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
+    okBtn:SetText("Deposit")
+    okBtn:SetScript("OnClick", function()
+        intentionalClose = true
+        f:Hide()
+        self:ExecuteRestockPlan(plan)
+    end)
+    f._btns[1] = okBtn
+
+    local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    cancelBtn:SetSize(100, 28)
+    cancelBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 18)
+    cancelBtn:SetText("Cancel")
+    cancelBtn:SetScript("OnClick", function()
+        intentionalClose = true
+        f:Hide()
+    end)
+    f._btns[2] = cancelBtn
+
+    f.CloseButton:SetScript("OnClick", function()
+        if intentionalClose then
+            return
+        end
+        f:Hide()
+    end)
+
+    -- Reset scroll to top so a fresh plan doesn't open mid-list from a prior use.
+    sf:SetVerticalScroll(0)
+    f:Show()
 end
 
 -- Decide silent vs. confirm, then run. Called on bank open (after capacity settles).
@@ -413,22 +650,20 @@ function EmpireManager:MaybeRestock()
     if self.db.global.options.autoRestock then
         self:ExecuteRestockPlan(plan)
     else
-        -- Build a short summary for the confirm dialog.
-        local lines = {}
-        local maxLines = 6
-        for i = 1, math.min(#plan, maxLines) do
-            lines[#lines + 1] = string.format("%d x %s", plan[i].move, plan[i].name)
-        end
-        if #plan > maxLines then
-            lines[#lines + 1] = string.format("... and %d more", #plan - maxLines)
-        end
-        local text = "Top up your Restock floors from bags?\n\n|cffffffff" .. table.concat(lines, "\n") .. "|r"
-        local dialog = StaticPopup_Show("EM_RESTOCK_CONFIRM", text)
-        if dialog then
-            dialog.data = { plan = plan }
-        end
+        self:ShowRestockConfirmDialog(plan)
     end
 end
+
+-- Close the confirm dialog when the bank or guild bank closes: the plan it
+-- shows became stale (destinations no longer reachable, dest counts frozen at
+-- open time). EM_BANK_CLOSED is sent by both BANKFRAME_CLOSED and guild-bank
+-- PLAYER_INTERACTION_MANAGER_FRAME_HIDE(type 10).
+EmpireManager:RegisterMessage("EM_BANK_CLOSED", function()
+    local f = EmpireManagerRestockConfirmDialog
+    if f and f:IsShown() then
+        f:Hide()
+    end
+end)
 
 -------------------------------------------------------------------------------
 -- Bag consolidation for floored items (shared by PrepMailFloors and the pre-
@@ -577,18 +812,3 @@ function EmpireManager:ConsolidateBagsFloors(onDone)
     nextId()
 end
 
-StaticPopupDialogs["EM_RESTOCK_CONFIRM"] = {
-    text = "%s",
-    button1 = OKAY,
-    button2 = CANCEL,
-    OnAccept = function(self)
-        local d = self.data
-        if d and d.plan then
-            EmpireManager:ExecuteRestockPlan(d.plan)
-        end
-    end,
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    preferredIndex = 3,
-}

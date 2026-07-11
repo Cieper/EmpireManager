@@ -458,6 +458,12 @@ function EmpireManagerFrameMixin:OnLoad()
     self.tabIDs.map = self:AddNamedTab("Map", self.MapPage)
     self.tabIDs.about = self:AddNamedTab("About", self.AboutPage)
 
+    -- Close open rule editors on tab switch (both button clicks and SelectDashboardTab).
+    hooksecurefunc(self.TabSystem, "SetTab", function()
+        if EmpireManagerStorageDialog then EmpireManagerStorageDialog:Hide() end
+        if EmpireManagerRestockDialog then EmpireManagerRestockDialog:Hide() end
+    end)
+
     -- Info button (Appearances-style, per-tab help tips)
     local infoBtn = self.InfoButton
     local TAB_HELP = {
