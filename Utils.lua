@@ -1606,14 +1606,23 @@ function EmpireManager:AddTooltipHeader(entry)
     GameTooltip:AddLine(entry.realm or "?", 1, 0.82, 0)
 end
 
+-- "Frost Mage", or just "Mage" when no spec is chosen yet. Guards against an
+-- empty-string spec, which is truthy in Lua and would render a leading space.
+function EmpireManager:GetSpecClassLine(entry)
+    local className = CLASS_NAMES[entry.class] or entry.class or "?"
+    if entry.spec and entry.spec ~= "" then
+        return entry.spec .. " " .. className
+    end
+    return className
+end
+
 function EmpireManager:ShowNameTooltip(widget, entry, anchor)
     GameTooltip:SetOwner(widget.frame, anchor or "ANCHOR_CURSOR")
     self:AddTooltipHeader(entry)
 
     -- Spec + Class (class-colored, like game's "Protection Paladin")
     GameTooltip:AddLine(" ")
-    local className = CLASS_NAMES[entry.class] or entry.class or "?"
-    local specLine = entry.spec and (entry.spec .. " " .. className) or className
+    local specLine = self:GetSpecClassLine(entry)
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
     if cc then
         GameTooltip:AddLine(specLine, cc.r, cc.g, cc.b)
@@ -1630,11 +1639,18 @@ function EmpireManager:ShowNameTooltip(widget, entry, anchor)
         GameTooltip:AddLine(entry.zone .. subZonePart, 0.51, 0.77, 1.0)
     end
 
-    -- Professions (warm yellow, comma-separated)
+    -- Professions (warm yellow, comma-separated). Only the two main professions;
+    -- secondaries (Fishing/Cooking/Archaeology) are skipped.
     if entry.professions and #entry.professions > 0 then
+        local isSecondary = {}
+        for _, info in ipairs(self.PROF_DISPLAY) do
+            if info.category == "secondary" then
+                isSecondary[info.label] = true
+            end
+        end
         local names = {}
         for _, p in ipairs(entry.professions) do
-            if type(p.name) == "string" and p.name ~= "" then
+            if type(p.name) == "string" and p.name ~= "" and not isSecondary[p.name] then
                 names[#names + 1] = p.name
             end
         end

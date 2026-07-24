@@ -1431,6 +1431,7 @@ local function PrepareClassificationContext(addon)
         pawnVendorBop = opts.pawnVendorBop,
         vendorIlvlCeiling = opts.vendorIlvlCeiling or 0,
         disenchantRouting = opts.disenchantRouting,
+        playerLevel = UnitLevel("player") or 0,
     }
 
     -- Cache recipient lookups (registry doesn't change during a scan)
@@ -1661,8 +1662,10 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         end
     end
 
-    -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books)
-    if item.quality == 0 and item.sellPrice > 0 then
+    -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books).
+    -- BoE grays (bindType 2) are left alone so the user can sell/AH them. Vendor
+    -- trash (bindType 0) and soulbound grays still vendor.
+    if item.quality == 0 and item.sellPrice > 0 and item.bindType ~= 2 and not item.isWarbound then
         return CAT_VENDOR, "Vendor junk"
     end
 
@@ -1700,6 +1703,14 @@ function EmpireManager:_ClassifyItemInner(item, entry)
             -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup)
             if self._equipSetItems and self._equipSetItems[item.itemID] then
                 return CAT_KEEP, "Equipment set: " .. self._equipSetItems[item.itemID]
+            end
+            -- Required-level guard: gear the character can't equip yet (its required
+            -- level is above the player's level) is a future upgrade, not junk. Pawn
+            -- reports it as "not an upgrade" because it can't be equipped now, and the
+            -- iLvl comparison would flag it too - keep it until the character can use it.
+            local reqLevel = select(5, C_Item.GetItemInfo(item.itemLink))
+            if reqLevel and ctx and ctx.playerLevel > 0 and reqLevel > ctx.playerLevel then
+                return CAT_KEEP, string.format("Requires level %d", reqLevel)
             end
             -- Off-tier armor: anything that isn't the class's primary armor tier.
             -- Higher tiers are never usable (priest+plate); lower tiers are

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.3] - 2026-07-24
+
+### Changed
+
+- **Restock list rows show the game item tooltip first**, with the restock info below it, so hovering a row gives you the full in-game item details.
+- **Character name tooltip lists only the two main professions**, hiding secondary professions (Fishing, Cooking, Archaeology).
+
+### Fixed
+
+- **Soulbound gear above your required level is no longer vendored** by Triage.
+- **BoE gray (junk quality) items are no longer vendored** by mistake.
+- **Spec stays current after a respec** - the tooltip's spec and class line updates correctly and no longer duplicates.
+
 ## [1.1.2] - 2026-07-11
 
 ### Added

@@ -534,7 +534,6 @@ end
 -------------------------------------------------------------------------------
 
 function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
-    local CLASS_NAMES = EmpireManager.CLASS_NAMES
     local RACE_NAMES = EmpireManager.RACE_NAMES
     local parent = content
 
@@ -597,8 +596,7 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
     -- Identity
     addSection("Identity")
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
-    local className = CLASS_NAMES[entry.class] or entry.class or "?"
-    local specLine = entry.spec and (entry.spec .. " " .. className) or className
+    local specLine = EmpireManager:GetSpecClassLine(entry)
     addRow("Class", specLine, cc and cc.r or 0.8, cc and cc.g or 0.8, cc and cc.b or 0.8)
 
     -- Race & Faction on one row

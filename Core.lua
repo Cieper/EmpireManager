@@ -752,11 +752,7 @@ function EmpireManager:OnEnable()
     -- freshly looted chests get announced even mid-session.
     self:HintOpenableContainers()
 
-    -- Snapshot spec (e.g. "Frost", "Shadow")
-    local specIdx = GetSpecialization()
-    if specIdx then
-        entry.spec = select(2, GetSpecializationInfo(specIdx))
-    end
+    self:SnapshotSpec(entry)
 
     -- Snapshot professions
     self:SnapshotProfessions(entry)
@@ -839,6 +835,9 @@ function EmpireManager:OnEnable()
     self:RegisterEvent("PLAYER_LEVEL_UP")
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
     self:RegisterEvent("PLAYER_MONEY")
+    -- Catch the initial spec pick on a fresh character (and later respecs);
+    -- OnEnable snapshots spec once, so without this it stays stale until relog.
+    self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 
     -- Request playtime (async → triggers TIME_PLAYED_MSG). Silent variant suppresses
     -- Blizzard's chat output for our request; user-typed /played still prints normally.
@@ -1074,6 +1073,83 @@ function EmpireManager:SlashHandler(input)
         else
             self:ChatMsg("  TSM not loaded (no DBDisenchant/DBMarket)", true)
         end
+    elseif cmd == "pawncheck" then
+        -- Dev helper: compare EmpireManager's Pawn call vs Pawn's own tooltip
+        -- arrow logic for the hovered/cursor item. Prints every value the two
+        -- code paths diverge on (UpgradeInfo, ItemLevelIncrease, options).
+        if not PawnIsItemDefinitivelyAnUpgrade then
+            self:ChatMsg("Pawn not loaded.", true)
+            return
+        end
+        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+        local _, itemLink = GameTooltip:GetItem()
+        GameTooltip:Hide()
+        if not itemLink then
+            local infoType, id = GetCursorInfo()
+            if infoType == "item" then
+                itemLink = select(2, C_Item.GetItemInfo(id))
+            end
+        end
+        if not itemLink then
+            self:ChatMsg("Hover or pick up an item, then run /em pawncheck", true)
+            return
+        end
+        -- Tooltip/cursor links can degrade to the base item (no bonus IDs, wrong
+        -- upgrade track). Re-resolve to the real bag instance link, same as triage
+        -- does (info.hyperlink), so Pawn evaluates the item the player actually has.
+        local wantID = C_Item.GetItemInfoInstant(itemLink)
+        if wantID then
+            for bag = 0, 5 do
+                for slot = 1, C_Container.GetContainerNumSlots(bag) do
+                    local info = C_Container.GetContainerItemInfo(bag, slot)
+                    if info and info.itemID == wantID and info.hyperlink then
+                        itemLink = info.hyperlink
+                        break
+                    end
+                end
+            end
+        end
+        local itemName = C_Item.GetItemInfo(itemLink)
+        self:ChatMsg(string.format("|cffffcc00[PawnCheck]|r %s", itemName or itemLink), true)
+        local def = PawnIsItemDefinitivelyAnUpgrade(itemLink)
+        self:ChatMsg(string.format("  PawnIsItemDefinitivelyAnUpgrade = %s", tostring(def)), true)
+        if PawnGetItemData and PawnIsItemAnUpgrade then
+            local itemData = PawnGetItemData(itemLink)
+            if itemData then
+                local upgradeInfo, ilvlIncrease = PawnIsItemAnUpgrade(itemData)
+                self:ChatMsg(
+                    string.format(
+                        "  UpgradeInfo=%s  ItemLevelIncrease=%s",
+                        upgradeInfo and ("#" .. #upgradeInfo) or "nil",
+                        tostring(ilvlIncrease)
+                    ),
+                    true
+                )
+                if upgradeInfo then
+                    for _, u in ipairs(upgradeInfo) do
+                        self:ChatMsg(
+                            string.format(
+                                "    scale=%s  +%s%%  vs %s",
+                                tostring(u.LocalizedScaleName or u.ScaleName),
+                                tostring(u.PercentUpgrade and math.floor(u.PercentUpgrade * 100) or "?"),
+                                tostring(u.ExistingItemLink or "nothing equipped")
+                            ),
+                            true
+                        )
+                    end
+                end
+            else
+                self:ChatMsg("  PawnGetItemData returned nil (stats not loaded yet)", true)
+            end
+        end
+        self:ChatMsg(
+            string.format(
+                "  options: ShowItemLevelUpgrades=%s  UpgradeTracking=%s",
+                tostring(PawnCommon and PawnCommon.ShowItemLevelUpgrades),
+                tostring(PawnOptions and PawnOptions.UpgradeTracking)
+            ),
+            true
+        )
     elseif cmd == "dump" then
         local _, sub = self:GetArgs(input, 2)
         sub = sub and sub:lower() or "bags"
@@ -1734,6 +1810,23 @@ function EmpireManager:SKILL_LINES_CHANGED()
 
     self:SnapshotProfessions(entry)
     self:RefreshAfterProfessionChange(guid)
+end
+
+-- Fires for party/raid members too, so filter to the player.
+function EmpireManager:PLAYER_SPECIALIZATION_CHANGED(_, unit)
+    if unit ~= "player" then
+        return
+    end
+    local guid = self.playerGUID
+    local entry = self.db.global.registry[guid]
+    if not entry then
+        return
+    end
+    local old = entry.spec
+    self:SnapshotSpec(entry)
+    if entry.spec ~= old then
+        self:RefreshAfterProfessionChange(guid)
+    end
 end
 
 -- Refresh UIs that depend on entry.professions. Called from TRADE_SKILL_SHOW
@@ -2715,6 +2808,20 @@ function EmpireManager:RestoreTimePlayedChatFrames()
         end
     end
     self._silentTimePlayedFrames = nil
+end
+
+-- Snapshot spec (e.g. "Frost", "Shadow"). Stores nil rather than "" when the
+-- character has no spec chosen yet, so readers can test entry.spec directly.
+function EmpireManager:SnapshotSpec(entry)
+    local spec
+    local specIdx = GetSpecialization()
+    if specIdx then
+        spec = select(2, GetSpecializationInfo(specIdx))
+    end
+    if spec == "" then
+        spec = nil
+    end
+    entry.spec = spec
 end
 
 function EmpireManager:SnapshotProfessions(entry)

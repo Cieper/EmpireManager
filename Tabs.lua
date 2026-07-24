@@ -5255,9 +5255,10 @@ function EMRestockRowMixin:OnLoad()
         end
         local entry = d.entry
         GameTooltip:SetOwner(f, "ANCHOR_CURSOR_RIGHT")
-        local nm = d.resolvedName or entry.name or ("Item " .. tostring(entry.itemID))
-        GameTooltip:AddLine(string.format("Restock #%d  %s", d.idx, nm), 1, 0.82, 0)
+        -- Game item tooltip first, then a separator + our restock info below it.
+        GameTooltip:SetItemByID(entry.itemID)
         GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(string.format("Restock #%d", d.idx), 1, 0.82, 0)
         local ttTier = RestockItemTier(entry.itemID, select(2, C_Item.GetItemInfo(entry.itemID)))
         if ttTier then
             GameTooltip:AddLine("Quality: Tier " .. tostring(ttTier), 1, 1, 1)
