@@ -62,6 +62,7 @@ local DB_DEFAULTS = {
             autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
             autoRestock = false, -- auto top-up restock floors from bags on bank open (off = OK/Cancel dialog). See docs/RESTOCK.md.
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
+            vendorBoePoor = false, -- also vendor poor quality items that are BoE (off = keep for AH)
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
             vendorBopIlvl = false, -- vendor soulbound gear with lower ilvl than equipped
             vendorIlvlCeiling = 0, -- iLvl ceiling for BoP vendor checks; gear at or above is kept (0 = disabled)
@@ -224,15 +225,44 @@ function EmpireManager:OnInitialize()
     self:RegisterChatCommand("em", "SlashHandler")
 
     -- Native WoW Settings panel (Interface → AddOns → EmpireManager)
-    -- Landing page = About info; subcategories for settings sections
-    local aboutFrame = CreateFrame("Frame")
-    aboutFrame:SetSize(600, 400)
-    aboutFrame:Hide()
+    -- Landing page = About info; subcategories for settings sections.
+    -- The content (stats + full slash command list) is taller than the settings
+    -- panel, so it lives in a scroll frame rather than directly on the canvas.
+    local aboutFrame = EmpireManagerSettingsCanvas
+    local aboutScroll = aboutFrame.ScrollFrame
+    local aboutContent = aboutScroll.Content
+    aboutScroll:SetScrollChild(aboutContent)
+
+    -- Rebuild on every show: the Statistics block reads live counters.
+    local aboutLines = {}
+    local function RebuildAbout()
+        local w = aboutScroll:GetWidth()
+        if not w or w <= 1 then
+            return
+        end
+
+        for _, obj in ipairs(aboutLines) do
+            obj:Hide()
+        end
+        wipe(aboutLines)
+
+        aboutContent:SetWidth(w)
+        local h = self:BuildAboutPanel(aboutContent, {
+            track = function(obj)
+                aboutLines[#aboutLines + 1] = obj
+                return obj
+            end,
+        })
+        aboutContent:SetHeight(h + 20)
+    end
+
+    aboutFrame:SetScript("OnShow", RebuildAbout)
+    -- The canvas is resized to the settings panel after it is shown, so the
+    -- first OnShow can land before the scroll frame has a real width.
+    aboutScroll:SetScript("OnSizeChanged", RebuildAbout)
 
     local category = Settings.RegisterCanvasLayoutCategory(aboutFrame, "EmpireManager")
     self.settingsCategoryID = category:GetID()
-
-    self:BuildAboutPanel(aboutFrame)
 
     -- Helper: register a boolean option backed by db.global.options.
     -- Returns (setting, initializer). Pass the parent's initializer as
@@ -493,6 +523,14 @@ function EmpireManager:OnInitialize()
         "skipEquipmentSets",
         "Protect 'Equipment Set' Items",
         "Skip vendoring soulbound gear that belongs to any saved equipment set.",
+        triageRefresh
+    )
+
+    AddCheckbox(
+        triageCat,
+        "vendorBoePoor",
+        "Sell BoE Poor Quality Items",
+        "Flag poor quality items as vendorable even when they are BoE. Off by default so they can be sold on the Auction House instead.",
         triageRefresh
     )
 

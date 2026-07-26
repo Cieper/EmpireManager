@@ -1729,4 +1729,35 @@
         </Scripts>
     </Frame>
 
+    <!-- ================================================================== -->
+    <!-- Settings canvas (Interface > AddOns > EmpireManager landing page)  -->
+    <!-- Hosts the same About content as the dashboard's About tab. The     -->
+    <!-- content outgrows the settings panel, so it scrolls.                -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerSettingsCanvas" hidden="true">
+        <Size x="600" y="400"/>
+        <Frames>
+            <ScrollFrame parentKey="ScrollFrame" inherits="ScrollFrameTemplate">
+                <KeyValues>
+                    <KeyValue key="scrollBarTemplate" value="MinimalScrollBar" type="string"/>
+                    <KeyValue key="scrollBarX" value="2" type="number"/>
+                    <KeyValue key="scrollBarTopY" value="-4" type="number"/>
+                    <KeyValue key="scrollBarBottomY" value="4" type="number"/>
+                </KeyValues>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="0" y="-4"/>
+                    <Anchor point="BOTTOMRIGHT" x="-24" y="4"/>
+                </Anchors>
+                <Frames>
+                    <Frame parentKey="Content">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="TOPRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
+        </Frames>
+    </Frame>
+
 </Ui>

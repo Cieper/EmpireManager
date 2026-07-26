@@ -615,6 +615,11 @@ local KNOWN_LINE = ITEM_SPELL_KNOWN or "Already known"
 local function ParseTooltipBind(tooltipData)
     local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isKnownAppearance =
         false, false, false, false, false, false, false
+    -- Permanent account-bound ("Warbound") vs "Warbound Until Equipped". Both set
+    -- isWarbound, but only the former survives being bound: an "until equipped"
+    -- item becomes plain soulbound once equipped, while a permanently warbound
+    -- item stays account-bound and must keep routing to Equipment (BoA).
+    local isPermanentWarbound = false
     -- A "Use:" line AND a "Classes:" restriction together mark an equipment token
     -- (e.g. Unsullied Leather Belt): a consumable-classed item that grants gear on
     -- use. Real consumables (potions/flasks) have a Use line but no class line.
@@ -628,9 +633,10 @@ local function ParseTooltipBind(tooltipData)
                     or txt == ITEM_BIND_TO_ACCOUNT
                     or txt == ITEM_BNETACCOUNTBOUND
                     or txt == ITEM_BIND_TO_BNETACCOUNT
-                    or txt == ITEM_ACCOUNTBOUND_UNTIL_EQUIP
-                    or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP
                 then
+                    isWarbound = true
+                    isPermanentWarbound = true
+                elseif txt == ITEM_ACCOUNTBOUND_UNTIL_EQUIP or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP then
                     isWarbound = true
                 elseif txt == ITEM_SOULBOUND then
                     isSoulbound = true
@@ -659,11 +665,19 @@ local function ParseTooltipBind(tooltipData)
             end
         end
     end
-    if isSoulbound then
+    if isSoulbound and not isPermanentWarbound then
         isWarbound = false
     end
     local isEquipToken = hasUseLine and hasClassLine
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance
+    return isWarbound,
+        isSoulbound,
+        isLockbox,
+        isUnique,
+        isTeleport,
+        isConjured,
+        isEquipToken,
+        isKnownAppearance,
+        isPermanentWarbound
 end
 
 -- Parse bag slot count from an item's tooltip. Returns slot count or nil.
@@ -702,12 +716,27 @@ end
 
 local function CachedTooltipBind(itemID, tooltipDataFn)
     local tooltipData = tooltipDataFn()
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance =
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance, isPermanentWarbound =
         ParseTooltipBind(tooltipData)
     local cached = tooltipCache[itemID]
     if cached then
         -- Per-slot soulbound from the live tooltip; static flags from the cache.
-        return cached[1], isSoulbound, cached[2], cached[3], cached[4], cached[5], cached[6], cached[7]
+        -- isWarbound is NOT itemID-static: two slots of one itemID can differ
+        -- (e.g. a Heroic "Warbound until equipped" Phaseblade beside a Champion
+        -- "Soulbound" copy of the same itemID). Recompute it from this slot's
+        -- live tooltip rather than trusting cached[1] - ParseTooltipBind's own
+        -- soulbound override ran before this cache was consulted, so cached[1]
+        -- has never seen this slot's bind state.
+        local cachedWarbound = cached[1] and (isPermanentWarbound or not isSoulbound)
+        return cachedWarbound,
+            isSoulbound,
+            cached[2],
+            cached[3],
+            cached[4],
+            cached[5],
+            cached[6],
+            cached[7],
+            isPermanentWarbound
     end
     -- Only cache when the tooltip actually returned data; an empty `lines`
     -- table means the client hasn't fetched item data yet and parsing returned
@@ -717,7 +746,15 @@ local function CachedTooltipBind(itemID, tooltipDataFn)
         tooltipCache[itemID] =
             { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance }
     end
-    return isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance
+    return isWarbound,
+        isSoulbound,
+        isLockbox,
+        isUnique,
+        isTeleport,
+        isConjured,
+        isEquipToken,
+        isKnownAppearance,
+        isPermanentWarbound
 end
 
 -------------------------------------------------------------------------------
@@ -740,12 +777,12 @@ local function ScanBagSlot(items, bag, slot)
     local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance =
-        false, false, false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance, isPermanentWarbound =
+        false, false, false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local bagRef, slotRef = bag, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance = CachedTooltipBind(
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance, isPermanentWarbound = CachedTooltipBind(
                 info.itemID,
                 function()
                     return C_TooltipInfo.GetBagItem(bagRef, slotRef)
@@ -757,6 +794,20 @@ local function ScanBagSlot(items, bag, slot)
     -- Tooltip soulbound detection as additional fallback
     if isSoulbound then
         isBound = true
+    end
+
+    -- C_Item.IsBound is the authoritative per-slot bind check. The tooltip only
+    -- prints ITEM_SOULBOUND in some states, so isSoulbound alone misses gear
+    -- that is already bound in bags - leaving isWarbound set from the
+    -- "Warbound Until Equipped" tooltip line and routing soulbound gear to the
+    -- Equipment (BoA) rule instead of Keep/Vendor.
+    -- Deliberately NOT gated on bindType: Blizzard reports bindType=2 for BoP
+    -- gear here (same unreliability as guild bank items), so gating on it would
+    -- exempt the exact case this guard exists to catch. Once a slot is bound,
+    -- "until equipped" has already resolved - a bound item is soulbound unless
+    -- its tooltip still shows a permanent account-bound line.
+    if isBound and isWarbound and not isPermanentWarbound then
+        isWarbound = false
     end
 
     local hasNoValue = info.hasNoValue or false
@@ -895,12 +946,12 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
     local loc = ItemLocation:CreateFromBagAndSlot(container, slot)
     local isBound = (C_Item.DoesItemExist(loc) and C_Item.IsBound(loc)) or info.isBound or false
 
-    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance =
-        false, false, false, false, false, false, false, false
+    local isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance, isPermanentWarbound =
+        false, false, false, false, false, false, false, false, false
     if NeedsTooltipScan(classID or -1, bindType or 0, info.itemID) then
         if C_TooltipInfo and C_TooltipInfo.GetBagItem then
             local cRef, sRef = container, slot -- capture for closure
-            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance = CachedTooltipBind(
+            isWarbound, isSoulbound, isLockbox, isUnique, isTeleport, isConjured, _isEquipToken, isKnownAppearance, isPermanentWarbound = CachedTooltipBind(
                 info.itemID,
                 function()
                     return C_TooltipInfo.GetBagItem(cRef, sRef)
@@ -912,6 +963,12 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
     -- Tooltip soulbound detection as additional fallback
     if isSoulbound then
         isBound = true
+    end
+
+    -- See ScanBagSlot: a bound slot is soulbound unless its tooltip still shows a
+    -- permanent account-bound line ("Warbound until equipped" resolves on equip).
+    if isBound and isWarbound and not isPermanentWarbound then
+        isWarbound = false
     end
 
     local hasNoValue = info.hasNoValue or false
@@ -1662,11 +1719,14 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         end
     end
 
-    -- Rule D.1: Gray junk with a sell price → VENDOR (skip unsellable grays like books).
-    -- BoE grays (bindType 2) are left alone so the user can sell/AH them. Vendor
-    -- trash (bindType 0) and soulbound grays still vendor.
-    if item.quality == 0 and item.sellPrice > 0 and item.bindType ~= 2 and not item.isWarbound then
-        return CAT_VENDOR, "Vendor junk"
+    -- Rule D.1: Poor quality items with a sell price → VENDOR (skip unsellable ones
+    -- like books). BoE poor quality items (bindType 2) are left alone so the user can
+    -- sell/AH them, unless the vendorBoePoor option opts them back in. Vendor trash
+    -- (bindType 0) and soulbound poor quality items always vendor.
+    if item.quality == 0 and item.sellPrice > 0 and not item.isWarbound then
+        if item.bindType ~= 2 or self.db.global.options.vendorBoePoor then
+            return CAT_VENDOR, "Vendor junk"
+        end
     end
 
     -- Rule D.2a-bag: Soulbound container smaller than smallest equipped → VENDOR.

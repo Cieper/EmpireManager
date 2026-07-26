@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.4] - 2026-07-26
+
+### Fixed
+
+- **Soulbound gear is no longer treated as Warbound** when you carry another copy of the same item that is Warbound until equipped. Triage was offering the soulbound copy as a Warband Bank deposit under the Equipment (BoA) rule instead of leaving it to Keep or Vendor.
+
 ## [1.1.3] - 2026-07-24
 
 ### Changed

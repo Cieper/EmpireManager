@@ -332,6 +332,18 @@ function EmpireManager:BuildAboutPanel(parent, opts)
     local LINE_HEIGHT = 20
     local FONT_NORMAL = "GameFontHighlight"
 
+    -- Divider width: the atlas is 512px at native size, which overhangs the
+    -- narrower Settings canvas. Inset it from the parent and cap it so it stays
+    -- a decorative rule rather than a full-bleed line.
+    local DIVIDER_HEIGHT = 8
+    local parentWidth = parent:GetWidth() or 0
+    local dividerWidth = parentWidth > 0 and (parentWidth - 80) or 380
+    if dividerWidth > 380 then
+        dividerWidth = 380
+    elseif dividerWidth < 160 then
+        dividerWidth = 160
+    end
+
     local y = 8
 
     local LOGO_SIZE = 96
@@ -402,7 +414,8 @@ function EmpireManager:BuildAboutPanel(parent, opts)
     -- Statistics
     y = y + 4
     local statDivider = track(parent:CreateTexture(nil, "ARTWORK"))
-    statDivider:SetAtlas("ui-journeys-renown-divider", true)
+    statDivider:SetAtlas("ui-journeys-renown-divider")
+    statDivider:SetSize(dividerWidth, DIVIDER_HEIGHT)
     statDivider:SetPoint("TOP", parent, "TOP", 0, -y)
     y = y + 28
     local statHdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
@@ -481,7 +494,8 @@ function EmpireManager:BuildAboutPanel(parent, opts)
     -- Slash Commands divider + heading (inline version of AddSeparator).
     y = y + 4
     local cmdDivider = track(parent:CreateTexture(nil, "ARTWORK"))
-    cmdDivider:SetAtlas("ui-journeys-renown-divider", true)
+    cmdDivider:SetAtlas("ui-journeys-renown-divider")
+    cmdDivider:SetSize(dividerWidth, DIVIDER_HEIGHT)
     cmdDivider:SetPoint("TOP", parent, "TOP", 0, -y)
     y = y + 28
     local cmdHdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
