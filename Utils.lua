@@ -264,26 +264,32 @@ function EmpireManager:EnableDropdownScrollToSelected(dd, getSelectedIndex)
     end, dd)
 end
 
--- Safeguard: propagate a freshly-captured guildRealm to every storage rule
--- pointing at that guild. Rules can carry a stale asn.realm if they were
--- created from a character on a different connected realm (BuildGuildList used
--- to source entry.realm). Running this on each login/guild change keeps
--- asn.realm self-correcting forever; the cost is one O(rules) loop per login.
+-- Safeguard: backfill a freshly-captured guildRealm onto storage rules and
+-- registry entries for that guild that don't have one yet.
+--
+-- This ONLY fills blanks. It must never overwrite a populated realm with a
+-- different one: guild names are not unique across realms, and two guilds
+-- called "Vanguard" on different realms (a legacy Alliance/Horde pair, say)
+-- are distinct banks. An earlier version matched on guild name alone and
+-- stamped the current character's guild realm onto every same-named guild,
+-- collapsing the pair into one - which made BuildGuildList show a single
+-- entry and made triage mail items to a banker while the correct guild bank
+-- was open. A rule whose realm is already set is either correct or is fixed
+-- by logging in on a character in that specific guild.
 function EmpireManager:PropagateGuildRealmToRules(guildName, guildRealm)
     if not guildName or guildName == "" or not guildRealm or guildRealm == "" then
         return
     end
     for _, asn in ipairs(self.db.global.storageAssignments or {}) do
-        if asn.type == "guildbank" and asn.guild == guildName and asn.realm ~= guildRealm then
+        if asn.type == "guildbank" and asn.guild == guildName and (asn.realm or "") == "" then
             asn.realm = guildRealm
         end
     end
-    -- Also heal stale guildRealm on other registry entries in the same guild.
-    -- Pre-fix logins wrote the character's realm into entry.guildRealm, so a
-    -- single correct login (4th return of GetGuildInfo) corrects every alt in
-    -- that guild without needing to log in to each one.
+    -- Backfill guildRealm on registry entries in this guild that lack one.
+    -- Entries that already carry a realm are left alone - an alt in the
+    -- same-named guild on another realm must keep its own value.
     for _, entry in pairs(self.db.global.registry or {}) do
-        if entry.guild == guildName and entry.guildRealm ~= guildRealm then
+        if entry.guild == guildName and (entry.guildRealm or "") == "" then
             entry.guildRealm = guildRealm
         end
     end
@@ -306,6 +312,29 @@ function EmpireManager:GuildKey(guildName, realm)
     -- and rule lookups always match.
     realm = realm:gsub("%s+", "")
     return guildName .. "-" .. realm
+end
+
+-- Is this (guild, realm) pair blacklisted?
+--
+-- Blacklist entries are keyed by GuildKey ("Guild-Realm") so that two guilds
+-- sharing a name on different realms can be hidden independently. Entries
+-- written before the key was realm-aware are bare guild names; those are still
+-- honoured for any realm, since the user's intent back then was "hide this
+-- name" and there was no way to express a narrower one. Re-adding a guild
+-- through the blacklist window upgrades it to the composite form.
+function EmpireManager:IsGuildBlacklisted(guildName, realm)
+    if not guildName or guildName == "" then
+        return false
+    end
+    local bl = self.db.global.guildBlacklist
+    if not bl then
+        return false
+    end
+    if bl[guildName] then
+        return true -- legacy bare-name entry
+    end
+    local key = self:GuildKey(guildName, realm)
+    return key ~= nil and bl[key] == true
 end
 
 -- Normalize a realm name for equality checks. The same realm shows up with a

@@ -7315,7 +7315,9 @@ function EmpireManager:CreateGuildBlacklistWindow()
 
     -- Guild dropdown + Add button in AddRow
     local addRow = f.AddRow
-    local selectedGuild = nil
+    -- Selection is a (guild, realm) pair: two guilds can share a name on
+    -- different realms and must be blacklistable independently.
+    local selectedGuild, selectedRealm = nil, nil
 
     local guildDD = CreateFrame("DropdownButton", nil, addRow, "WowStyle1DropdownTemplate")
     f._guildDD = guildDD
@@ -7325,24 +7327,38 @@ function EmpireManager:CreateGuildBlacklistWindow()
         guildDD:SetupMenu(function(_, rootDescription)
             rootDescription:SetScrollMode(20 * 20)
             guildSelIdx = nil
-            local bl = self.db.global.guildBlacklist or {}
-            local guilds = {}
+            -- Dedupe on name+realm, and disambiguate the label with the realm
+            -- only when the same guild name exists on more than one realm.
+            local nameCounts, guilds, seen = {}, {}, {}
             for _, entry in pairs(self.db.global.registry) do
-                if entry.guild and entry.guild ~= "" and not bl[entry.guild] then
-                    guilds[entry.guild] = true
+                local g, r = entry.guild, entry.guildRealm or ""
+                if g and g ~= "" and not self:IsGuildBlacklisted(g, r) then
+                    local key = g .. "\1" .. r
+                    if not seen[key] then
+                        seen[key] = true
+                        guilds[#guilds + 1] = { guild = g, realm = r }
+                        nameCounts[g] = (nameCounts[g] or 0) + 1
+                    end
                 end
             end
-            local sorted = {}
-            for g in pairs(guilds) do
-                sorted[#sorted + 1] = g
+            for _, item in ipairs(guilds) do
+                if nameCounts[item.guild] > 1 and item.realm ~= "" then
+                    item.label = item.guild .. " - " .. item.realm
+                else
+                    item.label = item.guild
+                end
             end
-            table.sort(sorted)
-            for i, g in ipairs(sorted) do
-                if g == selectedGuild then guildSelIdx = i end
-                rootDescription:CreateRadio(g, function()
-                    return selectedGuild == g
+            table.sort(guilds, function(a, b)
+                return a.label:lower() < b.label:lower()
+            end)
+            for i, item in ipairs(guilds) do
+                if item.guild == selectedGuild and item.realm == selectedRealm then
+                    guildSelIdx = i
+                end
+                rootDescription:CreateRadio(item.label, function()
+                    return selectedGuild == item.guild and selectedRealm == item.realm
                 end, function()
-                    selectedGuild = g
+                    selectedGuild, selectedRealm = item.guild, item.realm
                 end)
             end
         end)
@@ -7365,12 +7381,16 @@ function EmpireManager:CreateGuildBlacklistWindow()
         if not self.db.global.guildBlacklist then
             self.db.global.guildBlacklist = {}
         end
-        self.db.global.guildBlacklist[selectedGuild] = true
-        self:ChatMsg(
-            string.format("Blacklisted Guild |cffffcc00%s|r - hidden from storage options.", selectedGuild),
-            true
-        )
-        selectedGuild = nil
+        -- Store under the composite GuildKey so a same-named guild on another
+        -- realm stays visible. Falls back to the bare name when the realm is
+        -- unknown (registry entry captured before guildRealm existed).
+        local blKey = self:GuildKey(selectedGuild, selectedRealm) or selectedGuild
+        self.db.global.guildBlacklist[blKey] = true
+        local shown = (selectedRealm and selectedRealm ~= "")
+                and (selectedGuild .. " - " .. selectedRealm)
+            or selectedGuild
+        self:ChatMsg(string.format("Blacklisted Guild |cffffcc00%s|r - hidden from storage options.", shown), true)
+        selectedGuild, selectedRealm = nil, nil
         RebuildGuildDropdown()
         self:RefreshGuildBlacklistDisplay()
     end)
@@ -7402,11 +7422,19 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
     end
 
     local bl = self.db.global.guildBlacklist or {}
+    -- Keys are "Guild-Realm" composites (or bare guild names for legacy
+    -- entries). Show the realm as a readable suffix but remove by the raw key.
     local sorted = {}
-    for guildName in pairs(bl) do
-        sorted[#sorted + 1] = guildName
+    for blKey in pairs(bl) do
+        local g, r = blKey:match("^(.+)-([^-]+)$")
+        sorted[#sorted + 1] = {
+            key = blKey,
+            label = (g and r) and (g .. " - " .. r) or blKey,
+        }
     end
-    table.sort(sorted)
+    table.sort(sorted, function(a, b)
+        return a.label:lower() < b.label:lower()
+    end)
 
     local y = 4
 
@@ -7418,7 +7446,8 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
         fs:SetText("|cff999999No Guilds on the Blacklist. All Guilds appear in storage options.|r")
         y = y + 30
     else
-        for _, guildName in ipairs(sorted) do
+        for _, blItem in ipairs(sorted) do
+            local guildName = blItem.label
             local row = Track(CreateFrame("Button", nil, content))
             row:SetSize(content:GetWidth() - 8, 20)
             row:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
@@ -7443,7 +7472,7 @@ function EmpireManager:RefreshGuildBlacklistDisplay()
                 if popup then
                     popup.data = {
                         onConfirm = function()
-                            bl[guildName] = nil
+                            bl[blItem.key] = nil
                             self:ChatMsg(string.format("Removed |cffffcc00%s|r from Guild Blacklist.", guildName), true)
                             if self._guildBlacklistRebuildDD then
                                 self._guildBlacklistRebuildDD()

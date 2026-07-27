@@ -446,11 +446,10 @@ end
 -- Keyed on guild.."\1"..realm so same-name guilds on different realms are distinct.
 local function RemapCandidateGuilds(self, excludeGuild)
     local seen, list = {}, {}
-    local bl = self.db.global.guildBlacklist or {}
     for _, entry in pairs(self.db.global.registry or {}) do
         local g = entry.guild
         local r = entry.guildRealm or ""
-        if g and g ~= "" and not bl[g] and g ~= excludeGuild then
+        if g and g ~= "" and not self:IsGuildBlacklisted(g, r) and g ~= excludeGuild then
             local key = g .. "\1" .. r
             if not seen[key] then
                 seen[key] = true
@@ -3151,7 +3150,6 @@ end
 function EMRosterPageMixin:BuildBankContent(content, y)
     local assignments = EmpireManager.db.global.storageAssignments or {}
     local cap = EmpireManager.db.global.storageCapacity or {}
-    local guildBL = EmpireManager.db.global.guildBlacklist or {}
 
     local function CharBankLabel(charEntry)
         local base = EmpireManager:ClassColoredName(charEntry)
@@ -3177,7 +3175,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
         elseif asn.type == "guildbank" then
             local guild = asn.guild or "Unknown Guild"
             local realm = asn.realm or ""
-            if guildBL[guild] then
+            if EmpireManager:IsGuildBlacklisted(guild, realm) then
                 bankKey = nil
             else
                 bankKey = "guildbank:" .. guild .. "\1" .. realm
@@ -3253,7 +3251,7 @@ function EMRosterPageMixin:BuildBankContent(content, y)
                 realm = realm or ""
             end
             local key = "guildbank:" .. guildName .. "\1" .. realm
-            if not bankMap[key] and not guildBL[guildName] then
+            if not bankMap[key] and not EmpireManager:IsGuildBlacklisted(guildName, realm) then
                 bankMap[key] = {
                     label = guildName .. " Guild Bank",
                     assignments = {},
@@ -3646,13 +3644,12 @@ end
 -- unique, "Guild - Realm" when the same name appears on multiple realms.
 -- Each entry: { guild = "Vanguard", realm = "Stormrage", label = "Vanguard" }.
 local function BuildGuildList()
-    local bl = EmpireManager.db.global.guildBlacklist or {}
     local nameCounts, pairs_ = {}, {}
     local seen = {}
     for _, entry in pairs(EmpireManager.db.global.registry) do
         local g = entry.guild
         local r = entry.guildRealm
-        if g and g ~= "" and r and r ~= "" and not bl[g] then
+        if g and g ~= "" and r and r ~= "" and not EmpireManager:IsGuildBlacklisted(g, r) then
             local key = g .. "\1" .. r
             if not seen[key] then
                 seen[key] = true

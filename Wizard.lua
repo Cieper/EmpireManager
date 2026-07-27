@@ -132,12 +132,11 @@ end
 -- "Guild" when the name is unique across the roster, "Guild - Realm" when it
 -- collides with another realm. Same shape as Tabs.lua's BuildGuildList.
 local function SortedGuilds()
-    local bl = EmpireManager.db.global.guildBlacklist or {}
     local nameCounts, out, seen = {}, {}, {}
     for _, entry in pairs(EmpireManager.db.global.registry or {}) do
         local g = entry.guild
         local r = entry.guildRealm
-        if g and g ~= "" and r and r ~= "" and not bl[g] then
+        if g and g ~= "" and r and r ~= "" and not EmpireManager:IsGuildBlacklisted(g, r) then
             local key = g .. "\1" .. r
             if not seen[key] then
                 seen[key] = true

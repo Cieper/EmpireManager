@@ -2349,11 +2349,26 @@ function EmpireManager:GetStorageRouting(assignment, entry, profKey, ruleIndex, 
         local guildName = assignment.guild or ""
         local guildRealm = assignment.realm or ""
         local myGuild = entry.guild or ""
-        local myRealm = entry.realm or ""
+        -- Compare against the guild's home realm, since that is what asn.realm
+        -- stores (same field FindCharInGuild matches on). Fall back to the
+        -- character's realm when guildRealm hasn't been captured yet: guild data
+        -- can be unavailable at login, and an empty guildRealm would otherwise
+        -- fail the compare and wrongly route to mail with the bank open.
+        --
+        -- NOTE: this is a consistency fix, not a confirmed bug fix. Whether a
+        -- character's realm can actually differ from their guild's home realm
+        -- (connected realms) was never measured. If a user reports "wants to
+        -- mail with the guild bank open" and the guild-name collision in
+        -- PropagateGuildRealmToRules is ruled out, check here next: log
+        -- entry.realm, entry.guildRealm and asn.realm for the affected rule.
+        local myRealm = entry.guildRealm
+        if not myRealm or myRealm == "" then
+            myRealm = entry.realm or ""
+        end
         -- Same guild AND realm? Deposit directly. Two guilds with the same
         -- name on different realms are distinct, so realm has to match. Normalize
-        -- both sides: entry.realm is the space form (GetRealmName) while the rule's
-        -- realm is the no-space form, so a raw compare wrongly fails on spaced realms.
+        -- both sides: stored realms mix the space form (GetRealmName) and the
+        -- no-space form, so a raw compare wrongly fails on spaced realms.
         if
             guildName ~= ""
             and myGuild == guildName

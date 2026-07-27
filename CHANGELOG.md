@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.5] - 2026-07-27
+
+### Fixed
+
+- **Two Guilds with the same name on different realms are now told apart.** If you have legacy Guilds sharing a name (an Alliance one and a Horde one, say), the addon collapsed them into a single Guild and overwrote one Guild's realm with the other's on every login. Only one appeared in the Guild dropdowns, and Triage wanted to take items out and mail them even with the correct Guild Bank open in front of you. Both Guilds are now tracked separately and shown as "Guild - Realm" wherever the name alone is ambiguous.
+- **The Guild Blacklist hides one Guild at a time.** Blacklisting a Guild whose name is shared with a Guild on another realm hid both. Existing blacklist entries keep working as before.
+
+**If you have two Guilds sharing a name:** log in once on a character in each Guild to refresh their Guild info, then delete and re-create the Guild Bank storage rules for those Guilds. Existing rules still carry the wrong realm and are not rewritten automatically.
+
 ## [1.1.4] - 2026-07-26
 
 ### Fixed
