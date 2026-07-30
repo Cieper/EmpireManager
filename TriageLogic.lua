@@ -1407,6 +1407,29 @@ function EmpireManager:ArmorTierVendorReason(item, entry, proficient)
     return nil
 end
 
+-- Set name protecting this specific item, or nil. Prefers a unique-GUID match so
+-- duplicates of a set piece are not protected; falls back to the itemID map,
+-- which only holds set slots whose location couldn't be resolved to a GUID.
+-- Guild-bank items have no resolvable ItemLocation, so they use the fallback too.
+function EmpireManager:EquipSetNameForItem(item)
+    if self._equipSetGUIDs and item.bag and item.slot and ItemLocation and C_Item and C_Item.GetItemGUID then
+        local loc = ItemLocation:CreateFromBagAndSlot(item.bag, item.slot)
+        if loc and loc:IsValid() then
+            local ok, guid = pcall(C_Item.GetItemGUID, loc)
+            if ok and guid then
+                local name = self._equipSetGUIDs[guid]
+                if name then
+                    return name
+                end
+            end
+        end
+    end
+    if self._equipSetItems then
+        return self._equipSetItems[item.itemID]
+    end
+    return nil
+end
+
 -- True if this Miscellaneous item teaches a mount the player already has, or a
 -- battle pet already owned up to the species cap. Soulbound such items are dead
 -- weight (can't relearn, can't trade), so they route to vendor. Mounts are binary
@@ -1760,9 +1783,14 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         local isEquipGear = item.itemEquipLoc ~= ""
             and (item.itemClassID == ITEM_CLASS_WEAPON or item.itemClassID == ITEM_CLASS_ARMOR)
         if isEquipGear and item.sellPrice > 0 and item.quality < 5 then
-            -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup)
-            if self._equipSetItems and self._equipSetItems[item.itemID] then
-                return CAT_KEEP, "Equipment set: " .. self._equipSetItems[item.itemID]
+            -- Equipment set guard: skip vendoring gear in any saved set (O(1) lookup).
+            -- Match on the item's unique GUID so a duplicate of a set piece sitting
+            -- in bags is NOT protected - only the exact instance the set references.
+            -- _equipSetItems holds itemID entries only for set slots whose location
+            -- couldn't be resolved, so those keep the old (broad) protection.
+            local setName = self:EquipSetNameForItem(item)
+            if setName then
+                return CAT_KEEP, "Equipment set: " .. setName
             end
             -- Required-level guard: gear the character can't equip yet (its required
             -- level is above the player's level) is a future upgrade, not junk. Pawn
@@ -2480,21 +2508,106 @@ end
 -- Equipment Set Lookup (shared by sync and async paths)
 -------------------------------------------------------------------------------
 
+-- Unpacks a C_EquipmentSet.GetItemLocations() entry into a unique item GUID.
+-- Mirrors Blizzard's EquipmentManager_GetLocationData (Shared/EquipmentManager.lua):
+-- the packed value carries PLAYER/BAGS/BANK bitflags, and the flag is SUBTRACTED
+-- to leave the slot; for bag locations the bag index sits ITEM_INVENTORY_BAG_BIT_OFFSET
+-- bits up, and bank bags are shifted past the equipped bags by ITEM_INVENTORY_BANK_BAG_OFFSET.
+-- Returns nil when the location is missing/unresolvable (negative = ignored slot, or
+-- the item isn't currently reachable), which sends the caller to the itemID fallback.
+--
+-- `expectedID` is a sanity check: the location must still hold the item the set names.
+-- In practice the two agree, but a location can go stale between the set being saved
+-- and the scan (item moved/replaced). Registering the wrong GUID there would protect
+-- an unrelated item and leave the real set piece unprotected, so on mismatch we return
+-- nil and let the caller fall back to itemID matching.
+local function ResolveEquipSetGUID(packed, expectedID)
+    if not packed or packed < 0 or not ItemLocation or not C_Item or not C_Item.GetItemGUID then
+        return nil
+    end
+    local isPlayer = bit.band(packed, ITEM_INVENTORY_LOCATION_PLAYER) ~= 0
+    local isBank = bit.band(packed, ITEM_INVENTORY_LOCATION_BANK) ~= 0
+    local isBags = bit.band(packed, ITEM_INVENTORY_LOCATION_BAGS) ~= 0
+    local slot = packed
+    if isPlayer then
+        slot = slot - ITEM_INVENTORY_LOCATION_PLAYER
+    elseif isBank then
+        slot = slot - ITEM_INVENTORY_LOCATION_BANK
+    end
+    local loc
+    if isPlayer then
+        -- Equipped wins over the BAGS flag. A set slot that is currently worn packs
+        -- PLAYER|BAGS (e.g. 0x300016), where the bag/slot part is a stale leftover
+        -- pointing at whatever occupies that bag slot NOW. Decoding it as a bag
+        -- location silently registers an unrelated item's GUID as the set's.
+        loc = ItemLocation:CreateFromEquipmentSlot(slot)
+    elseif isBags then
+        slot = slot - ITEM_INVENTORY_LOCATION_BAGS
+        local bag = bit.rshift(slot, ITEM_INVENTORY_BAG_BIT_OFFSET)
+        slot = slot - bit.lshift(bag, ITEM_INVENTORY_BAG_BIT_OFFSET)
+        if isBank then
+            bag = bag + ITEM_INVENTORY_BANK_BAG_OFFSET
+        end
+        loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+    end
+    if not loc or not loc:IsValid() then
+        return nil
+    end
+    -- Stale-entry guard: the location must still hold the item the set names.
+    if expectedID and C_Item.GetItemID then
+        local okID, actualID = pcall(C_Item.GetItemID, loc)
+        if not okID or actualID ~= expectedID then
+            return nil
+        end
+    end
+    local ok, guid = pcall(C_Item.GetItemGUID, loc)
+    if ok then
+        return guid
+    end
+    return nil
+end
+
+-- Builds two lookups from the player's saved equipment sets:
+--   _equipSetGUIDs[itemGUID] = setName  - the exact item instances a set uses.
+--   _equipSetItems[itemID]   = setName  - itemID fallback, populated ONLY for
+--                                         set slots whose location couldn't be
+--                                         resolved to a GUID.
+-- C_EquipmentSet.GetItemIDs returns plain itemIDs, so matching on it alone keeps
+-- every duplicate of a set piece sitting in bags (3x Glorious Crusader's Keepsake
+-- all read "Equipment set: Tank"). GetItemLocations gives a per-slot packed
+-- location, which resolves to a unique GUID and tells the copies apart.
 local function BuildEquipSetLookup(addon)
     addon._equipSetItems = nil
+    addon._equipSetGUIDs = nil
     if addon.db.global.options.skipEquipmentSets and C_EquipmentSet and C_EquipmentSet.GetEquipmentSetIDs then
         local lookup = {}
+        local guidLookup = {}
         local setIDs = C_EquipmentSet.GetEquipmentSetIDs()
         for _, setID in ipairs(setIDs) do
             local setName = C_EquipmentSet.GetEquipmentSetInfo(setID)
             local itemIDs = C_EquipmentSet.GetItemIDs(setID)
-            for _, id in pairs(itemIDs or {}) do
-                if id and id > 0 and not lookup[id] then
-                    lookup[id] = setName or "?"
+            local locations = C_EquipmentSet.GetItemLocations(setID)
+            for invSlot, id in pairs(itemIDs or {}) do
+                if id and id > 0 then
+                    local guid = ResolveEquipSetGUID(locations and locations[invSlot], id)
+                    if guid then
+                        -- The set's exact instance. Only this one is protected; other
+                        -- copies of the same itemID are spares and classify normally.
+                        if not guidLookup[guid] then
+                            guidLookup[guid] = setName or "?"
+                        end
+                    elseif not lookup[id] then
+                        -- No resolvable location (-1 ignored slot, or the item is not
+                        -- currently reachable). We cannot tell instances apart, so fall
+                        -- back to itemID and protect every copy rather than risk
+                        -- vendoring a set piece.
+                        lookup[id] = setName or "?"
+                    end
                 end
             end
         end
         addon._equipSetItems = lookup
+        addon._equipSetGUIDs = guidLookup
     end
 end
 

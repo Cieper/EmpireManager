@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.6] - 2026-07-30
+
+### Fixed
+
+- **Profession tracking is fixed.** On non-English clients professions were matched by their translated name and never resolved, so the Sidecar's Auto button assigned no roles, the Setup Wizard created no rules, and profession counts and skill levels read as empty. Separately, on every client language, the per-expansion skill breakdown stopped being saved in 0.3.2. Professions are now identified by a language-independent ID, exports always use English names, and the expansion breakdown is recorded again. Each character's data refreshes the next time you log in on them.
+- **Spare copies of equipment set gear are no longer kept from Triage.** Equipment set protection matched by item rather than by the specific piece, so every copy you owned was kept. Only the piece a set actually uses is protected now; the spares follow the normal soulbound gear rules.
+
 ## [1.1.5] - 2026-07-27
 
 ### Fixed

@@ -654,11 +654,11 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
         if hasProfs then
             for _, p in ipairs(entry.professions) do
                 local skill, maxSkill = p.skill or 0, p.maxSkill or 0
-                if p.expansionSkills and #p.expansionSkills > 0 then
-                    local newest = p.expansionSkills[#p.expansionSkills]
+                local newest = EmpireManager:NewestExpansionSkill(p)
+                if newest then
                     skill, maxSkill = newest.skill, newest.maxSkill
                 end
-                local profInfo = EmpireManager.PROF_INFO_BY_LABEL[p.name]
+                local profInfo = EmpireManager:ProfInfoFromEntryProf(p)
                 local r, g, b = 1, 1, 1
                 if profInfo then
                     r, g, b = profInfo.r, profInfo.g, profInfo.b

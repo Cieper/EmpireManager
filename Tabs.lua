@@ -2203,10 +2203,14 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
 
         if entry.professions then
             for _, prof in ipairs(entry.professions) do
-                if prof.name then
+                -- Key by profession KEY, not the localized name: prof.name is
+                -- language-specific, so keying on it made every lookup below miss
+                -- on non-English clients and every bar read 0.
+                local pInfo = EmpireManager:ProfInfoFromEntryProf(prof)
+                if pInfo then
                     addChar(
                         profData,
-                        prof.name,
+                        pInfo.key,
                         { name = ci.name, level = ci.level, realm = ci.realm, class = ci.class }
                     )
                 end
@@ -2450,7 +2454,7 @@ function EMRosterPageMixin:BuildInfoContent(content, y)
     local profMax = 0
     for _, pInfo in ipairs(EmpireManager.PROF_DISPLAY) do
         if pInfo.category ~= "secondary" then
-            local pd = profData[pInfo.label] or { count = 0, chars = {} }
+            local pd = profData[pInfo.key] or { count = 0, chars = {} }
             profSorted[#profSorted + 1] = { info = pInfo, count = pd.count, chars = pd.chars }
             if pd.count > profMax then
                 profMax = pd.count
@@ -2615,13 +2619,22 @@ end
 -- "Dragon Isles"); label is the display name. Both keys map to the same entry
 -- so we can sort by id and re-label the API name when rendering tooltips.
 local EXPANSION_LOOKUP = {}
+local EXPANSION_ENTRY_BY_ID = {}
 for _, info in ipairs(EmpireManager.EXPANSION_DISPLAY) do
     local entry = { id = info.expansionID, label = info.label }
     EXPANSION_LOOKUP[info.label:lower()] = entry
+    EXPANSION_ENTRY_BY_ID[info.expansionID] = entry
     if info.apiNames then
         for _, n in ipairs(info.apiNames) do
             EXPANSION_LOOKUP[n:lower()] = entry
         end
+    end
+end
+-- Localized API names (e.g. deDE "Dracheninseln") so a non-English client's stored
+-- expansionName still re-labels to the English display label instead of rendering raw.
+for lname, id in pairs(EmpireManager.EXPANSION_API_NAME_TO_ID or {}) do
+    if EXPANSION_ENTRY_BY_ID[id] and not EXPANSION_LOOKUP[lname] then
+        EXPANSION_LOOKUP[lname] = EXPANSION_ENTRY_BY_ID[id]
     end
 end
 local EXPANSION_ID_BY_LABEL = {}
@@ -2638,22 +2651,31 @@ local function ExpansionOrder(expEntry, fallbackIndex)
 end
 
 -- Return the skill in the latest expansion this character has data for, in a given profession.
-local function GetLatestExpansionSkill(entry, profLabel)
+-- profKey is a PROF_DISPLAY key, not a localized name - resolve each stored row
+-- through ProfInfoFromEntryProf so this works on any client language.
+local function GetLatestExpansionSkill(entry, profKey)
     if not entry.professions then
         return 0
     end
     for _, p in ipairs(entry.professions) do
-        if p.name == profLabel then
+        local pi = EmpireManager:ProfInfoFromEntryProf(p)
+        if pi and pi.key == profKey then
             if p.expansionSkills and #p.expansionSkills > 0 then
                 local bestOrder, bestSkill = -1, 0
                 for i, exp in ipairs(p.expansionSkills) do
-                    local order = ExpansionOrder(exp, i)
-                    if order > bestOrder then
-                        bestOrder = order
-                        bestSkill = exp.skill or 0
+                    -- Ignore rows older builds stored wrongly (base-profession totals),
+                    -- otherwise the aggregate 300/700 would win as "latest".
+                    if not EmpireManager:IsBogusExpansionSkillRow(exp) then
+                        local order = ExpansionOrder(exp, i)
+                        if order > bestOrder then
+                            bestOrder = order
+                            bestSkill = exp.skill or 0
+                        end
                     end
                 end
-                return bestSkill
+                if bestOrder >= 0 then
+                    return bestSkill
+                end
             end
             return p.skill or 0
         end
@@ -2801,7 +2823,7 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
         -- Collect members and capture each member's latest-expansion skill (for sorting).
         local members = {}
         for guid, entry in pairs(EmpireManager.db.global.registry) do
-            local skill = GetLatestExpansionSkill(entry, info.label)
+            local skill = GetLatestExpansionSkill(entry, info.key)
             if EmpireManager:HasProfessionRole(entry, profKey) or skill > 0 then
                 members[#members + 1] = { guid = guid, entry = entry, skill = skill }
             end
@@ -2840,7 +2862,7 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                 end
                 fs:SetText(nameText)
 
-                local cGuid, cEntry, profLabel = m.guid, m.entry, info.label
+                local cGuid, cEntry, memberProfKey = m.guid, m.entry, info.key
                 btn:SetScript("OnClick", function()
                     EmpireManager:OpenSidecar(cGuid)
                 end)
@@ -2855,7 +2877,8 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                     )
                     if cEntry.professions then
                         for _, p in ipairs(cEntry.professions) do
-                            if p.name == profLabel and p.expansionSkills then
+                            local ppi = EmpireManager:ProfInfoFromEntryProf(p)
+                            if ppi and ppi.key == memberProfKey and p.expansionSkills then
                                 -- Dedupe by expansion. Prefer numeric expansionID
                                 -- (locale-proof, written by SnapshotExpansionSkills).
                                 -- Fall back to label lookup for legacy/import data.
@@ -2865,6 +2888,11 @@ function EMRosterPageMixin:BuildDeptContent(content, y)
                                         or nil
                                     local id = exp.expansionID or (lookup and lookup.id)
                                     local displayName = (lookup and lookup.label) or exp.expansionName
+                                    -- Drop rows older builds stored wrongly (base-profession
+                                    -- aggregates in any locale). No DB migration needed.
+                                    if EmpireManager:IsBogusExpansionSkillRow(exp) then
+                                        displayName = nil
+                                    end
                                     if displayName and displayName ~= "" and displayName:lower() ~= "unknown" then
                                         local key = id or ("name:" .. displayName:lower())
                                         local existing = byKey[key]

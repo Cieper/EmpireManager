@@ -242,12 +242,8 @@ function EmpireManager:AutoAssignRoles(entry, guid)
     -- Reset existing profession selections
     entry.assignments.artisan = nil
     entry.assignments.gatherer = nil
-    local profLookup = {}
-    for _, info in ipairs(self.PROF_DISPLAY) do
-        profLookup[info.label] = info
-    end
     for _, prof in ipairs(entry.professions or {}) do
-        local info = profLookup[prof.name]
+        local info = self:ProfInfoFromEntryProf(prof)
         if info then
             if info.category == "gathering" then
                 if not entry.assignments.gatherer then

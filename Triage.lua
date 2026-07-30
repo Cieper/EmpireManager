@@ -992,6 +992,7 @@ function EmpireManager:CreateTriageOverlay()
         EmpireManager:_ReleaseTabWidgets("bags")
         EmpireManager:_ReleaseTabWidgets("bank")
         EmpireManager._equipSetItems = nil
+        EmpireManager._equipSetGUIDs = nil
         EmpireManager._classifyCtx = nil
     end)
 
@@ -1046,6 +1047,7 @@ function EmpireManager:CreateTriageOverlay()
         self:_ReleaseTabWidgets("bags")
         self:_ReleaseTabWidgets("bank")
         self._equipSetItems = nil
+        self._equipSetGUIDs = nil
         self._classifyCtx = nil
         f:Hide()
     end)

@@ -376,15 +376,19 @@ function EMCharacterRowMixin:ShowProfTooltip()
     EmpireManager:AddTooltipHeader(entry)
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("Professions", 1, 0.82, 0)
+    -- Keyed by profession key, not the localized name (see ProfInfoFromEntryProf).
     local profByName = {}
     if entry.professions then
         for _, p in ipairs(entry.professions) do
-            profByName[p.name] = p
+            local pi = EmpireManager:ProfInfoFromEntryProf(p)
+            if pi then
+                profByName[pi.key] = p
+            end
         end
     end
     for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
         if profSet[info.key] then
-            local profData = profByName[info.label]
+            local profData = profByName[info.key]
             local label = info.label
             if profData and profData.skill then
                 label = string.format("%s (%d)", info.label, profData.skill)
@@ -396,7 +400,7 @@ function EMCharacterRowMixin:ShowProfTooltip()
     -- so they never appear in profSet. Show any that were captured from skill data.
     for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
         if info.category == "secondary" and not profSet[info.key] then
-            local profData = profByName[info.label]
+            local profData = profByName[info.key]
             if profData and profData.skill then
                 local label = string.format("%s (%d)", info.label, profData.skill)
                 GameTooltip:AddLine(string.format(ICON16_FMT, info.icon, label), info.r, info.g, info.b)

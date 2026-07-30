@@ -201,6 +201,32 @@ EmpireManager.EXPANSION_DISPLAY = {
     },
 }
 
+-- Localized expansion names as returned by C_TradeSkillUI (ProfessionInfo.expansionName).
+-- ProfessionInfo carries NO numeric expansionID, so the name is the only handle we get
+-- and it is localized - hence this table. Keyed by lowercased API name -> expansionID.
+-- Add a language by appending its names; unknown names simply fall back to no ID
+-- (the row is still stored and displayed under its raw name).
+-- deDE names captured from a live German client.
+EmpireManager.EXPANSION_API_NAME_TO_ID = {
+    -- deDE
+    ["klassisch"] = 0,
+    ["scherbenwelt"] = 1,
+    ["nordend"] = 2,
+    ["kataklysmus"] = 3,
+    ["schattenlande"] = 8,
+    ["dracheninseln"] = 9,
+    ["kul tiras"] = 7,
+    -- Names identical across enUS/deDE (Pandaria, Draenor, Legion, Khaz Algar,
+    -- Midnight, Classic) are covered by EXPANSION_DISPLAY label/apiNames already,
+    -- but listed here too so this table alone is sufficient.
+    ["classic"] = 0,
+    ["pandaria"] = 4,
+    ["draenor"] = 5,
+    ["legion"] = 6,
+    ["khaz algar"] = 10,
+    ["midnight"] = 11,
+}
+
 -- Returns an inline texture string for an expansion icon, cropped to its iconWidth
 function EmpireManager:ExpIconString(expInfo, yOffset)
     local w = expInfo.iconWidth or 44
@@ -1218,6 +1244,129 @@ for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
     EmpireManager.PROF_INFO_BY_LABEL[info.label] = info
     EmpireManager.VALID_PROF_KEYS[info.key] = true
 end
+
+-- True if a stored `expansionSkills` row should NOT be displayed.
+--
+-- Read-time filter, so no SavedVariables migration is needed: rows written by older
+-- builds can be wrong in two ways, and both are detectable without touching the DB.
+--   1. Base-profession aggregate rows. GetAllProfessionTradeSkillLines includes the
+--      profession's own line, whose expansionName is the client's "unknown" string
+--      ("Unknown" / "Unbekannt") and whose skill is the total across all expansions
+--      (e.g. 300/700). Not an expansion tier.
+--   2. Cross-profession rows. Older builds stored every profession's lines under
+--      whichever profession's window was open, so a breakdown could blend two
+--      professions. Those rows are indistinguishable per-row, but they always came
+--      with the aggregate rows above, so a row whose maxSkill exceeds any real tier
+--      cap is a strong signal. We only filter case 1 (provably bogus) and leave the
+--      rest: the write path is fixed, so rows repopulate correctly on the next
+--      profession-window open.
+-- `maxTierCap` guards case 1 without hardcoding locale strings: a tier's cap is a
+-- few hundred at most, while aggregates sum every expansion.
+function EmpireManager:IsBogusExpansionSkillRow(exp)
+    if type(exp) ~= "table" then
+        return true
+    end
+    -- No resolvable expansion AND no usable name -> nothing to show.
+    local name = exp.expansionName
+    if not exp.expansionID and (type(name) ~= "string" or name == "") then
+        return true
+    end
+    -- Unresolvable expansion name = the client's "unknown" string in any locale.
+    -- A real tier always resolves (we keep the localized-name table in sync), so an
+    -- unresolvable name on a row with no numeric ID is the base-profession aggregate.
+    if not exp.expansionID and not self:ExpansionIDFromAPIName(name) then
+        return true
+    end
+    return false
+end
+
+-- The newest displayable expansion tier for a stored profession row, or nil.
+-- Rows are stored oldest-first, so the newest is the last non-bogus entry. Callers
+-- use this for the headline "62/105" figure instead of indexing the raw array, which
+-- could land on a base-profession aggregate written by an older build.
+function EmpireManager:NewestExpansionSkill(prof)
+    local list = type(prof) == "table" and prof.expansionSkills or nil
+    if type(list) ~= "table" then
+        return nil
+    end
+    for i = #list, 1, -1 do
+        local exp = list[i]
+        if not self:IsBogusExpansionSkillRow(exp) then
+            return exp
+        end
+    end
+    return nil
+end
+
+-- expansionName (from ProfessionInfo) -> numeric expansionID, or nil if unknown.
+-- Checks the English label/apiNames in EXPANSION_DISPLAY first, then the localized
+-- table. ProfessionInfo has no expansionID field, so this name lookup is the only
+-- way to order and dedupe per-expansion skill rows.
+function EmpireManager:ExpansionIDFromAPIName(name)
+    if type(name) ~= "string" or name == "" then
+        return nil
+    end
+    local lower = name:lower()
+    for _, info in ipairs(self.EXPANSION_DISPLAY) do
+        if info.label and info.label:lower() == lower then
+            return info.expansionID
+        end
+        for _, alt in ipairs(info.apiNames or {}) do
+            if alt:lower() == lower then
+                return info.expansionID
+            end
+        end
+    end
+    return self.EXPANSION_API_NAME_TO_ID[lower]
+end
+
+-- Enum.Profession -> our profession key. Values are Blizzard's own enum
+-- (Blizzard_APIDocumentationGenerated/ProfessionConstantsDocumentation.lua), so
+-- they are identical on every client locale. FirstAid (0) has no counterpart here.
+EmpireManager.ENUM_PROFESSION_TO_KEY = {
+    [1] = "blacksmithing",
+    [2] = "leatherworking",
+    [3] = "alchemy",
+    [4] = "herbalism",
+    [5] = "cooking",
+    [6] = "mining",
+    [7] = "tailoring",
+    [8] = "engineering",
+    [9] = "enchanting",
+    [10] = "fishing",
+    [11] = "skinning",
+    [12] = "jewelcrafting",
+    [13] = "inscription",
+    [14] = "archaeology",
+}
+
+-- Resolves a stored `entry.professions` row to its PROF_DISPLAY info, WITHOUT
+-- depending on the client language.
+--
+-- `prof.name` comes from GetProfessionInfo and is localized ("Kräuterkunde" on a
+-- German client), while PROF_DISPLAY.label is hardcoded English - so matching on
+-- the name silently fails on every non-English client. `prof.skillLineID` is a
+-- server-side ID and is locale-independent, so resolve through that first and
+-- keep the label match only as a fallback for rows snapshotted before
+-- skillLineID was recorded.
+function EmpireManager:ProfInfoFromEntryProf(prof)
+    if type(prof) ~= "table" then
+        return nil
+    end
+    local slid = prof.skillLineID
+    if slid and C_TradeSkillUI and C_TradeSkillUI.GetProfessionInfoBySkillLineID then
+        local ok, info = pcall(C_TradeSkillUI.GetProfessionInfoBySkillLineID, slid)
+        if ok and info and info.profession then
+            local key = self.ENUM_PROFESSION_TO_KEY[info.profession]
+            if key and self.PROF_INFO_BY_KEY[key] then
+                return self.PROF_INFO_BY_KEY[key]
+            end
+        end
+    end
+    -- Legacy fallback: pre-skillLineID rows, or an ID the client can't resolve.
+    -- Only ever matches on an English client, which is why it is not the primary path.
+    return prof.name and self.PROF_INFO_BY_LABEL[prof.name] or nil
+end
 -- Also register non-profession storage categories so display lookups resolve them
 for _, info in ipairs(EmpireManager.STORAGE_CATEGORY_DISPLAY) do
     EmpireManager.PROF_INFO_BY_KEY[info.key] = info
@@ -1685,16 +1834,16 @@ function EmpireManager:ShowNameTooltip(widget, entry, anchor)
     -- Professions (warm yellow, comma-separated). Only the two main professions;
     -- secondaries (Fishing/Cooking/Archaeology) are skipped.
     if entry.professions and #entry.professions > 0 then
-        local isSecondary = {}
-        for _, info in ipairs(self.PROF_DISPLAY) do
-            if info.category == "secondary" then
-                isSecondary[info.label] = true
-            end
-        end
+        -- Classify via ProfInfoFromEntryProf, not the localized name: on a
+        -- non-English client a label-keyed set never matches, so every secondary
+        -- (Fishing/Cooking/Archaeology) leaked into this list.
         local names = {}
         for _, p in ipairs(entry.professions) do
-            if type(p.name) == "string" and p.name ~= "" and not isSecondary[p.name] then
-                names[#names + 1] = p.name
+            if type(p.name) == "string" and p.name ~= "" then
+                local pi = self:ProfInfoFromEntryProf(p)
+                if not pi or pi.category ~= "secondary" then
+                    names[#names + 1] = p.name
+                end
             end
         end
         if #names > 0 then

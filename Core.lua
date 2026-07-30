@@ -2882,8 +2882,8 @@ function EmpireManager:SnapshotProfessions(entry)
                 local old = oldByName[name]
                 -- Prefer the newest expansion skill snapshot (from opening the profession window)
                 -- over GetProfessionInfo, which returns overall tier rank (1/100 style).
-                if old and old.expansionSkills and #old.expansionSkills > 0 then
-                    local newest = old.expansionSkills[#old.expansionSkills]
+                local newest = old and self:NewestExpansionSkill(old) or nil
+                if newest then
                     skillLevel = newest.skill
                     maxSkillLevel = newest.maxSkill
                 end
@@ -2918,13 +2918,25 @@ function EmpireManager:SnapshotExpansionSkills(entry)
     end
     local profName = baseProfInfo.professionName
 
-    -- Find matching entry in entry.professions
+    -- Find matching entry in entry.professions.
+    -- Match on the Enum.Profession, NOT on professionName: the open window reports
+    -- the decorated TIER name, which in German is "Schmiedekunst von Midnight" while
+    -- the stored row is the bare "Schmiedekunst". English happens to work only
+    -- because its form ("Midnight Blacksmithing") keeps the bare name as a suffix.
+    -- Falling back to the name keeps pre-skillLineID rows working on English clients.
     if not entry.professions then
         return
     end
+    local openKey = baseProfInfo.profession and self.ENUM_PROFESSION_TO_KEY[baseProfInfo.profession] or nil
     local profEntry
     for _, p in ipairs(entry.professions) do
-        if p.name == profName then
+        if openKey then
+            local pi = self:ProfInfoFromEntryProf(p)
+            if pi and pi.key == openKey then
+                profEntry = p
+                break
+            end
+        elseif p.name == profName then
             profEntry = p
             break
         end
@@ -2933,27 +2945,42 @@ function EmpireManager:SnapshotExpansionSkills(entry)
         return
     end
 
-    -- Build per-expansion skill map keyed by numeric expansionID (locale-proof).
-    -- `GetAllProfessionTradeSkillLines` can return multiple lines per expansion
-    -- (parent + child), so dedupe keeping the highest skill. Skip entries with
-    -- no valid expansionID.
-    local byExpId = {}
+    -- Build the per-expansion skill map.
+    --
+    -- ProfessionInfo does NOT carry a numeric expansionID (see
+    -- Blizzard_APIDocumentationGenerated/TradeSkillUITypesDocumentation.lua:
+    -- profession/professionID/professionName/expansionName/skillLevel/...). An
+    -- earlier version gated rows on `info.expansionID >= 0`, which is always nil,
+    -- so EVERY row was dropped and expansionSkills stayed empty on all locales.
+    -- Resolve the ID from the localized expansionName instead, and keep the row
+    -- even when the name is unknown (displayed under its raw name, sorted last).
+    --
+    -- `GetAllProfessionTradeSkillLines` returns lines for every profession the
+    -- character knows, most with maxSkillLevel 0, so filter on maxSkillLevel > 0.
+    local byExpKey = {}
     for _, lineID in ipairs(skillLines) do
         local info = C_TradeSkillUI.GetProfessionInfoBySkillLineID(lineID)
-        if
-            info
-            and info.skillLevel
-            and info.maxSkillLevel
-            and info.maxSkillLevel > 0
-            and info.expansionID
-            and info.expansionID >= 0
-        then
-            local existing = byExpId[info.expansionID]
+        -- Only lines belonging to the profession whose window is open:
+        -- GetAllProfessionTradeSkillLines returns lines for EVERY known profession,
+        -- so without this an Engineering line lands in Enchanting's breakdown.
+        local lineKey = info and info.profession and self.ENUM_PROFESSION_TO_KEY[info.profession] or nil
+        local sameProf = (not openKey) or (lineKey == openKey)
+        -- Skip the BASE profession line (no parentProfessionID): it reports the
+        -- aggregate total across all expansions ("Unbekannt", e.g. 300/700), which
+        -- is not an expansion tier and would render as an "Unknown" row.
+        local isTierLine = info and info.parentProfessionID ~= nil
+        if info and sameProf and isTierLine and info.skillLevel and info.maxSkillLevel and info.maxSkillLevel > 0 then
+            local expName = info.expansionName
+            local expID = self:ExpansionIDFromAPIName(expName)
+            -- Dedupe by ID when known (parent + child lines share an expansion),
+            -- else by name so an unmapped locale still collapses duplicates.
+            local key = expID or ("name:" .. tostring(expName or lineID):lower())
+            local existing = byExpKey[key]
             if not existing or info.skillLevel > existing.skill then
-                byExpId[info.expansionID] = {
+                byExpKey[key] = {
                     skillLineID = lineID,
-                    expansionID = info.expansionID,
-                    expansionName = info.expansionName, -- may be localized; tooltip relabels
+                    expansionID = expID,
+                    expansionName = expName,
                     skill = info.skillLevel,
                     maxSkill = info.maxSkillLevel,
                 }
@@ -2962,11 +2989,16 @@ function EmpireManager:SnapshotExpansionSkills(entry)
     end
 
     local expSkills = {}
-    for _, e in pairs(byExpId) do
+    for _, e in pairs(byExpKey) do
         expSkills[#expSkills + 1] = e
     end
+    -- Unknown expansions (nil ID) sort last rather than colliding at 999.
     table.sort(expSkills, function(a, b)
-        return (a.expansionID or 999) < (b.expansionID or 999)
+        local ai, bi = a.expansionID or 998, b.expansionID or 998
+        if ai ~= bi then
+            return ai < bi
+        end
+        return (a.expansionName or "") < (b.expansionName or "")
     end)
     profEntry.expansionSkills = expSkills
 
@@ -3258,15 +3290,33 @@ function EmpireManager:ExportRegistry()
         if entry.professions and #entry.professions > 0 then
             local profParts = {}
             for _, p in ipairs(entry.professions) do
-                local s = (p.name or "Unknown") .. ":" .. (p.skill or 0) .. "/" .. (p.maxSkill or 0)
+                -- Export CANONICAL ENGLISH names, never the client's localized ones.
+                -- p.name / t.expansionName are whatever language the character was
+                -- snapshotted on ("Ingenieurskunst", "Dracheninseln"), and the import
+                -- side resolves professions and expansions by English name - so a
+                -- localized export could not be re-imported anywhere.
+                local pInfo = self:ProfInfoFromEntryProf(p)
+                local profLabel = (pInfo and pInfo.label) or p.name or "Unknown"
+                local s = profLabel .. ":" .. (p.skill or 0) .. "/" .. (p.maxSkill or 0)
                 if p.expansionSkills and #p.expansionSkills > 0 then
                     local tierParts = {}
                     for _, t in ipairs(p.expansionSkills) do
-                        tierParts[#tierParts + 1] = (t.expansionName or "?")
-                            .. "="
-                            .. (t.skill or 0)
-                            .. "/"
-                            .. (t.maxSkill or 0)
+                        -- Skip rows older builds stored wrongly, so exports stay clean.
+                        if not self:IsBogusExpansionSkillRow(t) then
+                            local expID = t.expansionID or self:ExpansionIDFromAPIName(t.expansionName)
+                            local expLabel = t.expansionName or "?"
+                            for _, info in ipairs(self.EXPANSION_DISPLAY) do
+                                if info.expansionID == expID then
+                                    expLabel = info.label
+                                    break
+                                end
+                            end
+                            tierParts[#tierParts + 1] = expLabel
+                                .. "="
+                                .. (t.skill or 0)
+                                .. "/"
+                                .. (t.maxSkill or 0)
+                        end
                     end
                     s = s .. "[" .. table.concat(tierParts, ",") .. "]"
                 end
@@ -3443,8 +3493,21 @@ function EmpireManager:ImportRegistryFromText(text, autoAssign)
                             if pMax < 0 or pMax > 1000 then
                                 pMax = 0
                             end
+                            -- Normalize to the canonical English label when the name is
+                            -- recognizable. Imported rows carry no skillLineID, so
+                            -- ProfInfoFromEntryProf resolves them by label - a localized
+                            -- name from an older non-English export would never match.
+                            local canonical = EmpireManager.PROF_INFO_BY_LABEL[profName]
+                            if not canonical then
+                                for _, pi in ipairs(EmpireManager.PROF_DISPLAY) do
+                                    if pi.label:lower() == profName:lower() then
+                                        canonical = pi
+                                        break
+                                    end
+                                end
+                            end
                             local profEntry = {
-                                name = profName,
+                                name = (canonical and canonical.label) or profName,
                                 skill = pSkill,
                                 maxSkill = pMax,
                             }

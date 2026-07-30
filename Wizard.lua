@@ -161,9 +161,8 @@ local function EntryProfKeys(entry)
     if not entry or not entry.professions then
         return set
     end
-    local profByLabel = EmpireManager.PROF_INFO_BY_LABEL or {}
     for _, prof in ipairs(entry.professions) do
-        local info = profByLabel[prof.name]
+        local info = EmpireManager:ProfInfoFromEntryProf(prof)
         if info and (info.category == "crafting" or info.category == "gathering") then
             set[info.key] = true
         end
@@ -177,9 +176,8 @@ local function EntryProfSkills(entry)
     if not entry or not entry.professions then
         return out
     end
-    local profByLabel = EmpireManager.PROF_INFO_BY_LABEL or {}
     for _, prof in ipairs(entry.professions) do
-        local info = profByLabel[prof.name]
+        local info = EmpireManager:ProfInfoFromEntryProf(prof)
         if info and (info.category == "crafting" or info.category == "gathering") then
             out[info.key] = prof.skill or 0
         end
