@@ -7335,7 +7335,9 @@ function EmpireManager:CreateGuildBlacklistWindow()
             for _, entry in pairs(self.db.global.registry) do
                 local g, r = entry.guild, entry.guildRealm or ""
                 if g and g ~= "" and not self:IsGuildBlacklisted(g, r) then
-                    local key = g .. "\1" .. r
+                    -- GuildKey collapses the two stored realm spellings; fall
+                    -- back to a raw key when the realm is empty (GuildKey nils).
+                    local key = self:GuildKey(g, r) or (g .. "\1" .. r)
                     if not seen[key] then
                         seen[key] = true
                         guilds[#guilds + 1] = { guild = g, realm = r }

@@ -450,7 +450,10 @@ local function RemapCandidateGuilds(self, excludeGuild)
         local g = entry.guild
         local r = entry.guildRealm or ""
         if g and g ~= "" and not self:IsGuildBlacklisted(g, r) and g ~= excludeGuild then
-            local key = g .. "\1" .. r
+            -- GuildKey when the realm is known (it collapses the two stored realm
+            -- spellings into one key); raw concat when it isn't, since GuildKey
+            -- returns nil on an empty realm and those entries still belong here.
+            local key = self:GuildKey(g, r) or (g .. "\1" .. r)
             if not seen[key] then
                 seen[key] = true
                 list[#list + 1] = { guild = g, realm = r }
@@ -3678,8 +3681,12 @@ local function BuildGuildList()
         local g = entry.guild
         local r = entry.guildRealm
         if g and g ~= "" and r and r ~= "" and not EmpireManager:IsGuildBlacklisted(g, r) then
-            local key = g .. "\1" .. r
-            if not seen[key] then
+            -- Dedupe through GuildKey, not a raw concat: registry entries store
+            -- the realm in two spellings ("Argent Dawn" from GetRealmName vs
+            -- "ArgentDawn" from GetGuildInfo's 4th return), which a raw key
+            -- treats as two guilds.
+            local key = EmpireManager:GuildKey(g, r)
+            if key and not seen[key] then
                 seen[key] = true
                 pairs_[#pairs_ + 1] = { guild = g, realm = r }
                 nameCounts[g] = (nameCounts[g] or 0) + 1

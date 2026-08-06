@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.7] - 2026-08-06
+
+### Added
+
+- **The Characters grid highlights the selected row.** A gold wash and a left edge bar mark the character whose Sidecar is open. With the Sidecar closed the highlight falls back to the character you are logged in on, so the grid always shows where you are.
+
+### Fixed
+
+- **Guilds no longer appear twice in Guild lists.** A Guild's realm is stored in two spellings depending on which part of the game reported it ("Argent Dawn" or "ArgentDawn"), and one Guild could show up as two separate entries in the Setup Wizard, the storage dropdowns, the remap picker, and the Guild Blacklist window.
+- **Spare copies of equipment set gear are left alone by Triage.** Sets were still matching by item rather than by the specific piece, so every duplicate you owned was kept. Only the piece a set actually uses is protected now, including off-spec pieces you are not currently wearing; the spares follow the normal soulbound gear rules.
+
 ## [1.1.6] - 2026-07-30
 
 ### Fixed

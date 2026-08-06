@@ -2521,6 +2521,9 @@ end
 -- and the scan (item moved/replaced). Registering the wrong GUID there would protect
 -- an unrelated item and leave the real set piece unprotected, so on mismatch we return
 -- nil and let the caller fall back to itemID matching.
+-- Second return: true when the GUID came from a bag slot (an instance the bag scan
+-- can actually match), false when it came from an equipped slot. Callers use it to
+-- decide whether the GUID is enough on its own or still needs the itemID fallback.
 local function ResolveEquipSetGUID(packed, expectedID)
     if not packed or packed < 0 or not ItemLocation or not C_Item or not C_Item.GetItemGUID then
         return nil
@@ -2534,14 +2537,18 @@ local function ResolveEquipSetGUID(packed, expectedID)
     elseif isBank then
         slot = slot - ITEM_INVENTORY_LOCATION_BANK
     end
+    -- BAGS wins over PLAYER. Mirrors EquipmentManager_GetLocationData
+    -- (Blizzard_FrameXML/Shared/EquipmentManager.lua), where the isBags branch is an
+    -- independent `if` after the PLAYER/BANK flag is subtracted - NOT an elseif on
+    -- isPlayer. Measured in-game: a worn set slot packs PLAYER only (0x100001), while
+    -- an item sitting in bags packs PLAYER|BAGS (e.g. 0x3000CC = bag 3 slot 12).
+    -- Treating isPlayer as the winning branch sent every bagged set item to
+    -- CreateFromEquipmentSlot(204), which is invalid, so GUID resolution always failed
+    -- and every set fell back to itemID - keeping every duplicate of a set piece.
     local loc
-    if isPlayer then
-        -- Equipped wins over the BAGS flag. A set slot that is currently worn packs
-        -- PLAYER|BAGS (e.g. 0x300016), where the bag/slot part is a stale leftover
-        -- pointing at whatever occupies that bag slot NOW. Decoding it as a bag
-        -- location silently registers an unrelated item's GUID as the set's.
-        loc = ItemLocation:CreateFromEquipmentSlot(slot)
-    elseif isBags then
+    local fromBags = false
+    if isBags then
+        fromBags = true
         slot = slot - ITEM_INVENTORY_LOCATION_BAGS
         local bag = bit.rshift(slot, ITEM_INVENTORY_BAG_BIT_OFFSET)
         slot = slot - bit.lshift(bag, ITEM_INVENTORY_BAG_BIT_OFFSET)
@@ -2549,6 +2556,8 @@ local function ResolveEquipSetGUID(packed, expectedID)
             bag = bag + ITEM_INVENTORY_BANK_BAG_OFFSET
         end
         loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+    elseif isPlayer then
+        loc = ItemLocation:CreateFromEquipmentSlot(slot)
     end
     if not loc or not loc:IsValid() then
         return nil
@@ -2562,20 +2571,26 @@ local function ResolveEquipSetGUID(packed, expectedID)
     end
     local ok, guid = pcall(C_Item.GetItemGUID, loc)
     if ok then
-        return guid
+        return guid, fromBags
     end
     return nil
 end
 
 -- Builds two lookups from the player's saved equipment sets:
 --   _equipSetGUIDs[itemGUID] = setName  - the exact item instances a set uses.
---   _equipSetItems[itemID]   = setName  - itemID fallback, populated ONLY for
---                                         set slots whose location couldn't be
---                                         resolved to a GUID.
+--   _equipSetItems[itemID]   = setName  - itemID fallback, populated for every set
+--                                         slot EXCEPT those resolved to a GUID that
+--                                         names an item currently in bags.
 -- C_EquipmentSet.GetItemIDs returns plain itemIDs, so matching on it alone keeps
 -- every duplicate of a set piece sitting in bags (3x Glorious Crusader's Keepsake
 -- all read "Equipment set: Tank"). GetItemLocations gives a per-slot packed
 -- location, which resolves to a unique GUID and tells the copies apart.
+--
+-- The GUID only replaces the itemID floor when it names a BAG instance. A set slot
+-- that is currently WORN resolves to an equipped-slot GUID, which no bag row can
+-- ever match, so those slots keep the itemID floor - otherwise an off-spec set piece
+-- in bags is protected by neither table and falls through to Pawn, which scores only
+-- the ACTIVE spec and flags it "Soulbound non-upgrade".
 local function BuildEquipSetLookup(addon)
     addon._equipSetItems = nil
     addon._equipSetGUIDs = nil
@@ -2589,18 +2604,17 @@ local function BuildEquipSetLookup(addon)
             local locations = C_EquipmentSet.GetItemLocations(setID)
             for invSlot, id in pairs(itemIDs or {}) do
                 if id and id > 0 then
-                    local guid = ResolveEquipSetGUID(locations and locations[invSlot], id)
-                    if guid then
-                        -- The set's exact instance. Only this one is protected; other
-                        -- copies of the same itemID are spares and classify normally.
-                        if not guidLookup[guid] then
-                            guidLookup[guid] = setName or "?"
-                        end
-                    elseif not lookup[id] then
-                        -- No resolvable location (-1 ignored slot, or the item is not
-                        -- currently reachable). We cannot tell instances apart, so fall
-                        -- back to itemID and protect every copy rather than risk
-                        -- vendoring a set piece.
+                    local guid, fromBags = ResolveEquipSetGUID(locations and locations[invSlot], id)
+                    if guid and not guidLookup[guid] then
+                        guidLookup[guid] = setName or "?"
+                    end
+                    -- Narrow to the single GUID only when it names an instance sitting
+                    -- in bags - that is the case the spare-copy fix is for, and the bag
+                    -- scan can match it. Anything else (no resolvable location, or a
+                    -- GUID belonging to an EQUIPPED item) leaves the bag copies with no
+                    -- matching GUID, so they need the itemID floor or they fall through
+                    -- to Pawn and get vendored as off-spec gear.
+                    if not (guid and fromBags) and not lookup[id] then
                         lookup[id] = setName or "?"
                     end
                 end

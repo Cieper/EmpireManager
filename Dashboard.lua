@@ -164,6 +164,8 @@ function EMCharacterRowMixin:Populate(data)
         self.Stripe:SetAtlas("auctionhouse-rowstripe-2")
     end
 
+    self:UpdateSelected()
+
     -- Faction icon
     if entry.faction == "Horde" then
         self.cells.faction:SetText("|TInterface\\PVPFrame\\PVP-Currency-Horde:20:20|t")
@@ -225,9 +227,16 @@ function EMCharacterRowMixin:Populate(data)
     self.cells.roles:SetText(EmpireManager:FormatRoles(entry.assignments))
 end
 
+function EMCharacterRowMixin:UpdateSelected()
+    local isSelected = self._guid ~= nil and EmpireManager:GetSelectedGUID() == self._guid
+    self.Selected:SetShown(isSelected)
+    self.SelectedEdge:SetShown(isSelected)
+end
+
 function EMCharacterRowMixin:OnClick(_button)
     if self._guid then
         EmpireManager:OpenSidecar(self._guid)
+        EmpireManager:UpdateRowSelection()
     end
 end
 
@@ -892,6 +901,31 @@ function EmpireManager:RefreshVisibleRows()
         local elementData = rowFrame:GetElementData()
         if elementData and rowFrame.Populate then
             rowFrame:Populate(elementData)
+        end
+    end)
+end
+
+-- Which row the grid highlights. The Sidecar's character wins while it's open;
+-- otherwise we fall back to the logged-in character so the grid always shows
+-- "you are here" instead of nothing.
+function EmpireManager:GetSelectedGUID()
+    return self.sidecarGUID or self.playerGUID
+end
+
+-- Repaint only the selection highlight on visible rows. Cheaper than
+-- RefreshVisibleRows: no cell text/atlas work, just two texture toggles per row.
+function EmpireManager:UpdateRowSelection()
+    local frame = EmpireManagerFrame
+    if not frame then
+        return
+    end
+    local scrollBox = frame.CharactersPage.ScrollBox
+    if not scrollBox or not scrollBox:GetDataProvider() then
+        return
+    end
+    scrollBox:ForEachFrame(function(rowFrame)
+        if rowFrame.UpdateSelected then
+            rowFrame:UpdateSelected()
         end
     end)
 end

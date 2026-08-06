@@ -31,6 +31,19 @@
         <Layers>
             <Layer level="BACKGROUND">
                 <Texture parentKey="Stripe" setAllPoints="true"/>
+                <Texture parentKey="Selected" setAllPoints="true" hidden="true">
+                    <Color r="1" g="0.82" b="0" a="0.16"/>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <Texture parentKey="SelectedEdge" hidden="true">
+                    <Size x="3" y="0"/>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"/>
+                        <Anchor point="BOTTOMLEFT"/>
+                    </Anchors>
+                    <Color r="1" g="0.82" b="0" a="1"/>
+                </Texture>
             </Layer>
             <Layer level="HIGHLIGHT">
                 <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">

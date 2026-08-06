@@ -78,6 +78,15 @@ function EmpireManager:OpenSidecar(guid)
     if not f._initialized then
         Mixin(f, EMSidecarMixin)
         f:Init()
+        -- Single choke point for every close path: the X button and ESC both just
+        -- Hide() without going through CloseSidecar, so clearing the selection here
+        -- keeps the grid highlight in sync no matter how the panel was dismissed.
+        -- Hooked in Lua, not XML: the XML is parsed before this file loads, so an
+        -- <OnHide function=".."/> there can't resolve the handler.
+        f:HookScript("OnHide", function()
+            EmpireManager.sidecarGUID = nil
+            EmpireManager:UpdateRowSelection()
+        end)
         f._initialized = true
     end
     -- Tab system must always re-init - XML TabSystem is fresh after /reload
@@ -131,7 +140,6 @@ end
 
 function EmpireManager:CloseSidecar()
     EmpireManagerSidecar:Hide()
-    self.sidecarGUID = nil
 end
 
 -------------------------------------------------------------------------------

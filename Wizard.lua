@@ -137,8 +137,10 @@ local function SortedGuilds()
         local g = entry.guild
         local r = entry.guildRealm
         if g and g ~= "" and r and r ~= "" and not EmpireManager:IsGuildBlacklisted(g, r) then
-            local key = g .. "\1" .. r
-            if not seen[key] then
+            -- Dedupe through GuildKey (see Tabs.lua BuildGuildList): the realm
+            -- is stored in two spellings, so a raw key splits one guild in two.
+            local key = EmpireManager:GuildKey(g, r)
+            if key and not seen[key] then
                 seen[key] = true
                 out[#out + 1] = { guild = g, realm = r }
                 nameCounts[g] = (nameCounts[g] or 0) + 1
