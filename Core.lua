@@ -556,7 +556,7 @@ function EmpireManager:OnInitialize()
         "Keep Above iLvl",
         "Soulbound equippable gear at or above this item level is kept regardless of Pawn/iLvl vendor checks. Set to 0 to disable.",
         0,
-        300,
+        344,
         1,
         function(val)
             if val == 0 then

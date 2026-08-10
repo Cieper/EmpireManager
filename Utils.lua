@@ -728,6 +728,25 @@ EmpireManager.PROF_ITEM_MAP = {
         { 4, 10 },
         { 4, 11 },
     },
+    -- Profession equipment (classID 19): tools and accessories worn in the
+    -- profession gear slots. subClassID IS the profession (Enum.ItemProfessionSubclass),
+    -- so this needs no itemID curation. The subclass list mirrors Blizzard's own
+    -- "Profession Equipment" AH category, which omits Archaeology (13).
+    equipment_prof = {
+        { 19, 0 }, -- Blacksmithing
+        { 19, 1 }, -- Leatherworking
+        { 19, 2 }, -- Alchemy
+        { 19, 3 }, -- Herbalism
+        { 19, 4 }, -- Cooking
+        { 19, 5 }, -- Mining
+        { 19, 6 }, -- Tailoring
+        { 19, 7 }, -- Engineering
+        { 19, 8 }, -- Enchanting
+        { 19, 9 }, -- Fishing
+        { 19, 10 }, -- Skinning
+        { 19, 11 }, -- Jewelcrafting
+        { 19, 12 }, -- Inscription
+    },
     housing = {
         { 20, 0 }, -- Furniture
         { 20, 1 }, -- Dyes
@@ -1146,6 +1165,17 @@ EmpireManager.STORAGE_CATEGORY_DISPLAY = {
         b = 0.8,
     },
     {
+        key = "equipment_prof",
+        label = "Equipment (Professions)",
+        category = "general",
+        icon = "Interface\\Icons\\Trade_BlackSmithing",
+        -- Midpoint between BoE indigo (0.35,0.45,0.95) and BoA cyan (0,0.8,0.8),
+        -- so the three Equipment categories read as a related set without colliding.
+        r = 0.18,
+        g = 0.63,
+        b = 0.88,
+    },
+    {
         key = "recipes",
         label = "Recipes",
         category = "general",
@@ -1179,6 +1209,7 @@ EmpireManager.STORAGE_CATEGORY_DISPLAY = {
 EmpireManager.SUBCATEGORY_DISPLAY = {
     equipment_boe = {
         mode = "multi",
+        anyLabel = "Any Equipment",
         items = {
             { key = "weapons", label = "Weapons" },
             { key = "armor", label = "Armor" },
@@ -1188,6 +1219,7 @@ EmpireManager.SUBCATEGORY_DISPLAY = {
     },
     equipment_boa = {
         mode = "multi",
+        anyLabel = "Any Equipment",
         items = {
             { key = "weapons", label = "Weapons" },
             { key = "armor", label = "Armor" },
@@ -1195,8 +1227,31 @@ EmpireManager.SUBCATEGORY_DISPLAY = {
             { key = "other", label = "Other" },
         },
     },
+    -- Profession equipment: one subcategory per profession. Keys match the
+    -- PROF_DISPLAY profession keys and resolve to subClassID via
+    -- PROF_EQUIP_SUBCLASS (below). Selecting none = all professions.
+    equipment_prof = {
+        mode = "multi",
+        anyLabel = "Any Profession",
+        items = {
+            { key = "alchemy", label = "Alchemy" },
+            { key = "blacksmithing", label = "Blacksmithing" },
+            { key = "cooking", label = "Cooking" },
+            { key = "enchanting", label = "Enchanting" },
+            { key = "engineering", label = "Engineering" },
+            { key = "fishing", label = "Fishing" },
+            { key = "herbalism", label = "Herbalism" },
+            { key = "inscription", label = "Inscription" },
+            { key = "jewelcrafting", label = "Jewelcrafting" },
+            { key = "leatherworking", label = "Leatherworking" },
+            { key = "mining", label = "Mining" },
+            { key = "skinning", label = "Skinning" },
+            { key = "tailoring", label = "Tailoring" },
+        },
+    },
     recipes = {
         mode = "multi",
+        anyLabel = "Any Profession",
         items = {
             { key = "alchemy", label = "Alchemy" },
             { key = "blacksmithing", label = "Blacksmithing" },
@@ -1211,6 +1266,7 @@ EmpireManager.SUBCATEGORY_DISPLAY = {
     },
     consumables = {
         mode = "multi",
+        anyLabel = "Any Consumable",
         items = {
             { key = "potions", label = "Potions" },
             { key = "flasks", label = "Flasks & Elixirs" },
@@ -1218,6 +1274,25 @@ EmpireManager.SUBCATEGORY_DISPLAY = {
             { key = "other", label = "Other" },
         },
     },
+}
+
+-- Profession equipment subClassID → profession key (classID 19).
+-- Straight from Enum.ItemProfessionSubclass; Archaeology (13) is omitted because
+-- Blizzard's own Profession Equipment AH category omits it (no such gear exists).
+EmpireManager.PROF_EQUIP_SUBCLASS_TO_PROF = {
+    [0] = "blacksmithing",
+    [1] = "leatherworking",
+    [2] = "alchemy",
+    [3] = "herbalism",
+    [4] = "cooking",
+    [5] = "mining",
+    [6] = "tailoring",
+    [7] = "engineering",
+    [8] = "enchanting",
+    [9] = "fishing",
+    [10] = "skinning",
+    [11] = "jewelcrafting",
+    [12] = "inscription",
 }
 
 -- Recipe subClassID → profession key (classID 9)

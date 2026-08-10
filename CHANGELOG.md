@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.8] - 2026-08-10
+
+### Added
+
+- **New storage category: Equipment (Professions).** Profession tools and accessories - the spanners, toolsets, and gear that go in your profession slots - can now be routed by a storage rule. Previously they had no category and were treated as ordinary gear, so an engineer's Arclight Spanner would be mailed off to the Auctioneer and sold. Subcategories let one rule target a single profession, so "Engineering tools to the warband bank" works on its own.
+
+### Changed
+
+- **The storage rule dialog is grouped into what you route and where it goes.** Category, Subcategory, and Expansion sit together at the top; Bank Type, Tab, and Character/Guild below. Subcategory is always visible now (greyed out when the category has none), so the dialog no longer changes size as you move through the Category dropdown.
+- **Subcategory dropdowns get Clear All / Select All**, matching the Expansion dropdown. Picking every subcategory reads as "Any Profession" rather than listing all thirteen.
+
+### Fixed
+
+- **Items were quietly sent to the Auctioneer when their bank was full.** If every storage rule matching an item pointed at a bank with no free slots, the item fell through to the auction rule and was mailed away instead of reporting the problem. Any unbound gear was affected, including BoE equipment. Triage now shows "All matching destinations are full" so you can free space or reorder the rule instead of finding the item on its way to the AH.
+- **Items were kept as teleports when their tooltip merely mentioned teleporting.** The check matched the word anywhere in the tooltip, so flavour text and spell descriptions triggered it - an Artisanal Blink Trap was held as if it were a Cloak of Coordination. Because this check outranks the Vendor List, there was no way to override it. Only a "Use:" line counts now.
+
 ## [1.1.7] - 2026-08-06
 
 ### Added

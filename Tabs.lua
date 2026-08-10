@@ -4366,47 +4366,49 @@ function EmpireManager:OpenStorageDialog(editIdx)
         local showGuild = (st.bankType == "guildbank")
         local showExp = st.prof and not NO_EXPANSION_FILTER[st.prof]
         local subcatDef = st.prof and self.SUBCATEGORY_DISPLAY[st.prof]
-        local showSubcat = subcatDef ~= nil
+        local hasSubcat = subcatDef ~= nil
 
         f.Row4:SetShown(showChar)
         f.Row5:SetShown(showGuild)
         f.Row6:SetShown(showExp or false)
-        f.Row7:SetShown(showSubcat)
+        f.Row7:SetShown(true)
+        f.SubcatDD:SetEnabled(hasSubcat)
 
-        -- Reanchor rows dynamically
-        local prevRow = f.Row3
+        -- Two segments, top to bottom:
+        --   WHAT we route  - Category, Subcategory, Expansion
+        --   WHERE it goes  - Bank Type, Tab, Character/Guild
+        -- Subcategory is always shown (greyed when the category has none) so the
+        -- dialog doesn't resize on every category change. The XML anchors are
+        -- defaults only; the real order is built here.
+        local function Chain(row, prev)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", prev, "BOTTOMLEFT")
+            row:SetPoint("RIGHT", f, "RIGHT", -14, 0)
+            return row
+        end
+
+        -- Segment 1: what we route
+        local prevRow = Chain(f.Row7, f.Row1)
+        if showExp then
+            prevRow = Chain(f.Row6, prevRow)
+        end
+        -- Segment 2: where it goes
+        prevRow = Chain(f.Row2, prevRow)
+        prevRow = Chain(f.Row3, prevRow)
         if showChar then
-            f.Row4:ClearAllPoints()
-            f.Row4:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT")
-            f.Row4:SetPoint("RIGHT", f, "RIGHT", -14, 0)
-            prevRow = f.Row4
+            prevRow = Chain(f.Row4, prevRow)
         end
         if showGuild then
-            f.Row5:ClearAllPoints()
-            f.Row5:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT")
-            f.Row5:SetPoint("RIGHT", f, "RIGHT", -14, 0)
-            prevRow = f.Row5
-        end
-        if showExp then
-            f.Row6:ClearAllPoints()
-            f.Row6:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT")
-            f.Row6:SetPoint("RIGHT", f, "RIGHT", -14, 0)
-            prevRow = f.Row6
-        end
-        if showSubcat then
-            f.Row7:ClearAllPoints()
-            f.Row7:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT")
-            f.Row7:SetPoint("RIGHT", f, "RIGHT", -14, 0)
-            prevRow = f.Row7
+            prevRow = Chain(f.Row5, prevRow)
         end
 
         -- Resize dialog to fit visible rows
         -- Layout: 56 top padding (title) + rows + 24 gap + 40 button area
-        local rowCount = 3
+        -- Base 4 = Category + Subcategory (always shown) + Bank Type + Tab.
+        local rowCount = 4
             + (showChar and 1 or 0)
             + (showGuild and 1 or 0)
             + (showExp and 1 or 0)
-            + (showSubcat and 1 or 0)
         f:SetHeight(56 + rowCount * 32 + 24 + 40)
 
         -- Update dropdown display text
@@ -4484,15 +4486,25 @@ function EmpireManager:OpenStorageDialog(editIdx)
             f.ExpDD:SetText(text)
         end
 
-        -- Subcategory
-        if showSubcat and subcatDef then
+        -- Subcategory. Always rendered; shows a dash when the category has none
+        -- so the greyed-out control reads as "not applicable", not "unset".
+        if subcatDef then
             local scNames = {}
             for _, sc in ipairs(subcatDef.items) do
                 if st.subcategories[sc.key] then
                     scNames[#scNames + 1] = sc.label
                 end
             end
-            f.SubcatDD:OverrideText(#scNames > 0 and table.concat(scNames, ", ") or "Any")
+            -- None selected and ALL selected both mean "match the whole category"
+            -- (see MatchesSubcategory), so both render as the category's "any"
+            -- label rather than concatenating every item into the button.
+            if #scNames == 0 or #scNames == #subcatDef.items then
+                f.SubcatDD:OverrideText(subcatDef.anyLabel or "Any")
+            else
+                f.SubcatDD:OverrideText(table.concat(scNames, ", "))
+            end
+        else
+            f.SubcatDD:OverrideText("-")
         end
 
         -- Save button: enable only when all required fields are filled.
@@ -4690,6 +4702,29 @@ function EmpireManager:OpenStorageDialog(editIdx)
             end
         else
             rootDescription:SetTag("EM_STORAGE_SUBCAT")
+
+            -- Toggle-all button: if any are checked, clear all; otherwise select all.
+            -- Same pattern as the Expansion dropdown above.
+            local anyChecked = false
+            for _, sc in ipairs(subcatDef.items) do
+                if st.subcategories[sc.key] then
+                    anyChecked = true
+                    break
+                end
+            end
+            local toggleLabel = anyChecked and "Clear All" or "Select All"
+            rootDescription:CreateButton(toggleLabel, function()
+                if anyChecked then
+                    wipe(st.subcategories)
+                else
+                    for _, sc in ipairs(subcatDef.items) do
+                        st.subcategories[sc.key] = true
+                    end
+                end
+                C_Timer.After(0, UpdateLayout)
+            end)
+            rootDescription:CreateDivider()
+
             for _, sc in ipairs(subcatDef.items) do
                 rootDescription:CreateCheckbox(sc.label, function()
                     return st.subcategories[sc.key] or false

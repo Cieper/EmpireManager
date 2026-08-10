@@ -406,6 +406,7 @@ end
 -- Check if an item matches a storage assignment's subcategory filter.
 -- No subcategories = match all (backward compatible).
 local RECIPE_SUBCLASS_TO_PROF = EmpireManager.RECIPE_SUBCLASS_TO_PROF
+local PROF_EQUIP_SUBCLASS_TO_PROF = EmpireManager.PROF_EQUIP_SUBCLASS_TO_PROF
 
 local function MatchesSubcategory(assignment, item)
     local subcats = assignment.subcategories
@@ -440,6 +441,10 @@ local function MatchesSubcategory(assignment, item)
     elseif prof == "recipes" then
         local recipeProfKey = RECIPE_SUBCLASS_TO_PROF[item.itemSubClassID]
         return recipeProfKey and (subcatSet[recipeProfKey] or false) or false
+    elseif prof == "equipment_prof" then
+        -- classID 19: subClassID IS the profession.
+        local equipProfKey = PROF_EQUIP_SUBCLASS_TO_PROF[item.itemSubClassID]
+        return equipProfKey and (subcatSet[equipProfKey] or false) or false
     elseif prof == "consumables" then
         local sub = item.itemSubClassID
         if subcatSet["potions"] and sub == 1 then
@@ -582,6 +587,7 @@ local TOOLTIP_SCAN_CLASSES = {
     [12] = true, -- Quest
     [15] = true, -- Miscellaneous
     [17] = true, -- Battle Pet
+    [19] = true, -- Profession equipment (tools/accessories can be warbound)
     [20] = true, -- Housing
 }
 -- Forward-declared; populated at ITEM_CATEGORY_MAP definition below.
@@ -600,8 +606,9 @@ local function NeedsTooltipScan(classID, bindType, itemID)
 end
 
 -- Parse tooltip data for warbound/soulbound/lockbox/teleport flags.
--- isTeleport: any "Use: Teleport..." line (trinkets/rings like Runed Signet of
--- the Kirin Tor, Time-Lost Artifact). Used to preserve these from vendor.
+-- isTeleport: a "Use:" line that mentions teleport (trinkets/rings like Runed
+-- Signet of the Kirin Tor, Time-Lost Artifact). Used to preserve these from
+-- vendor. Both conditions must hold on the same line - see the check below.
 -- Prefix of ITEM_CLASSES_ALLOWED ("Classes: %s"), used to spot the class
 -- restriction line that gear tokens (Unsullied set, etc.) carry. Stripped to the
 -- literal text before the format token so we can match by prefix, locale-safe.
@@ -649,7 +656,17 @@ local function ParseTooltipBind(tooltipData)
                 elseif txt == KNOWN_LINE then
                     isKnownAppearance = true
                 end
-                if not isTeleport and txt:find("[Tt]eleport") then
+                -- Teleport must be on a "Use:" line of the SAME tooltip row. A bare
+                -- substring match anywhere in the tooltip catches flavor text and
+                -- spell descriptions (e.g. Artisanal Blink Trap, a consumable whose
+                -- blurb mentions teleporting), and the guard that reads this flag
+                -- outranks the vendor whitelist - so a false hit is unoverridable.
+                if
+                    not isTeleport
+                    and USE_LINE_PREFIX ~= ""
+                    and txt:find(USE_LINE_PREFIX, 1, true) == 1
+                    and txt:find("[Tt]eleport")
+                then
                     isTeleport = true
                 end
                 if not hasUseLine and USE_LINE_PREFIX ~= "" and txt:find(USE_LINE_PREFIX, 1, true) == 1 then
@@ -1724,21 +1741,23 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         return CAT_KEEP, "Equipment token (right-click to open)"
     end
 
-    -- Learnable appearance (weapon enchant illusions, etc.): classed as a
-    -- Consumable (0/8 "Other") but really a right-click-to-learn cosmetic. The
-    -- tooltip carries the red "Already known" line once collected.
-    --   * Known + soulbound + sellable → VENDOR: can't be relearned or traded,
-    --     so a known duplicate is dead weight (mirrors "Mount already known").
-    --   * Not yet known → KEEP: the player should learn it, never route it to a
-    --     consumables banker or legacy-stash it.
-    -- Checked before the consumables subclass match below.
-    if item.itemClassID == 0 and item.itemSubClassID == 8 then
-        if item.isKnownAppearance then
-            if item.isBound and not item.isWarbound and item.sellPrice > 0 then
-                return CAT_VENDOR, "Illusion already known"
-            end
-        else
-            return CAT_KEEP, "Learnable appearance"
+    -- Known appearance (weapon enchant illusions, etc.): classed as a Consumable
+    -- (0/8 "Other") but really a right-click-to-learn cosmetic. The tooltip
+    -- carries the red "Already known" line once collected. Known + soulbound +
+    -- sellable → VENDOR: can't be relearned or traded, so a known duplicate is
+    -- dead weight (mirrors "Mount already known").
+    --
+    -- There is NO positive "teaches an appearance" signal here - isKnownAppearance
+    -- comes from ITEM_SPELL_KNOWN, a collection-state line shared by known
+    -- recipes/toys/mounts. So we must NOT infer "unlearned appearance" from a
+    -- missing known-line: 0/8 is Blizzard's Consumable dumping ground (upgrade
+    -- currency, reputation contracts, lockbox scrolls, utility consumables), and
+    -- an unconditional keep here swallowed the whole bucket and short-circuited
+    -- the consumables subclass match below. Everything that isn't a known
+    -- appearance falls through to normal classification.
+    if item.itemClassID == 0 and item.itemSubClassID == 8 and item.isKnownAppearance then
+        if item.isBound and not item.isWarbound and item.sellPrice > 0 then
+            return CAT_VENDOR, "Illusion already known"
         end
     end
 
@@ -2220,6 +2239,28 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         return CAT_KEEP, "PvPer unreachable"
     end
 
+    -- Capacity wall: a storage rule matched this item but every matching
+    -- destination is full. That is an explicit user rule hitting a limit, so it
+    -- must resolve here rather than being silently claimed by a later
+    -- fall-through rule. Without this, B.4 below grabs any unbound equippable
+    -- item (profession tools, BoE gear) and mails it to the Auctioneer, making
+    -- the capacity outcomes unreachable for exactly the items most likely to
+    -- trigger them.
+    if blockedStackAsn then
+        -- Stackable: may still merge into a partial stack the snapshot can't see.
+        -- Route to it so the deposit is attempted, flagged "(may be full)".
+        local category, action, routing =
+            self:GetStorageRouting(blockedStackAsn, entry, blockedStackAsn.profession, blockedStackRule, item)
+        if routing then
+            return category, action .. " (may be full)", routing
+        end
+        -- Non-move outcome (e.g. unreachable banker) - treat as hard-blocked.
+        capacityBlocked = true
+    end
+    if capacityBlocked then
+        return CAT_STASH, "All matching destinations are full", nil, true
+    end
+
     -- Rule B.4: Auctioneer / Disenchant - any unbound BoE item
     -- Covers weapons, armor, recipes, containers, etc. - anything sellable on the AH.
     -- Excludes warbound (account-bound) items - they can't be sold on the AH.
@@ -2313,34 +2354,8 @@ function EmpireManager:_ClassifyItemInner(item, entry)
     end
 
     -- Rule D.3: Unrecognized items → KEEP (avoid false positives).
-    -- When a matching rule was skipped because its destination is full,
-    -- surface that instead of the generic fall-through (handled by
-    -- WarnOnUnreachableDestinations).
-
-    -- Stackable item, every matching tab is slot-full: it may still merge into a
-    -- partial stack the snapshot can't see. Route to the first such rule so the
-    -- deposit button works and the merge is attempted, but append "(may be full)"
-    -- so the user knows it could bounce. routing is present, so it joins the
-    -- deposit move list; if the merge fails the move fails silently and the item
-    -- reappears next scan. NOT flagged blocked (4th return false) - it's a real,
-    -- attemptable move.
-    if blockedStackAsn then
-        local category, action, routing =
-            self:GetStorageRouting(blockedStackAsn, entry, blockedStackAsn.profession, blockedStackRule, item)
-        if routing then
-            return category, action .. " (may be full)", routing
-        end
-        -- Routing resolved to a non-move outcome (e.g. unreachable banker) - fall
-        -- through to the generic full message below.
-        capacityBlocked = true
-    end
-
-    if capacityBlocked then
-        -- Render under the Stash section (it IS stash-intent) but flagged blocked
-        -- (4th return) so the row gets a red wash and - with routing = nil - is
-        -- excluded from the deposit count/move list (those guard on r.routing).
-        return CAT_STASH, "All matching destinations are full", nil, true
-    end
+    -- Capacity-blocked items are resolved earlier (before B.4), so anything
+    -- reaching here genuinely matched no rule.
     return CAT_KEEP, "No matching Rule"
 end
 

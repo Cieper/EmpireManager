@@ -48,6 +48,7 @@ local TEMPLATES = {
 local STASH_CATEGORIES = {
     "equipment_boe",
     "equipment_boa",
+    "equipment_prof",
     "recipes",
     "item_enhancements",
     "consumables",
