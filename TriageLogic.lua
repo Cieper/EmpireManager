@@ -555,9 +555,13 @@ function EmpireManager:InvalidateStorageCache()
     self._bankTriageFingerprint = nil
     self._triageFingerprintCount = nil
     self._bankTriageFingerprintCount = nil
-    -- Repaint the triage overlay if it's open so rule/capacity changes show
-    -- without waiting for the next bag event. Cheap no-op when not visible.
-    self:SendMessage("EM_TRIAGE_REFRESH")
+    -- Repaint whichever tab is showing. Not EM_TRIAGE_REFRESH: that also fires
+    -- from BAG_UPDATE_DELAYED, so its handler ignores the bank tabs.
+    if self.OnTriageOptionChanged then
+        self:OnTriageOptionChanged()
+    else
+        self:SendMessage("EM_TRIAGE_REFRESH")
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -2095,9 +2099,13 @@ function EmpireManager:_ClassifyItemInner(item, entry)
         return CAT_VENDOR, reason
     end
 
-    -- Rule D.2b: Non-gear soulbound items → KEEP (never route soulbound)
+    -- Rule D.2b: Non-gear soulbound items → KEEP (never route soulbound).
     -- Warbound items continue to routing rules (can be mailed/warband-banked).
-    if item.isBound and not item.isWarbound then
+    -- isBound needs an exact "Soulbound" tooltip line, which BoP reagents often
+    -- lack ("Binds when picked up" only), so trust bindType: a BoP item in our
+    -- bags was picked up, therefore bound.
+    local bindsOnPickup = item.bindType == 1 and not item.bankType
+    if (item.isBound or bindsOnPickup) and not item.isWarbound then
         return CAT_KEEP, "Soulbound"
     end
 

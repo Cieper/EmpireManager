@@ -960,10 +960,26 @@ function EmpireManager:SlashHandler(input)
         local _, itemLink = GameTooltip:GetItem()
         GameTooltip:Hide()
         if not itemLink then
-            -- Try cursor item
+            -- Cursor fallback. GetCursorInfo returns a bare itemID, and
+            -- GetItemInfo(itemID) hands back the GENERIC template link - no bonusIDs,
+            -- no upgrade level - which reports different bindType/ilvl than the item
+            -- actually in the bag. Prefer the real link from the first bag slot
+            -- holding this itemID; fall back to the template only if it is not in bags.
             local infoType, id = GetCursorInfo()
-            if infoType == "item" then
-                itemLink = select(2, C_Item.GetItemInfo(id))
+            if infoType == "item" and id then
+                for bag = 0, 5 do
+                    for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+                        local info = C_Container.GetContainerItemInfo(bag, slot)
+                        if info and info.itemID == id and info.hyperlink then
+                            itemLink = info.hyperlink
+                            break
+                        end
+                    end
+                    if itemLink then
+                        break
+                    end
+                end
+                itemLink = itemLink or select(2, C_Item.GetItemInfo(id))
             end
         end
         if not itemLink then
@@ -974,7 +990,7 @@ function EmpireManager:SlashHandler(input)
         local itemID, _, _, itemEquipLoc, icon, classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
         local itemName, _, _, _, _, _, _, _, _, _, _, _, _, bindType, expansionID = C_Item.GetItemInfo(itemLink)
         self:ChatMsg(string.format("|cffffcc00[Inspect]|r %s", itemName or itemLink), true)
-        self:ChatMsg(
+        self:ChatMsgRaw(
             string.format(
                 "  itemID=%d  classID=%d  subClassID=%d  equipLoc=%s",
                 itemID or 0,
@@ -984,8 +1000,13 @@ function EmpireManager:SlashHandler(input)
             ),
             true
         )
-        self:ChatMsg(
+        self:ChatMsgRaw(
             string.format(
+                -- From the resolved link. Per-bag-slot lines below carry each instance's
+                -- own values; they can differ from this one (upgrade level, bonusIDs).
+                -- bindType is the item's DECLARED bind rule, not its current state: a
+                -- Warbound-until-equipped piece keeps bindType=2 after being equipped.
+                -- Classification trusts isBound/isWarbound, never bindType alone.
                 "  bindType=%d  expansionID=%s  icon=%s",
                 bindType or -1,
                 tostring(expansionID or "nil"),
@@ -1015,7 +1036,7 @@ function EmpireManager:SlashHandler(input)
                     end
                 end
             end
-            self:ChatMsg(
+            self:ChatMsgRaw(
                 string.format(
                     "  quality: reagentTier=%s  craftedTier=%s  -> atlas=%s",
                     tostring(reagentQ or "nil"),
@@ -1064,7 +1085,7 @@ function EmpireManager:SlashHandler(input)
             if isSoulbound then
                 isWarbound = false
             end
-            self:ChatMsg(
+            self:ChatMsgRaw(
                 string.format(
                     "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
                     tostring(isWarbound),
@@ -1072,6 +1093,79 @@ function EmpireManager:SlashHandler(input)
                     tostring(isConjured),
                     tostring(hasUseLine and hasClassLine),
                     tostring(isKnownAppearance)
+                ),
+                true
+            )
+        end
+        -- Live per-slot bind state. The block above reads the item template, which
+        -- always says "Binds when picked up"; triage scans bags with GetBagItem.
+        if itemID and C_TooltipInfo and C_TooltipInfo.GetBagItem then
+            local found = 0
+            for bag = 0, 5 do
+                local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+                for slot = 1, numSlots do
+                    local info = C_Container.GetContainerItemInfo(bag, slot)
+                    if info and info.itemID == itemID then
+                        found = found + 1
+                        local td = C_TooltipInfo.GetBagItem(bag, slot)
+                        local binds = {}
+                        for _, line in ipairs(td and td.lines or {}) do
+                            local txt = line.leftText
+                            if
+                                txt
+                                and (
+                                    txt == ITEM_SOULBOUND
+                                    or txt == ITEM_BIND_ON_PICKUP
+                                    or txt == ITEM_ACCOUNTBOUND
+                                    or txt == ITEM_BNETACCOUNTBOUND
+                                    or txt == ITEM_BIND_ON_EQUIP
+                                )
+                            then
+                                binds[#binds + 1] = txt
+                            end
+                        end
+                        -- Per-slot iLvl from that slot's own link: two upgraded copies
+                        -- of one itemID differ here, which is what splits them across
+                        -- the vendor ceiling (one kept, one flagged by Pawn).
+                        local slotLink = C_Container.GetContainerItemLink(bag, slot)
+                        local slotIlvl = slotLink and C_Item.GetDetailedItemLevelInfo(slotLink)
+                        -- bindType read from THIS slot's link, so two upgraded copies (or
+                        -- a generic template link) can be told apart from the header line.
+                        local slotBind = slotLink and select(14, C_Item.GetItemInfo(slotLink))
+                        -- isBound is the live per-instance check classification relies on
+                        -- (see the C_Item.IsBound note in TriageLogic's bag scan). Printing
+                        -- it beside bindType shows why a bindType=2 item is not AH-routed.
+                        local sloc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+                        local slotBound = C_Item.DoesItemExist(sloc) and C_Item.IsBound(sloc)
+                        self:ChatMsgRaw(
+                            string.format(
+                                "  bag %d:%d ilvl=%s  bindType=%s  isBound=%s  live bind lines: %s",
+                                bag,
+                                slot,
+                                tostring(slotIlvl or "?"),
+                                tostring(slotBind or "?"),
+                                tostring(slotBound and true or false),
+                                #binds > 0 and table.concat(binds, " / ") or "(none)"
+                            ),
+                            true
+                        )
+                    end
+                end
+            end
+            if found == 0 then
+                self:ChatMsgRaw("  (not in bags - live bind state unavailable)", true)
+            end
+        end
+        -- Vendor-gate context: the iLvl ceiling is the rule that most often explains
+        -- why one copy of an item is kept and another is flagged for vendor.
+        do
+            local ceiling = self.db.global.options.vendorIlvlCeiling or 0
+            self:ChatMsgRaw(
+                string.format(
+                    "  vendorIlvlCeiling=%s  pawnVendorBop=%s  vendorBopIlvl=%s",
+                    ceiling > 0 and tostring(ceiling) or "0 (disabled)",
+                    tostring(self.db.global.options.pawnVendorBop and true or false),
+                    tostring(self.db.global.options.vendorBopIlvl and true or false)
                 ),
                 true
             )
@@ -1084,9 +1178,9 @@ function EmpireManager:SlashHandler(input)
             for k in pairs(matched) do
                 keys[#keys + 1] = k
             end
-            self:ChatMsg(string.format("  profMatchCache[%d] = {%s}", cacheKey, table.concat(keys, ", ")), true)
+            self:ChatMsgRaw(string.format("  profMatchCache[%d] = {%s}", cacheKey, table.concat(keys, ", ")), true)
         else
-            self:ChatMsg(string.format("  profMatchCache[%d] = nil (no category match)", cacheKey), true)
+            self:ChatMsgRaw(string.format("  profMatchCache[%d] = nil (no category match)", cacheKey), true)
         end
         local override = itemID and self._profOverrideCache[itemID]
         if override then
@@ -1094,13 +1188,13 @@ function EmpireManager:SlashHandler(input)
             for k in pairs(override) do
                 keys[#keys + 1] = k
             end
-            self:ChatMsg(string.format("  profOverrideCache[%d] = {%s}", itemID, table.concat(keys, ", ")), true)
+            self:ChatMsgRaw(string.format("  profOverrideCache[%d] = {%s}", itemID, table.concat(keys, ", ")), true)
         end
         -- TSM prices (if available)
         if TSM_API then
             local de = self:GetTSMPrice(itemLink, "DBDisenchant")
             local mk = self:GetTSMPrice(itemLink, "DBMarket")
-            self:ChatMsg(
+            self:ChatMsgRaw(
                 string.format(
                     "  TSM DBDisenchant=%s  DBMarket=%s",
                     de and self:FormatGold(de) or "nil",
@@ -1109,7 +1203,7 @@ function EmpireManager:SlashHandler(input)
                 true
             )
         else
-            self:ChatMsg("  TSM not loaded (no DBDisenchant/DBMarket)", true)
+            self:ChatMsgRaw("  TSM not loaded (no DBDisenchant/DBMarket)", true)
         end
     elseif cmd == "dump" then
         local _, sub = self:GetArgs(input, 2)
@@ -1233,8 +1327,12 @@ local function FormatDumpLine(addon, r)
     local reagentStr = isCraftingReagent == true and "yes" or (isCraftingReagent == false and "no" or "?")
     local boundStr = item.isBound and "Y" or "n"
     local warStr = item.isWarbound and "Y" or "n"
+    -- Per-instance iLvl. Read from the itemLink (not the itemID) so two upgraded
+    -- copies of the same item report their own levels - that difference is what
+    -- explains a keep-vs-vendor split on one itemID (ceiling vs Pawn).
+    local ilvl = item.itemLink and C_Item.GetDetailedItemLevelInfo(item.itemLink)
     return string.format(
-        "%s;%s;%d;%d;%d;%d;%s;%d;%s;%s;%s;%s;%s;%s",
+        "%s;%s;%d;%d;%d;%d;%s;%s;%d;%s;%s;%s;%s;%s;%s",
         catLabel,
         displayName,
         count,
@@ -1242,6 +1340,7 @@ local function FormatDumpLine(addon, r)
         classID or -1,
         subClassID or -1,
         itemEquipLoc ~= "" and itemEquipLoc or "-",
+        tostring(ilvl or "-"),
         bindType or -1,
         boundStr,
         warStr,
@@ -1273,7 +1372,7 @@ function EmpireManager:_DumpDebug(target)
         end
         local lines = {
             string.format("# %s %s dump (%d items)", charName, target.label, #filtered),
-            "category;name;count;itemID;classID;subClassID;equipLoc;bindType;bound;warbound;expansion;reagent;prof;action",
+            "category;name;count;itemID;classID;subClassID;equipLoc;ilvl;bindType;bound;warbound;expansion;reagent;prof;action",
         }
         for _, r in ipairs(filtered) do
             lines[#lines + 1] = FormatDumpLine(self, r)

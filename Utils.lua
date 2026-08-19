@@ -1091,9 +1091,12 @@ EmpireManager.PROF_DISPLAY = {
         label = "Archaeology",
         category = "secondary",
         icon = "Interface\\Icons\\Trade_Archaeology",
-        r = 0.7,
-        g = 0.5,
-        b = 0.3,
+        -- Light tan. Was 0.7/0.5/0.3, identical to Mining; kept in the same warm
+        -- family but lightened so the two read apart at a glance (Skinning sits
+        -- at 0.7/0.5/0.4, so brightness alone was not enough separation).
+        r = 0.85,
+        g = 0.7,
+        b = 0.5,
     },
 }
 
@@ -1997,6 +2000,18 @@ function EmpireManager:ChatMsg(text, always)
         end
     end
     self:Print(text)
+end
+
+--- Continuation line of a multi-line report: no addon-name prefix, so only the
+--- heading carries it.
+function EmpireManager:ChatMsgRaw(text, always)
+    if not always then
+        local opts = self.db and self.db.global and self.db.global.options
+        if opts and opts.chatMessages == false then
+            return
+        end
+    end
+    DEFAULT_CHAT_FRAME:AddMessage(text)
 end
 
 -- Verbose chat output: internal progress/debug lines (restacking, capacity

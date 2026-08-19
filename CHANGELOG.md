@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.9] - 2026-08-19
+
+### Fixed
+
+- **Bind-on-pickup reagents were given routes that could never run.** Triage identified bound items by an exact "Soulbound" tooltip line, but BoP reagents usually read "Binds when picked up" instead, so they were handed mail or bank destinations WoW always rejects and reappeared on every scan. They are kept now.
+- **Per-character option changes did not repaint the Bank tab.** Toggling a Sidecar option with triage open on a bank tab left the old list on screen.
+- **Archaeology and Mining were the same colour.** Archaeology is now a warmer tan.
+
+### Changed
+
+- **The Details tab drops its Identity heading.**
+
 ## [1.1.8] - 2026-08-10
 
 ### Added

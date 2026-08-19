@@ -379,8 +379,7 @@ function EMSidecarMixin:DeferredRefresh(entry, guid, isCurrentChar, syncType)
     C_Timer.After(0, function()
         if syncType == "assignments" or syncType == "both" then
             self:SyncAssignments(entry, guid, isCurrentChar)
-            EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+            EmpireManager:OnTriageOptionChanged()
         end
         self:Populate(guid)
     end)
@@ -561,16 +560,13 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
         return obj
     end
 
-    local firstSection = true
+    -- Divider above every heading; the unlabelled Identity rows open the tab.
     local function addSection(label)
-        if not firstSection then
-            y = y + 4
-            local sep = track(parent:CreateTexture(nil, "ARTWORK"))
-            sep:SetAtlas("perks-divider-short", true)
-            sep:SetPoint("TOP", parent, "TOP", 0, -y)
-            y = y + 16
-        end
-        firstSection = false
+        y = y + 4
+        local sep = track(parent:CreateTexture(nil, "ARTWORK"))
+        sep:SetAtlas("perks-divider-short", true)
+        sep:SetPoint("TOP", parent, "TOP", 0, -y)
+        y = y + 16
         local hdr = track(parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
         hdr:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -y)
         hdr:SetText("|cffffd100" .. label .. "|r")
@@ -601,8 +597,6 @@ function EMSidecarMixin:BuildDetails(content, y, entry, _guid)
         y = y + math.max(LINE_HEIGHT, math.ceil(h) + 2)
     end
 
-    -- Identity
-    addSection("Identity")
     local cc = RAID_CLASS_COLORS and RAID_CLASS_COLORS[entry.class]
     local specLine = EmpireManager:GetSpecClassLine(entry)
     addRow("Class", specLine, cc and cc.r or 0.8, cc and cc.g or 0.8, cc and cc.b or 0.8)
@@ -1049,8 +1043,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(ahHit, ahCB)
     ahCB:SetScript("OnClick", function(self)
         entry.auctioneerKeepBOE = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.auctioneerKeepBOE = entry.auctioneerKeepBOE
         else
@@ -1103,8 +1096,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(deHit, deCB)
     deCB:SetScript("OnClick", function(self)
         entry.enchanterKeepDE = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.enchanterKeepDE = entry.enchanterKeepDE
         else
@@ -1157,8 +1149,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(profMatHit, profMatCB)
     profMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBank = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBank = entry.keepOwnProfMatsInBank
         else
@@ -1209,8 +1200,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     local bagMatLatestCB, bagMatLatestLabel
     bagMatCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBags = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBags = entry.keepOwnProfMatsInBags
         else
@@ -1277,8 +1267,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(bagMatLatestHit, bagMatLatestCB)
     bagMatLatestCB:SetScript("OnClick", function(self)
         entry.keepOwnProfMatsInBagsLatestOnly = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.keepOwnProfMatsInBagsLatestOnly = entry.keepOwnProfMatsInBagsLatestOnly
         else
@@ -1323,8 +1312,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(questHit, questCB)
     questCB:SetScript("OnClick", function(self)
         entry.stashOldQuestItems = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.stashOldQuestItems = entry.stashOldQuestItems
         else
@@ -1339,13 +1327,13 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     skipCB:SetChecked(entry.ignoreStorageRules == true)
     local skipLabel = self:Track(content:CreateFontString(nil, "OVERLAY", FONT_NORMAL))
     skipLabel:SetPoint("LEFT", skipCB, "RIGHT", 2, 0)
-    skipLabel:SetText("Skip all Storage Rules")
+    skipLabel:SetText("Skip All Storage Rules")
     local function showSkipTip(anchor)
         GameTooltip:SetOwner(anchor, "ANCHOR_CURSOR_RIGHT")
-        GameTooltip:AddLine("Skip all Storage Rules", 1, 0.82, 0)
+        GameTooltip:AddLine("Skip All Storage Rules", 1, 0.82, 0)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine(
-            "When checked, this character is exempt from all Storage rules: Triage will not stash, mail, take out, or reorganize materials and equipment on its behalf. Items stay in bags. Vendor rules and other roles' routing still apply.",
+            "When checked, this Character is exempt from all Storage Rules: Triage will not stash, mail, take out, or reorganize materials and equipment on its behalf. Items stay in Bags. Vendor Rules and other Roles' routing still apply.",
             1,
             1,
             1,
@@ -1369,8 +1357,7 @@ function EMSidecarMixin:BuildOptions(content, y, entry, guid, _isCurrentChar)
     WireLabelClick(skipHit, skipCB)
     skipCB:SetScript("OnClick", function(self)
         entry.ignoreStorageRules = self:GetChecked()
-        EmpireManager._bagsDirty = true
-        EmpireManager:SendMessage("EM_TRIAGE_REFRESH")
+        EmpireManager:OnTriageOptionChanged()
         if guid == EmpireManager.playerGUID then
             EmpireManager.db.char.ignoreStorageRules = entry.ignoreStorageRules
         else
