@@ -481,6 +481,7 @@ local function IsBankTypeCompatible(item, assignment)
     end
     return true
 end
+EmpireManager.IsBankTypeCompatible = IsBankTypeCompatible
 
 -- Check if an assignment passes expansion + subcategory filters for an item.
 -- Array order = priority: first eligible assignment wins.
@@ -547,7 +548,9 @@ end
 -- Also drops cached triage classifications so the next scan re-runs ClassifyItem
 -- against the fresh rule set (otherwise the bag-scan fast-path in RunTriageAsync
 -- returns stale results when bags haven't changed).
-function EmpireManager:InvalidateStorageCache()
+-- `immediate` skips OnTriageOptionChanged's 0.5s debounce, which exists to
+-- coalesce option-panel edits. A deliberate button press should repaint at once.
+function EmpireManager:InvalidateStorageCache(immediate)
     storageCacheBuilt = false
     self.triageResults = nil
     self.bankTriageResults = nil
@@ -557,7 +560,16 @@ function EmpireManager:InvalidateStorageCache()
     self._bankTriageFingerprintCount = nil
     -- Repaint whichever tab is showing. Not EM_TRIAGE_REFRESH: that also fires
     -- from BAG_UPDATE_DELAYED, so its handler ignores the bank tabs.
-    if self.OnTriageOptionChanged then
+    if immediate then
+        self._bagsDirty = true
+        if self.triageFrame and self.triageFrame:IsShown() then
+            if self._triageActiveTab == "bags" then
+                self:RefreshTriageDisplay(true)
+            else
+                self:RefreshBankTriageDisplay(true)
+            end
+        end
+    elseif self.OnTriageOptionChanged then
         self:OnTriageOptionChanged()
     else
         self:SendMessage("EM_TRIAGE_REFRESH")
@@ -1650,6 +1662,16 @@ end
 -- pass through unchanged. ClassifyBankItem derives takeout/reorganize from the
 -- returned category, so this single guard also suppresses bank-side moves.
 function EmpireManager:ClassifyItem(item, entry)
+    -- A selected TSM Group is an explicit user instruction: it wins over every rule.
+    -- Derive the side from the item: ClassifyItem also runs for bank items (via
+    -- ClassifyBankItem), so hardcoding "bags" claimed bank items too.
+    if self:GroupMoverClaims(item, item.bankType or "bags") then
+        local dest = self:GroupMoverEndpointLabel(self._groupMoverTo) or "?"
+        return CAT_STASH, "TSM Group: to " .. dest, {
+            destType = self._groupMoverTo,
+            destTabs = nil,
+        }
+    end
     local category, action, routing, blocked = self:_ClassifyItemInner(item, entry)
     if entry.ignoreStorageRules and (category == CAT_STASH or category == CAT_ROUTE) then
         return CAT_KEEP, "Ignoring storage rules"
@@ -1707,7 +1729,7 @@ function EmpireManager:_ClassifyItemInner(item, entry)
 
     -- Character Bags restock floor: keeps whole slots up to `floor` in bags (may
     -- over-keep the straddling slot; never routes the floor away). Slots above the
-    -- floor route as surplus per the storage rules. See RESTOCK.md.
+    -- floor route as surplus per the storage rules.
     if not item.bankType then
         if RestockProtectWithinFloor(self, item, "bags") then
             return CAT_KEEP, "Restock floor (bags)"
@@ -2843,6 +2865,12 @@ local function FindIntraBankDests(item, routing)
 end
 
 function EmpireManager:ClassifyBankItem(item, entry)
+    -- A selected TSM Group is an explicit user instruction, so it wins over every
+    -- rule below.
+    if self:GroupMoverClaims(item, item.bankType) then
+        return CAT_TAKEOUT, "TSM Group: to " .. (self:GroupMoverEndpointLabel(self._groupMoverTo) or "?")
+    end
+
     -- Restock floor protection (decision A): keep up to the floor in the bank it
     -- pins the item to; surplus above the floor falls through to Storage Rules
     -- (reorganize / take out / route as normal). Restock and Storage work together -

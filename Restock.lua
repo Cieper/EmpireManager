@@ -1,4 +1,4 @@
--- Restock.lua - Bank Restock engine (Stage B). See docs/RESTOCK.md.
+-- Restock.lua - Bank Restock engine.
 --
 -- Par-level top-up: on bank open, keep a floor of specific items in a chosen bank
 -- by depositing from this character's bags. Floor only (deposit, never withdraw).

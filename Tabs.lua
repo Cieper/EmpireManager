@@ -1127,7 +1127,7 @@ function EmpireManager:ImportVendorList(text)
     return ParseItemNameSection(self, text or "")
 end
 
--- Apply Keep entries. Conflict rule (per TRIAGE.md "Keep wins by design"):
+-- Apply Keep entries. Conflict rule (Keep wins by design):
 -- an incoming Keep item that's on the local Vendor Whitelist MOVES to Keep
 -- (Vendor entry dropped). Existing Keep entries are left untouched.
 -- Returns imported, skipped, moved.
@@ -4932,7 +4932,7 @@ end
 -------------------------------------------------------------------------------
 -- Bank Restock (par-level stocking) - Stage A: data + UI only.
 -- Mirrors the Storage page (list, reorder, fill display) and adds an AH-browse
--- style Add/Edit item picker. No deposit engine here (see docs/RESTOCK.md Stage B).
+-- style Add/Edit item picker. The deposit engine lives in Restock.lua.
 -------------------------------------------------------------------------------
 
 -- EMRestockRowMixin / EMRestockItemRowMixin / EMRestockPageMixin are forward-declared
@@ -5000,7 +5000,7 @@ end
 
 -- All professions whose curated set or subclass match contains the itemID, as an
 -- ordered list of PROF_DISPLAY entries (stable display order). Uses the same match
--- set triage routing uses so the column stays consistent (RESTOCK.md section 8).
+-- set triage routing uses so the column stays consistent.
 local function RestockProfList(itemID)
     local set = EmpireManager:GetItemProfMatchSet(itemID)
     if not set then
@@ -6286,8 +6286,19 @@ function EmpireManager:OpenRestockDialog(editIdx)
 
         for _, pool in pairs(self.RESTOCK_ITEMS) do
             for _, itemID in ipairs(pool) do
-                if searching or matchesSection(itemID) then
-                    consider(itemID)
+                -- Skip itemIDs this client does not know. GetItemInfoInstant is
+                -- client-side and synchronous (no server round trip), so a nil here
+                -- means the item does not exist on this build - a stale entry from
+                -- the /em gendata AH scan, or an item removed by a patch. Such rows
+                -- never resolve: they render "Loading..." forever and re-arm the
+                -- GET_ITEM_INFO_RECEIVED watcher on every repaint, which kept the
+                -- picker rebuilding itself endlessly (the flicker). Filtering here
+                -- makes the picker immune to bad data instead of relying on the
+                -- table being perfectly curated.
+                if C_Item.GetItemInfoInstant(itemID) then
+                    if searching or matchesSection(itemID) then
+                        consider(itemID)
+                    end
                 end
             end
         end

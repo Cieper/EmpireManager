@@ -134,6 +134,137 @@
         </Layers>
     </Button>
 
+    <!-- Group mover: one row per TSM group / subgroup -->
+    <Button name="EMGroupMoverRowTemplate" virtual="true"
+            registerForClicks="LeftButtonUp">
+        <Size x="1" y="22"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Stripe" setAllPoints="true"/>
+            </Layer>
+            <Layer level="HIGHLIGHT">
+                <Texture parentKey="Highlight" alphaMode="ADD" setAllPoints="true">
+                    <Color r="1" g="1" b="1" a="0.10"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Button>
+
+    <!-- ================================================================== -->
+    <!-- TSM Group Mover: group selection dialog                            -->
+    <!-- ================================================================== -->
+    <Frame name="EmpireManagerGroupMoverDialog"
+           parent="UIParent"
+           toplevel="true" hidden="true"
+           enableMouse="true" movable="true" clampedToScreen="true"
+           frameStrata="DIALOG"
+           inherits="BackdropTemplate">
+        <Size x="420" y="460"/>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge">
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="-20"/>
+                    </Anchors>
+                </FontString>
+                <FontString parentKey="DescText" inherits="GameFontHighlight" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="TOP" relativeKey="$parent.TitleText" relativePoint="BOTTOM" x="0" y="-10"/>
+                        <Anchor point="LEFT" x="24" y="0"/>
+                        <Anchor point="RIGHT" x="-24" y="0"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="CloseButton" inherits="UIPanelCloseButton">
+                <Anchors>
+                    <Anchor point="TOPRIGHT" x="-2" y="-2"/>
+                </Anchors>
+            </Button>
+
+            <!-- Search box (created in Lua) -->
+            <Frame parentKey="FilterRow">
+                <Size y="24"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" x="22" y="-88"/>
+                    <Anchor point="TOPRIGHT" x="-22" y="-88"/>
+                </Anchors>
+            </Frame>
+
+            <Frame parentKey="ListInset" useParentLevel="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.FilterRow"
+                            relativePoint="BOTTOMLEFT" x="0" y="-8"/>
+                    <Anchor point="TOPRIGHT" relativeKey="$parent.FilterRow"
+                            relativePoint="BOTTOMRIGHT" x="-16" y="-8"/>
+                    <Anchor point="BOTTOM" x="0" y="124"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture parentKey="Background" atlas="auctionhouse-background-index">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" x="3" y="-3"/>
+                                <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Frame parentKey="NineSlice" useParentLevel="true" inherits="NineSlicePanelTemplate">
+                        <KeyValues>
+                            <KeyValue key="layoutType" value="InsetFrameTemplate" type="string"/>
+                        </KeyValues>
+                        <Anchors>
+                            <Anchor point="TOPLEFT"/>
+                            <Anchor point="BOTTOMRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                    <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" x="4" y="-4"/>
+                            <Anchor point="BOTTOMRIGHT" x="-4" y="4"/>
+                        </Anchors>
+                    </Frame>
+                    <EventFrame parentKey="ScrollBar" inherits="MinimalScrollBar">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeKey="$parent.ScrollBox"
+                                    relativePoint="TOPRIGHT" x="9" y="0"/>
+                            <Anchor point="BOTTOMLEFT" relativeKey="$parent.ScrollBox"
+                                    relativePoint="BOTTOMRIGHT" x="9" y="0"/>
+                        </Anchors>
+                    </EventFrame>
+                </Frames>
+            </Frame>
+
+            <!-- From / To endpoint row (dropdowns created in Lua) -->
+            <Frame parentKey="RouteRow">
+                <Size y="62"/>
+                <Anchors>
+                    <Anchor point="BOTTOMLEFT" x="22" y="50"/>
+                    <Anchor point="BOTTOMRIGHT" x="-22" y="50"/>
+                </Anchors>
+            </Frame>
+
+            <Button parentKey="CancelButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="26"/>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" x="-22" y="20"/>
+                </Anchors>
+            </Button>
+            <Button parentKey="SelectButton" inherits="UIPanelButtonTemplate">
+                <Size x="100" y="26"/>
+                <Anchors>
+                    <Anchor point="RIGHT" relativeKey="$parent.CancelButton"
+                            relativePoint="LEFT" x="-8" y="0"/>
+                </Anchors>
+            </Button>
+        </Frames>
+    </Frame>
+
     <!-- ================================================================== -->
     <!-- Main Dashboard Frame                                               -->
     <!-- ================================================================== -->

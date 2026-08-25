@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.0] - 2026-08-25
+
+### Added
+
+- **TSM Group Mover.** Pick a TradeSkillMaster group from Bag Triage, choose where it comes from and where it goes (bags to warband, character, or guild bank), and every matching item is staged in the Triage list for the usual Deposit or Take Out button. Groups are read live from TSM, so nothing is imported and nothing goes stale. Caged battle pets are matched by species. Two options under Options, Triage, Group Mover: move tradeable items only, and respect the Keep List. The feature is absent when TSM is not installed.
+
+### Fixed
+
+- **The Restock item picker flickered and left rows stuck on "Loading...".** Some entries in the reagent list no longer exist in the current client, so their rows never resolved and kept rebuilding the list. Those entries are gone, and the picker now skips anything the client does not recognise.
+- **Wiping Restock Rules left them on screen.** The data was cleared but only the Characters tab repainted, so the Restock tab kept showing rules that no longer existed.
+
 ## [1.1.9] - 2026-08-19
 
 ### Fixed

@@ -1104,6 +1104,8 @@ function EmpireManager:CreateTriageOverlay()
     refreshBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -26)
     refreshBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     refreshBtn:SetScript("OnClick", function(_, button)
+        -- A rescan clears the selected Group, as it clears skipped rows.
+        self:ClearGroupMover()
         if button == "RightButton" then
             if self._triageActiveTab == "bags" then
                 self.triageSkippedItems = {}
@@ -1131,6 +1133,35 @@ function EmpireManager:CreateTriageOverlay()
     end)
     refreshBtn:SetScript("OnLeave", GameTooltip_Hide)
     self._triageRescanBtn = refreshBtn
+
+    -- TSM group mover. Absent (not disabled) when TSM is not loaded.
+    if TSM_API then
+        -- Same Blizzard square-button frame as Rescan, with our icon inside it.
+        local moverBtn = CreateFrame("Button", nil, f, "SquareIconButtonTemplate")
+        moverBtn:SetPoint("RIGHT", refreshBtn, "LEFT", 2, 0)
+        if moverBtn.Icon then
+            moverBtn.Icon:SetTexture([[Interface\AddOns\EmpireManager\Textures\mover]])
+            moverBtn.Icon:SetSize(16, 16)
+            moverBtn.Icon:SetVertexColor(1, 0.82, 0)
+        end
+        moverBtn:SetScript("OnClick", function()
+            self:OpenGroupMoverPicker()
+        end)
+        moverBtn:SetScript("OnEnter", function(btn)
+            GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+            GameTooltip:SetText("Move TSM Group")
+            GameTooltip:AddLine(self:GroupMoverDirectionText(), 1, 1, 1, true)
+            local selected = self._groupMoverLabel or self._groupMoverPath
+            if selected then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine("Selected: " .. selected, 1, 0.82, 0, true)
+                GameTooltip:AddLine("Rescan to clear it.", 1, 1, 1, true)
+            end
+            GameTooltip:Show()
+        end)
+        moverBtn:SetScript("OnLeave", GameTooltip_Hide)
+        self._triageMoverBtn = moverBtn
+    end
 
     -- Tooltip installer: shows btn._disabledReason on hover when the button is disabled.
     -- SetMotionScriptsWhileDisabled is required so OnEnter still fires while the
@@ -1319,6 +1350,13 @@ function EmpireManager:_SetAllTriageActionsLocked(locked)
             self._triageRescanBtn:Enable()
         end
     end
+    if self._triageMoverBtn then
+        if locked then
+            self._triageMoverBtn:Disable()
+        else
+            self._triageMoverBtn:Enable()
+        end
+    end
     if self._triageGrip then
         self._triageGrip:EnableMouse(not locked)
     end
@@ -1369,6 +1407,11 @@ end
 function EmpireManager:StartBulkOperation()
     self._bulkGeneration = (self._bulkGeneration or 0) + 1
     self._triageBulkOperating = true
+    -- Close the Group picker: leaving it open would show an enabled Move button
+    -- that then refuses the click.
+    if EmpireManagerGroupMoverDialog and EmpireManagerGroupMoverDialog:IsShown() then
+        EmpireManagerGroupMoverDialog:Hide()
+    end
     ResetMaxStackCache()
     self:_SetAllTriageActionsLocked(true)
     return self._bulkGeneration
@@ -7637,4 +7680,517 @@ function EmpireManager:RefreshCharBlacklistDisplay()
 
     content:SetHeight(y + 10)
     sf:SetVerticalScroll(0)
+end
+
+-------------------------------------------------------------------------------
+-- TSM Group Mover
+-------------------------------------------------------------------------------
+
+function EmpireManager:GroupMoverDirectionText()
+    local from = self._groupMoverFrom
+    local to = self._groupMoverTo
+    if from and to then
+        return string.format("%s to %s",
+            self:GroupMoverEndpointLabel(from) or "?",
+            self:GroupMoverEndpointLabel(to) or "?")
+    end
+    return "No Group selected"
+end
+
+-- Button press only: TSM API calls must stay user-initiated.
+function EmpireManager:GetTSMGroupPaths()
+    if not TSM_API then
+        return {}
+    end
+    local ok, paths = pcall(function()
+        local result = {}
+        TSM_API.GetGroupPaths(result)
+        return result
+    end)
+    if not ok or type(paths) ~= "table" then
+        return {}
+    end
+    table.sort(paths)
+    return paths
+end
+
+local GROUPMOVER_ROW_HEIGHT = 22
+
+-- TSM paths use backticks: "A`B`C" is C inside B inside A. Returns a flat list;
+-- depth drives the indent.
+local function BuildGroupTree(paths, expanded, search)
+    local nodes, seen = {}, {}
+    search = (search or ""):lower()
+
+    local all = {}
+    for _, path in ipairs(paths) do
+        all[path] = true
+        local acc = nil
+        for part in string.gmatch(path, "[^`]+") do
+            acc = acc and (acc .. "`" .. part) or part
+            all[acc] = true
+        end
+    end
+    local ordered = {}
+    for path in pairs(all) do
+        ordered[#ordered + 1] = path
+    end
+    table.sort(ordered)
+
+    local hasChildren = {}
+    for _, path in ipairs(ordered) do
+        local parent = string.match(path, "^(.*)`[^`]+$")
+        if parent then
+            hasChildren[parent] = true
+        end
+    end
+
+    for _, path in ipairs(ordered) do
+        local leaf = string.match(path, "([^`]+)$") or path
+        local depth = 0
+        for _ in string.gmatch(path, "`") do
+            depth = depth + 1
+        end
+
+        local visible
+        if search ~= "" then
+            visible = leaf:lower():find(search, 1, true) ~= nil
+            depth = 0
+        else
+            visible = true
+            local acc = nil
+            for part in string.gmatch(path, "[^`]+") do
+                local nextAcc = acc and (acc .. "`" .. part) or part
+                if nextAcc ~= path and not expanded[nextAcc] then
+                    visible = false
+                    break
+                end
+                acc = nextAcc
+            end
+        end
+
+        if visible and not seen[path] then
+            seen[path] = true
+            nodes[#nodes + 1] = {
+                path = path,
+                label = leaf,
+                depth = depth,
+                hasChildren = hasChildren[path] or false,
+            }
+        end
+    end
+    return nodes
+end
+
+-- Not filtered by which bank is open: reachability is checked at move time.
+EmpireManager.GROUPMOVER_ENDPOINTS = {
+    { key = "bags", label = "Character Bags" },
+    { key = "warbandbank", label = "Warband Bank" },
+    { key = "guildbank", label = "Guild Bank" },
+    { key = "charbank", label = "Character Bank" },
+}
+
+function EmpireManager:GroupMoverEndpointLabel(key)
+    for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
+        if e.key == key then
+            return e.label
+        end
+    end
+    return nil
+end
+
+-- Exactly one end must be bags: WoW has no bank-to-bank move.
+function EmpireManager:GroupMoverPairValid(from, to)
+    if not from or not to or from == to then
+        return false
+    end
+    return (from == "bags") ~= (to == "bags")
+end
+
+function EmpireManager:InitGroupMoverDialog()
+    local f = EmpireManagerGroupMoverDialog
+    if f._initialized then
+        return f
+    end
+    f._initialized = true
+
+    f:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true,
+        tileSize = 32,
+        edgeSize = 32,
+        insets = { left = 8, right = 8, top = 8, bottom = 8 },
+    })
+    f:SetBackdropColor(0.06, 0.06, 0.09, 1)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f.TitleText:SetText("Select TSM Group")
+    f.CancelButton:SetText("Cancel")
+    f.SelectButton:SetText("Move")
+    f.CancelButton:SetScript("OnClick", function()
+        f:Hide()
+    end)
+    f:SetScript("OnKeyDown", function(frame, key)
+        if key == "ESCAPE" then
+            frame:SetPropagateKeyboardInput(false)
+            frame:Hide()
+        else
+            frame:SetPropagateKeyboardInput(true)
+        end
+    end)
+
+    f.SearchBox = CreateFrame("EditBox", nil, f.FilterRow, "SearchBoxTemplate")
+    f.SearchBox:SetPoint("LEFT", f.FilterRow, "LEFT", 8, 0)
+    f.SearchBox:SetPoint("RIGHT", f.FilterRow, "RIGHT", 0, 0)
+    f.SearchBox:SetHeight(22)
+
+    local LABEL_W = 44
+    local fromLabel = f.RouteRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fromLabel:SetPoint("TOPLEFT", f.RouteRow, "TOPLEFT", 0, -4)
+    fromLabel:SetWidth(LABEL_W)
+    fromLabel:SetJustifyH("LEFT")
+    fromLabel:SetText("From:")
+    f.FromDD = CreateFrame("DropdownButton", nil, f.RouteRow, "WowStyle1DropdownTemplate")
+    f.FromDD:SetPoint("LEFT", fromLabel, "RIGHT", 6, 0)
+    f.FromDD:SetWidth(302)
+    f.FromDD:SetHeight(24)
+
+    local toLabel = f.RouteRow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    toLabel:SetPoint("TOPLEFT", fromLabel, "BOTTOMLEFT", 0, -10)
+    toLabel:SetWidth(LABEL_W)
+    toLabel:SetJustifyH("LEFT")
+    toLabel:SetText("To:")
+    f.ToDD = CreateFrame("DropdownButton", nil, f.RouteRow, "WowStyle1DropdownTemplate")
+    f.ToDD:SetPoint("LEFT", toLabel, "RIGHT", 6, 0)
+    f.ToDD:SetWidth(302)
+    f.ToDD:SetHeight(24)
+
+    -- Swap button, vertically centred between the two dropdowns so neither moves.
+    f.SwapButton = CreateFrame("Button", nil, f.RouteRow)
+    f.SwapButton:SetSize(22, 22)
+    f.SwapButton:SetPoint("LEFT", f.FromDD, "RIGHT", 8, -11)
+    local swapTex = [[Interface\AddOns\EmpireManager\Textures\swap]]
+    f.SwapButton:SetNormalTexture(swapTex)
+    f.SwapButton:SetHighlightTexture(swapTex, "ADD")
+    f.SwapButton:GetHighlightTexture():SetAlpha(0.4)
+    f.SwapButton:SetPushedTexture(swapTex)
+    f.SwapButton:GetPushedTexture():SetVertexColor(0.7, 0.7, 0.7)
+    f.SwapButton:SetScript("OnClick", function()
+        f._from, f._to = f._to, f._from
+        f._toUserSet = true
+        if f._refreshRoute then
+            f._refreshRoute()
+        end
+    end)
+    f.SwapButton:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Swap From and To")
+        GameTooltip:Show()
+    end)
+    f.SwapButton:SetScript("OnLeave", GameTooltip_Hide)
+
+    f.RouteWarn = f.RouteRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.RouteWarn:SetPoint("TOPLEFT", f.RouteRow, "BOTTOMLEFT", 0, 12)
+    f.RouteWarn:SetPoint("TOPRIGHT", f.RouteRow, "BOTTOMRIGHT", 0, 12)
+    f.RouteWarn:SetJustifyH("LEFT")
+    f.RouteWarn:SetTextColor(1, 0.3, 0.3)
+    f.RouteWarn:Hide()
+
+    f.ScrollBox = f.ListInset.ScrollBox
+    f.ScrollBar = f.ListInset.ScrollBar
+    local view = CreateScrollBoxListLinearView()
+    view:SetElementExtent(GROUPMOVER_ROW_HEIGHT)
+    view:SetElementInitializer("EMGroupMoverRowTemplate", function(frame, node)
+        if not frame._built then
+            frame._built = true
+            frame.Expand = frame:CreateTexture(nil, "OVERLAY")
+            frame.Expand:SetSize(14, 14)
+            frame.NameFs = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            frame.NameFs:SetJustifyH("LEFT")
+            -- One line, ellipsis on overflow: the row is 22px, a wrapped second
+            -- line would be clipped.
+            frame.NameFs:SetWordWrap(false)
+            frame.NameFs:SetMaxLines(1)
+            frame.CountFs = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            frame.CountFs:SetPoint("RIGHT", frame, "RIGHT", -8, 0)
+            frame.SelTex = frame:CreateTexture(nil, "ARTWORK")
+            frame.SelTex:SetAllPoints(frame)
+            frame.SelTex:SetColorTexture(1, 0.82, 0, 0.20)
+            frame.SelTex:Hide()
+        end
+        frame.Stripe:SetAtlas((node.index % 2 == 0) and "auctionhouse-rowstripe-1"
+            or "auctionhouse-rowstripe-2")
+
+        local indent = 14 + node.depth * 14
+        frame.Expand:ClearAllPoints()
+        frame.Expand:SetPoint("LEFT", frame, "LEFT", indent - 12, 0)
+        if node.hasChildren then
+            frame.Expand:SetTexture(node.expanded
+                and [[Interface\Buttons\UI-MinusButton-UP]]
+                or [[Interface\Buttons\UI-PlusButton-UP]])
+            frame.Expand:Show()
+        else
+            frame.Expand:Hide()
+        end
+        frame.NameFs:ClearAllPoints()
+        frame.NameFs:SetPoint("LEFT", frame, "LEFT", indent + 6, 0)
+        frame.NameFs:SetPoint("RIGHT", frame.CountFs, "LEFT", -6, 0)
+        frame.NameFs:SetText(node.label)
+        frame.CountFs:SetText("")
+        frame.SelTex:SetShown(node.selected and true or false)
+
+        frame:SetScript("OnClick", function()
+            -- +/- icon or double-click folds; anywhere else selects.
+            local dlg = EmpireManagerGroupMoverDialog
+            local now = GetTime()
+            local cursorX = GetCursorPosition()
+            local scale = frame:GetEffectiveScale()
+            local localX = (cursorX / scale) - frame:GetLeft()
+            local onIcon = node.hasChildren and localX < indent + 4
+
+            local isDouble = dlg._lastClickPath == node.path
+                and dlg._lastClickAt
+                and (now - dlg._lastClickAt) < 0.4
+            dlg._lastClickPath = node.path
+            dlg._lastClickAt = now
+
+            if onIcon or (isDouble and node.hasChildren) then
+                dlg._lastClickAt = nil
+                dlg._toggle(node.path)
+            else
+                dlg._select(node.path)
+            end
+        end)
+    end)
+    ScrollUtil.InitScrollBoxListWithScrollBar(f.ScrollBox, f.ScrollBar, view)
+
+    return f
+end
+
+-- Group picker: search + expand/collapse tree. Parents are selectable directly.
+function EmpireManager:OpenGroupMoverPicker()
+    if self._triageBulkOperating then
+        self:ChatMsg("|cff4d99ff[Mover]|r Wait for the current operation to finish.", true)
+        return
+    end
+    -- Already open: raise it rather than rebuilding the tree and losing the
+    -- current search / selection.
+    local existing = EmpireManagerGroupMoverDialog
+    if existing and existing:IsShown() then
+        existing:Raise()
+        return
+    end
+    local paths = self:GetTSMGroupPaths()
+    if #paths == 0 then
+        self:ChatMsg("|cff4d99ff[Mover]|r No TSM Groups found.", true)
+        return
+    end
+
+    local f = self:InitGroupMoverDialog()
+    f._expanded = f._expanded or {}
+    f._selected = self._groupMoverPath
+    f._paths = paths
+
+    if not f._from then
+        f._from = "bags"
+    end
+    -- Re-evaluate the destination on every open unless the user picked one this
+    -- session: the open bank is almost always the one meant.
+    if not f._toUserSet then
+        if self:IsGuildBankOpen() then
+            f._to = "guildbank"
+        elseif self.bankIsOpen and self:IsWarbandBankOnly() then
+            f._to = "warbandbank"
+        elseif self.bankIsOpen then
+            f._to = "charbank"
+        else
+            f._to = "warbandbank"
+        end
+    end
+
+    local function RefreshRoute()
+        f.FromDD:OverrideText(self:GroupMoverEndpointLabel(f._from) or "?")
+        f.ToDD:OverrideText(self:GroupMoverEndpointLabel(f._to) or "?")
+
+        -- Both menus list all four endpoints, always. Only the entry matching the
+        -- Both dropdowns stay free; an invalid pair just disables Move. Disabling
+        -- options deadlocked the pair, and auto-flipping fought the user.
+        f.FromDD:SetupMenu(function(_, root)
+            for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
+                root:CreateRadio(e.label, function()
+                    return f._from == e.key
+                end, function()
+                    f._from = e.key
+                    if f._refreshRoute then
+                        f._refreshRoute()
+                    end
+                end)
+            end
+        end)
+
+        f.ToDD:SetupMenu(function(_, root)
+            for _, e in ipairs(self.GROUPMOVER_ENDPOINTS) do
+                root:CreateRadio(e.label, function()
+                    return f._to == e.key
+                end, function()
+                    f._to = e.key
+                    f._toUserSet = true
+                    if f._refreshRoute then
+                        f._refreshRoute()
+                    end
+                end)
+            end
+        end)
+
+        -- Warn when an end is a bank the character is not standing at.
+        local warn
+        if f._from == f._to then
+            warn = "Pick two different places."
+        elseif not self:GroupMoverPairValid(f._from, f._to) then
+            warn = "Items cannot move bank to bank - one end must be Character Bags."
+        else
+            for _, key in ipairs({ f._from, f._to }) do
+                if key ~= "bags" and not self:GroupMoverEndpointOpen(key) then
+                    warn = "You must be at the " .. self:GroupMoverEndpointLabel(key) .. " for this move."
+                    break
+                end
+            end
+        end
+        if warn then
+            f.RouteWarn:SetText(warn)
+            f.RouteWarn:Show()
+        else
+            f.RouteWarn:Hide()
+        end
+
+        local reason
+        if not f._selected then
+            reason = "Select a Group first"
+        elseif f._from == f._to then
+            reason = "From and To are the same"
+        elseif not self:GroupMoverPairValid(f._from, f._to) then
+            reason = "One end must be Character Bags"
+        end
+        f.SelectButton._disabledReason = reason
+        f.SelectButton:SetEnabled(reason == nil)
+    end
+    f._refreshRoute = RefreshRoute
+
+    local function Rebuild()
+        local nodes = BuildGroupTree(f._paths, f._expanded, f.SearchBox:GetText())
+        local data = {}
+        for i, node in ipairs(nodes) do
+            node.index = i
+            node.expanded = f._expanded[node.path]
+            node.selected = (node.path == f._selected)
+            data[#data + 1] = node
+        end
+        -- SetDataProvider resets scroll to the top; a fold/unfold should not move
+        -- the view out from under the user.
+        local savedPct = f.ScrollBox:GetScrollPercentage()
+        f.ScrollBox:SetDataProvider(CreateDataProvider(data))
+        if savedPct and savedPct > 0 then
+            C_Timer.After(0, function()
+                f.ScrollBox:SetScrollPercentage(savedPct)
+            end)
+        end
+        f.DescText:SetText(string.format(
+            "%d Group%s shown. Click a Group to select it, +/- to expand.",
+            #data, #data == 1 and "" or "s"))
+        if f._refreshRoute then
+            f._refreshRoute()
+        end
+    end
+    f._rebuild = Rebuild
+
+    f._toggle = function(path)
+        f._expanded[path] = (not f._expanded[path]) or nil
+        Rebuild()
+    end
+    f._select = function(path)
+        f._selected = path
+        Rebuild()
+    end
+
+    if not f._searchHooked then
+        f._searchHooked = true
+        f.SearchBox:HookScript("OnTextChanged", function()
+            if f._rebuild then
+                f._rebuild()
+            end
+        end)
+    end
+
+    f.SelectButton:SetScript("OnClick", function()
+        local path = f._selected
+        if not path then
+            return
+        end
+        if self._triageBulkOperating then
+            self:ChatMsg("|cff4d99ff[Mover]|r Wait for the current operation to finish.", true)
+            return
+        end
+        local items = {}
+        pcall(function()
+            TSM_API.GetGroupItems(path, true, items)
+        end)
+        local label = path
+        if TSM_API.FormatGroupPath then
+            local ok, formatted = pcall(TSM_API.FormatGroupPath, path)
+            if ok and formatted then
+                label = formatted
+            end
+        end
+        self._groupMoverPath = path
+        self._groupMoverLabel = label
+        self._groupMoverItems = items
+        self._groupMoverFrom = f._from
+        self._groupMoverTo = f._to
+        local usable = self:GroupMoverSetItems(items)
+        self:ChatMsg(string.format(
+            "|cff4d99ff[Mover]|r Selected |cffffd200%s|r - %d item%s. %s to %s.",
+            label, usable, usable == 1 and "" or "s",
+            self:GroupMoverEndpointLabel(f._from) or "?",
+            self:GroupMoverEndpointLabel(f._to) or "?"))
+        f:Hide()
+        -- Group items now claim their rows on the next scan; the existing bulk
+        -- actions do the moving.
+        -- Show the tab the items will appear on, so the result is visible.
+        local tabForEndpoint = {
+            bags = "bags",
+            charbank = "bank",
+            warbandbank = "warband",
+            guildbank = "guildbank",
+        }
+        -- Tab enable states are computed on bank open; refresh them here so a
+        -- tab that became reachable since the window opened can be switched to.
+        self:UpdateTriageTabButtons()
+        local wantTab = tabForEndpoint[f._from]
+        if wantTab and wantTab ~= self._triageActiveTab then
+            self:InvalidateStorageCache()
+            self:SwitchTriageTab(wantTab)
+        else
+            self:InvalidateStorageCache(true)
+        end
+    end)
+
+    -- Bank state changes while the dialog is open, so re-check rather than
+    -- only computing this when the user touches a control.
+    f:SetScript("OnUpdate", function(frame, elapsed)
+        frame._warnTick = (frame._warnTick or 0) + elapsed
+        if frame._warnTick < 0.5 then
+            return
+        end
+        frame._warnTick = 0
+        if f._refreshRoute then
+            f._refreshRoute()
+        end
+    end)
+
+    f.SearchBox:SetText("")
+    RefreshRoute()
+    Rebuild()
+    f:Show()
 end

@@ -849,7 +849,7 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
 }
 
 -- RESTOCK_ITEMS: curated reagent itemIDs per expansion, used as the source pool by
--- the Bank Restock picker (docs/RESTOCK.md). itemIDs only; name/icon/tier resolved
+-- the Bank Restock picker. itemIDs only; name/icon/tier resolved
 -- on demand via C_Item.GetItemInfo + C_TradeSkillUI.GetItemReagentQualityByItemInfo.
 --
 -- Flat list per expansion. The picker categorizes each itemID at render time via
@@ -893,8 +893,13 @@ EmpireManager.RESTOCK_ITEMS = {
         2325, 2604, 2605, 3371, 4341, 4342, 4470, 6260, 10290, 11291,
         30817, 38682, 39354, 177062, 183955, 236949, 236950, 236951, 236952, 240990,
         240991, 241280, 241281, 241282, 241283, 251283, 251285, 251665, 251691, 253302,
-        253303, 260947, 262625, 262628, 262639, 262642, 262643, 262647, 262648, 262655,
-        262656,
+        253303,
+        -- Removed 2026-08-25: 260947, 262625, 262628, 262639, 262642, 262643,
+        -- 262647, 262648, 262655, 262656. C_Item.GetItemInfoInstant does not know
+        -- any of them on this build (they never resolve, not even client-side), so
+        -- their picker rows sat at "Loading..." forever and kept re-arming the
+        -- GET_ITEM_INFO_RECEIVED watcher - which is what drove the endless refresh
+        -- loop / flicker. Artefacts of the /em gendata AH scan.
         -- 7/12 Enchanting
         243599, 243600, 243602, 243603, 243605, 243606,
         -- 7/16 Inscription (pigments, inks, missives)

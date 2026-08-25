@@ -60,7 +60,9 @@ local DB_DEFAULTS = {
             repairWithGuildFunds = false, -- prefer guild bank funds for auto-repair, fall back to personal gold
             closeTriageOnLeave = true, -- auto-close triage overlay when leaving bank/vendor/mailbox
             autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
-            autoRestock = false, -- auto top-up restock floors from bags on bank open (off = OK/Cancel dialog). See docs/RESTOCK.md.
+            groupMoverBoeOnly = true, -- TSM Group Mover: only claim tradeable (BoE/unbound) items
+            groupMoverRespectKeepList = true, -- Keep List still wins over a selected Group
+            autoRestock = false, -- auto top-up restock floors from bags on bank open (off = OK/Cancel dialog).
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             vendorBoePoor = false, -- also vendor poor quality items that are BoE (off = keep for AH)
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
@@ -99,7 +101,7 @@ function EmpireManager:OnInitialize()
     if not rawget(self.db.global, "vendorWhitelist") then
         self.db.global.vendorWhitelist = {}
     end
-    -- Bank Restock par-level list (ordered array; position = priority). See docs/RESTOCK.md.
+    -- Bank Restock par-level list (ordered array; position = priority).
     if not rawget(self.db.global, "restockList") then
         self.db.global.restockList = {}
     end
@@ -611,6 +613,33 @@ function EmpireManager:OnInitialize()
         "Close on Leaving Bank/Vendor/Mail",
         "Automatically close the Triage overlay when you close the Bank, Guild Bank, Vendor, or Mailbox."
     )
+
+    -- Section: Group Mover. Greyed out rather than hidden when TSM is absent, so
+    -- the settings stay discoverable.
+    triageLayout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Group Mover"))
+
+    local function TSMLoaded()
+        return TSM_API ~= nil
+    end
+
+    local moverOpts = {
+        {
+            "groupMoverBoeOnly",
+            "Move Tradeable Items Only",
+            "Only move items that can actually leave this character - unbound and BoE. Soulbound items are left alone even when the Group lists them.",
+        },
+        {
+            "groupMoverRespectKeepList",
+            "Respect the Keep List",
+            "Keep-Listed items are skipped and named in chat. Turn off to let the Group win.",
+        },
+    }
+    for _, opt in ipairs(moverOpts) do
+        local _, init = AddCheckbox(triageCat, opt[1], opt[2], opt[3])
+        if init and init.AddModifyPredicate then
+            init:AddModifyPredicate(TSMLoaded)
+        end
+    end
 
     Settings.RegisterAddOnCategory(category)
 
@@ -1228,7 +1257,7 @@ function EmpireManager:SlashHandler(input)
         -- Dev helper: dump RESTOCK_ITEMS itemIDs from the loaded AH browse results,
         -- grouped by Trade Goods subclass. Accumulates across runs (one search per
         -- category); `reset` clears the accumulator. Run at the AH after searching
-        -- Reagents -> <profession> with "Current Expansion Only". See docs/RESTOCK.md.
+        -- Reagents -> <profession> with "Current Expansion Only".
         local _, gsub = self:GetArgs(input, 2)
         self:_GenRestockData(gsub and gsub:lower() or nil)
     elseif cmd == "help" then
@@ -1418,7 +1447,7 @@ end
 -- dump: if the per-category union is larger, the broad search truncated.
 --   /em gendata        - merge current AH results, then show the accumulated table
 --   /em gendata reset  - clear the accumulator and start over
--- See docs/RESTOCK.md §4. Dev-only; not surfaced in /em help.
+-- Dev-only; not surfaced in /em help.
 function EmpireManager:_GenRestockData(sub)
     if sub == "reset" then
         self._genRestockAcc = nil
@@ -3134,18 +3163,29 @@ function EmpireManager:ConfirmWipe(target)
     end
 end
 
+-- Repaint the tabs that render wiped data. Each guards itself, so calling all of
+-- them is safe regardless of which tab is showing.
+function EmpireManager:RefreshRuleTabs()
+    local f = EmpireManagerFrame
+    if f and f.StoragePage and f.StoragePage._nativeInit then
+        f.StoragePage:Refresh()
+    end
+    if self.RefreshRestockTab then
+        self:RefreshRestockTab()
+    end
+    self:SendMessage("EM_DASHBOARD_REFRESH")
+end
+
 function EmpireManager:PerformWipe(target)
     if target == "chars" then
         self.db.global.registry = {}
         self:ChatMsg("|cffff4444Wiped Character Roster.|r", true)
-        self:SendMessage("EM_DASHBOARD_REFRESH")
+        self:RefreshRuleTabs()
     elseif target == "rules" then
         self.db.global.storageAssignments = {}
         self:ChatMsg("|cffff4444Wiped Storage Rules.|r", true)
         self:InvalidateStorageCache()
-        if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
-            EmpireManagerFrame.StoragePage:Refresh()
-        end
+        self:RefreshRuleTabs()
     elseif target == "keeplist" then
         self.db.global.keepList = {}
         self:ChatMsg("|cffff4444Wiped Keep List.|r", true)
@@ -3170,7 +3210,7 @@ function EmpireManager:PerformWipe(target)
         self.db.global.restockList = {}
         self:ChatMsg("|cffff4444Wiped Restock Rules.|r", true)
         self:InvalidateStorageCache()
-        self:SendMessage("EM_DASHBOARD_REFRESH")
+        self:RefreshRuleTabs()
         self._bagsDirty = true
         if self.RefreshTriageIfOpen then
             self:RefreshTriageIfOpen()
@@ -3183,10 +3223,7 @@ function EmpireManager:PerformWipe(target)
         self.db.global.restockList = {}
         self:ChatMsg("|cffff4444Wiped everything: Storage, Restock, Keep List, Vendor Whitelist, and Roster.|r", true)
         self:InvalidateStorageCache()
-        self:SendMessage("EM_DASHBOARD_REFRESH")
-        if EmpireManagerFrame and EmpireManagerFrame.StoragePage and EmpireManagerFrame.StoragePage._nativeInit then
-            EmpireManagerFrame.StoragePage:Refresh()
-        end
+        self:RefreshRuleTabs()
         self._bagsDirty = true
         if self.RefreshTriageIfOpen then
             self:RefreshTriageIfOpen()
