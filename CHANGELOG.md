@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.2] - 2026-08-29
+
+### Added
+
+- **Copy your chat with `/em cc`.** Opens the chat text in a window you can select and copy from, so you no longer need a separate chat-copy addon.
+
+### Fixed
+
+- **Warbound gear was mailed to the Equipment (BoE) banker.** When you carried two copies of one item in different bind states, a soulbound copy could make the Warbound one look like ordinary BoE.
+- **Restock did not always honour the amount a rule asked for.**
+- **Restock now confirms its rules after it runs**, tops up anything still short, and tells you what it could not fill.
+- **Restock visual fixes.**
+
+### Changed
+
+- **`/em inspect` reports the bind flags triage actually uses.** It had its own copy of the bind detection, which could show a state that was never acted on.
+
 ## [1.2.1] - 2026-08-28
 
 ### Fixed

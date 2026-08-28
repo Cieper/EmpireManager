@@ -736,6 +736,15 @@ local function ParseBagSlots(itemLink)
     return nil
 end
 
+-- Exposed so diagnostics (/em inspect) can report the SAME bind flags the
+-- classifier acts on. Inspect used to carry its own copy of this matching, which
+-- drifted: it omitted constants ParseTooltipBind checks, so it could print a bind
+-- state routing had never used.
+EmpireManager.ParseTooltipBind = ParseTooltipBind
+-- Exposed for the same reason: bind flags are only computed when this gate passes,
+-- so a diagnostic that does not show it can imply detection ran when it did not.
+EmpireManager.NeedsTooltipScan = NeedsTooltipScan
+
 -- Per-scan tooltip cache: avoids re-parsing tooltips for the same itemID.
 -- Cleared at the start of each async scan via ResetTooltipCache().
 -- Key = itemID, Value = { isWarbound, isLockbox, isUnique, isTeleport, isConjured, isEquipToken, isKnownAppearance }
@@ -753,15 +762,21 @@ local function CachedTooltipBind(itemID, tooltipDataFn)
         ParseTooltipBind(tooltipData)
     local cached = tooltipCache[itemID]
     if cached then
-        -- Per-slot soulbound from the live tooltip; static flags from the cache.
-        -- isWarbound is NOT itemID-static: two slots of one itemID can differ
-        -- (e.g. a Heroic "Warbound until equipped" Phaseblade beside a Champion
-        -- "Soulbound" copy of the same itemID). Recompute it from this slot's
-        -- live tooltip rather than trusting cached[1] - ParseTooltipBind's own
-        -- soulbound override ran before this cache was consulted, so cached[1]
-        -- has never seen this slot's bind state.
-        local cachedWarbound = cached[1] and (isPermanentWarbound or not isSoulbound)
-        return cachedWarbound,
+        -- Per-slot bind state (isWarbound / isSoulbound / isPermanentWarbound) comes
+        -- from THIS slot's freshly parsed tooltip; only the itemID-static flags come
+        -- from the cache. Two slots of one itemID can differ: a "Warbound until
+        -- equipped" copy can sit beside a "Soulbound" copy of the same item.
+        --
+        -- This used to AND the live value with cached[1], so whichever copy was
+        -- scanned first decided for every other one. A Soulbound copy scanned first
+        -- cached false, and the Warbound copy's own correct parse was discarded: it
+        -- classified as plain BoE and was mailed to the BoE banker for the auction
+        -- house, which cannot sell a Warbound item at all. Items with only one copy
+        -- in bags were unaffected, which is why this stayed hidden.
+        --
+        -- ParseTooltipBind already applies the soulbound override, so its isWarbound
+        -- is correct for this slot as it stands.
+        return isWarbound,
             isSoulbound,
             cached[2],
             cached[3],

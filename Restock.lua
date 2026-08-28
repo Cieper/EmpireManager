@@ -333,6 +333,20 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
     -- see total work done) but must not inflate `itemsStashed`, which means
     -- "items deposited to bank".
     local stashedForStat = 0
+    -- Units this run has already pulled into bags, per itemID, counted the moment
+    -- the move fires. The floor guards below cannot use CountItemInBags alone: a
+    -- re-entering pass starts before BAG_UPDATE_DELAYED has landed, so it reads the
+    -- pre-move count (trace: two passes both saw inBags=0 for a target of 2) and
+    -- withdraws the deficit again. Counting at fire time is what makes the clamp
+    -- immune to the settle lag.
+    local pulledThisRun = {}
+    -- Mirror of pulledThisRun for the deposit side: units placed INTO a bank this
+    -- run, counted when the move fires. Keyed by itemID and destination, because one
+    -- itemID can have rows for different banks with separate floors.
+    local depositedThisRun = {}
+    local function DepositKey(item)
+        return (item.itemID or 0) .. ":" .. (item.destType or "?")
+    end
     local listener = self:AcquireListener()
     local settleTimer -- debounce after BAG_UPDATE_DELAYED
     local fallbackTimer -- fires if no BAG_UPDATE_DELAYED arrives
@@ -382,7 +396,23 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
         if not bankOpenFor(item) then
             return 0, nil
         end
+        -- Clamp to what the floor STILL needs, read live. `item.move` was computed
+        -- when the plan was built; a re-entering pass would otherwise re-fire the
+        -- whole of it. The bank count plus this run's uncommitted deposits is the
+        -- floor's truth, and the credit keeps it right when a move has fired but the
+        -- settle has not landed yet.
         local need = item.move
+        if item.entry and item.entry.target then
+            local inBank = CountInBankContainers(item.ctx, item.itemID)
+                + (depositedThisRun[DepositKey(item)] or 0)
+            local stillNeeded = item.entry.target - inBank
+            if stillNeeded < need then
+                need = stillNeeded
+            end
+        end
+        if need <= 0 then
+            return 0, nil
+        end
         local moves = 0
         local lastTab
         -- Source moves are ALWAYS from a bag, so pickup/split use the C_Container API
@@ -412,9 +442,19 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
                         -- the destination slot never overflows.
                         C_Container.SplitContainerItem(st.bag, st.slot, granted)
                     end
+                    -- Confirm the cursor actually holds the item before placing.
+                    -- A pickup or split can fail silently (locked slot, item still in
+                    -- flight); placing nothing and counting a move inflates the
+                    -- result and hides the failure. The withdraw path has always
+                    -- done this.
+                    if GetCursorInfo() ~= "item" then
+                        ClearCursor()
+                        return moves, lastTab
+                    end
                     item.ctx.PickupItem(destC, destS)
                     ClearCursor()
                     lastTab = destC
+                    depositedThisRun[DepositKey(item)] = (depositedThisRun[DepositKey(item)] or 0) + granted
                     need = need - granted
                     remaining = remaining - granted
                     moves = moves + 1
@@ -445,7 +485,8 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
         -- satisfied twice.
         local need = item.move
         if item.entry and item.entry.target then
-            local stillNeeded = item.entry.target - self:CountItemInBags(item.itemID)
+            local stillNeeded = item.entry.target
+                - (self:CountItemInBags(item.itemID) + (pulledThisRun[item.itemID] or 0))
             if stillNeeded < need then
                 need = stillNeeded
             end
@@ -486,6 +527,7 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
                 C_Container.PickupContainerItem(destBag, destSlot)
                 ClearCursor()
                 lastTab = st.container
+                pulledThisRun[item.itemID] = (pulledThisRun[item.itemID] or 0) + granted
                 need = need - granted
                 remaining = remaining - granted
                 moves = moves + 1
@@ -559,9 +601,37 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             -- and an under-reported pass would re-enter and withdraw the units a
             -- second time. The floor's truth is directly observable (how many are in
             -- bags now vs. the target), so consult that and never overshoot.
+            if item.withdraw then
+                -- Retire the fire-time credit only for units the live bag count can
+                -- now see: `moved` is the verified delta, so those units are visible
+                -- and double-counting them would suppress a later legitimate pass.
+                -- Anything still in flight keeps its credit until it lands. Clearing
+                -- unconditionally here would re-open the original bug, because the
+                -- next pass starts immediately after this and may still read a stale
+                -- count.
+                local pulled = (pulledThisRun[item.itemID] or 0) - moved
+                pulledThisRun[item.itemID] = pulled > 0 and pulled or nil
+            end
+            if not item.withdraw then
+                local k = DepositKey(item)
+                local pushed = (depositedThisRun[k] or 0) - moved
+                depositedThisRun[k] = pushed > 0 and pushed or nil
+            end
             if item.withdraw and item.entry then
                 local floor = item.entry.target or 0
-                if self:CountItemInBags(item.itemID) >= floor then
+                if self:CountItemInBags(item.itemID) + (pulledThisRun[item.itemID] or 0) >= floor then
+                    processNext()
+                    return
+                end
+            elseif item.entry then
+                -- Same guard for deposits: the floor's truth is what the bank holds
+                -- now plus anything this run moved that has not settled, not the
+                -- per-row depositedSoFar tally, which reads zero exactly when the
+                -- settle window closed early and the retry would double-deposit.
+                local floor = item.entry.target or 0
+                local inBank = CountInBankContainers(item.ctx, item.itemID)
+                    + (depositedThisRun[DepositKey(item)] or 0)
+                if inBank >= floor then
                     processNext()
                     return
                 end
@@ -716,7 +786,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     local f = EmpireManagerRestockConfirmDialog
     if not f then
         -- Defensive fallback: XML frame missing -> just execute the plan.
-        self:ExecuteRestockPlan(plan)
+        self:RunRestockPlan(plan)
         return
     end
 
@@ -758,6 +828,11 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
 
     local sf = f.ScrollFrame
     local content = sf.Content
+    -- Show BEFORE measuring/building. A hidden frame has not been laid out, so
+    -- sf:GetWidth() returns 0 and every row button below is sized to width -16,
+    -- i.e. invisible: the dialog opens with a header and no items. (Same reason
+    -- ShowDebugPopup has to Show() before it sets text.)
+    f:Show()
     content:SetWidth(sf:GetWidth())
 
     local y = 8
@@ -820,57 +895,67 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
 
     y = y + 4
 
-    -- Group by destination header so the user sees each bank's batch separately.
-    -- Plan order already reflects restockList priority; grouping preserves it by
-    -- emitting a new section header whenever the destination text changes.
-    local lastHeader
+    -- Group rows by destination header. Plan order follows restockList priority, so
+    -- rows for one bank can be non-contiguous; emitting a header whenever the text
+    -- merely CHANGED printed "From Warband Bank" twice with another section between.
+    -- Bucket first, then render: section order is first appearance, and row order
+    -- inside a section keeps plan priority.
+    local groupOrder, groups = {}, {}
     for _, item in ipairs(plan) do
         local headerText = DestHeaderText(self, item)
-        if headerText ~= lastHeader then
-            lastHeader = headerText
-            y = y + 4 -- spacer above each group
-            local grp = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
-            grp:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-            grp:SetText("|cffffcc00" .. headerText .. "|r")
-            y = y + 18
+        local bucket = groups[headerText]
+        if not bucket then
+            bucket = {}
+            groups[headerText] = bucket
+            groupOrder[#groupOrder + 1] = headerText
         end
-
-        -- Row: icon + "N x colored name"
-        local _, itemLink, quality, _, _, _, _, _, _, icon = C_Item.GetItemInfo(item.itemID)
-        icon = icon or 134400
-        local btn = Track(CreateFrame("Button", nil, content))
-        btn:SetSize(content:GetWidth() - 16, 18)
-        btn:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
-
-        local iconTex = btn:CreateTexture(nil, "ARTWORK")
-        iconTex:SetSize(16, 16)
-        iconTex:SetPoint("LEFT", btn, "LEFT", 0, 0)
-        iconTex:SetTexture(icon)
-
-        local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        fs:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
-        fs:SetPoint("RIGHT", btn, "RIGHT", 0, 0)
-        fs:SetJustifyH("LEFT")
-        local qc = quality and ITEM_QUALITY_COLORS[quality]
-        local coloredName = (qc and qc.hex or "|cffffffff") .. (item.name or "?") .. "|r"
-        fs:SetText(string.format("%d x %s", item.move, coloredName))
-
-        local hoverLink = itemLink or item.itemID
-        btn:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
-            if type(hoverLink) == "string" then
-                GameTooltip:SetHyperlink(hoverLink)
-            else
-                GameTooltip:SetItemByID(hoverLink)
-            end
-            GameTooltip:Show()
-        end)
-        btn:SetScript("OnLeave", function()
-            GameTooltip:Hide()
-        end)
-        y = y + 18
+        bucket[#bucket + 1] = item
     end
 
+    for _, headerText in ipairs(groupOrder) do
+        y = y + 4 -- spacer above each group
+        local grp = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormal"))
+        grp:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
+        grp:SetText("|cffffcc00" .. headerText .. "|r")
+        y = y + 18
+
+        for _, item in ipairs(groups[headerText]) do
+            -- Row: icon + "N x colored name"
+            local _, itemLink, quality, _, _, _, _, _, _, icon = C_Item.GetItemInfo(item.itemID)
+            icon = icon or 134400
+            local btn = Track(CreateFrame("Button", nil, content))
+            btn:SetSize(content:GetWidth() - 16, 18)
+            btn:SetPoint("TOPLEFT", content, "TOPLEFT", 16, -y)
+
+            local iconTex = btn:CreateTexture(nil, "ARTWORK")
+            iconTex:SetSize(16, 16)
+            iconTex:SetPoint("LEFT", btn, "LEFT", 0, 0)
+            iconTex:SetTexture(icon)
+
+            local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            fs:SetPoint("LEFT", iconTex, "RIGHT", 6, 0)
+            fs:SetPoint("RIGHT", btn, "RIGHT", 0, 0)
+            fs:SetJustifyH("LEFT")
+            local qc = quality and ITEM_QUALITY_COLORS[quality]
+            local coloredName = (qc and qc.hex or "|cffffffff") .. (item.name or "?") .. "|r"
+            fs:SetText(string.format("%d x %s", item.move, coloredName))
+
+            local hoverLink = itemLink or item.itemID
+            btn:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_CURSOR_RIGHT")
+                if type(hoverLink) == "string" then
+                    GameTooltip:SetHyperlink(hoverLink)
+                else
+                    GameTooltip:SetItemByID(hoverLink)
+                end
+                GameTooltip:Show()
+            end)
+            btn:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+            y = y + 18
+        end
+    end
     content:SetHeight(y + 10)
 
     -- Fit the frame to content up to a cap so 3-item plans don't render an
@@ -895,7 +980,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     okBtn:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
-        self:ExecuteRestockPlan(plan)
+        self:RunRestockPlan(plan)
     end)
     f._btns[1] = okBtn
 
@@ -918,7 +1003,41 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
 
     -- Reset scroll to top so a fresh plan doesn't open mid-list from a prior use.
     sf:SetVerticalScroll(0)
-    f:Show()
+end
+
+-- How many extra passes a run may take to satisfy its rules. A pass only happens
+-- when the previous one actually moved something, so this bounds a genuinely
+-- blocked destination rather than normal batching.
+local RESTOCK_RECONCILE_PASSES = 2
+
+-- Run a plan, then RECONCILE against the rules (docs/RESTOCK.md, Engine contract 2).
+-- In-flight measurement cannot be trusted - moves are asynchronous, several rows can
+-- touch one itemID, and a settle window can close before the server round-trip lands.
+-- So the authority is the state after everything settles: recompute the plan and, if a
+-- reachable rule is still short while progress was being made, run again. Anything
+-- still unmet after that is reported instead of being silently left short.
+function EmpireManager:RunRestockPlan(plan, pass)
+    pass = pass or 1
+    self:ExecuteRestockPlan(plan, function(moved)
+        C_Timer.After(0.6, function()
+            local remaining = self:ComputeRestockPlan()
+            if #remaining == 0 then
+                return -- every reachable rule is satisfied
+            end
+            if moved > 0 and pass <= RESTOCK_RECONCILE_PASSES then
+                self:RunRestockPlan(remaining, pass + 1)
+                return
+            end
+            local parts = {}
+            for _, it in ipairs(remaining) do
+                parts[#parts + 1] = string.format("%d x %s", it.move or 0, it.name or "?")
+            end
+            self:ChatMsg(string.format(
+                "|cffff8800[Restock]|r Still short of the rule: %s",
+                table.concat(parts, ", ")
+            ), true)
+        end)
+    end)
 end
 
 -- Decide silent vs. confirm, then run. Called on bank open (after capacity settles).
@@ -932,7 +1051,7 @@ function EmpireManager:MaybeRestock()
     end
 
     if self.db.global.options.autoRestock then
-        self:ExecuteRestockPlan(plan)
+        self:RunRestockPlan(plan)
     else
         self:ShowRestockConfirmDialog(plan)
     end

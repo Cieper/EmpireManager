@@ -22,6 +22,7 @@ EmpireManager.SLASH_COMMANDS = {
     { cmd = "/em gb", desc = "Open the Guild Blacklist window" },
     { cmd = "/em charb", desc = "Open the Character Blacklist window" },
     { cmd = "/em ie", desc = "Open the Import / Export window" },
+    { cmd = "/em cc", desc = "Copy chat text (Chat Copy window)" },
     { cmd = "/em wizard", desc = "Open the Storage Setup Wizard" },
     { cmd = "/em wipe <target>", desc = "|cffff8800Destructive|r: <target> = chars / rules / keeplist / vendorw / restock / all" },
     { cmd = "/em help", desc = "Show all commands in chat" },
@@ -961,6 +962,8 @@ function EmpireManager:SlashHandler(input)
         self:ToggleCharBlacklistWindow()
     elseif cmd == "ie" then
         self:ToggleIOWindow()
+    elseif cmd == "cc" then
+        self:_DumpChat()
     elseif cmd == "wizard" then
         self:OpenWizard()
     elseif cmd == "wipe" then
@@ -1075,53 +1078,32 @@ function EmpireManager:SlashHandler(input)
                 true
             )
         end
-        -- Tooltip-derived bind flags (what triage actually uses)
+        -- Bind flags via the classifier's OWN parser, so this line cannot disagree
+        -- with what routing acted on. Also reports NeedsTooltipScan: when that gate
+        -- is false the classifier never parses at all and every flag stays false,
+        -- which a bare "isWarbound=false" would otherwise hide.
         if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
             local td = C_TooltipInfo.GetHyperlink(itemLink)
-            local isWarbound, isSoulbound = false, false
-            local isConjured = false
-            local isKnownAppearance = false
-            local hasUseLine, hasClassLine = false, false
-            local usePrefix = (ITEM_SPELL_TRIGGER_ONUSE or "Use: %s"):gsub("%%s.*$", "")
-            local classPrefix = (ITEM_CLASSES_ALLOWED or "Classes: %s"):gsub("%%s.*$", "")
-            local knownLine = ITEM_SPELL_KNOWN or "Already known"
-            if td and td.lines then
-                for _, line in ipairs(td.lines) do
-                    local txt = line.leftText
-                    if txt then
-                        if
-                            txt == ITEM_ACCOUNTBOUND
-                            or txt == ITEM_BIND_TO_ACCOUNT
-                            or txt == ITEM_BIND_TO_ACCOUNT_UNTIL_EQUIP
-                        then
-                            isWarbound = true
-                        elseif txt == ITEM_SOULBOUND then
-                            isSoulbound = true
-                        elseif txt == ITEM_CONJURED then
-                            isConjured = true
-                        elseif txt == knownLine then
-                            isKnownAppearance = true
-                        end
-                        if not hasUseLine and usePrefix ~= "" and txt:find(usePrefix, 1, true) == 1 then
-                            hasUseLine = true
-                        end
-                        if not hasClassLine and classPrefix ~= "" and txt:find(classPrefix, 1, true) == 1 then
-                            hasClassLine = true
-                        end
-                    end
-                end
-            end
-            if isSoulbound then
-                isWarbound = false
-            end
+            local isWarbound, isSoulbound, _, _, _, isConjured, isEquipToken, isKnownAppearance, isPermanentWarbound =
+                self.ParseTooltipBind(td)
+            local gate = self.NeedsTooltipScan(classID or -1, bindType or 0, itemID)
             self:ChatMsgRaw(
                 string.format(
-                    "  tooltip: isWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
+                    "  tooltip: isWarbound=%s  permanentWarbound=%s  isSoulbound=%s  isConjured=%s  isEquipToken=%s  isKnownAppearance=%s",
                     tostring(isWarbound),
+                    tostring(isPermanentWarbound),
                     tostring(isSoulbound),
                     tostring(isConjured),
-                    tostring(hasUseLine and hasClassLine),
+                    tostring(isEquipToken),
                     tostring(isKnownAppearance)
+                ),
+                true
+            )
+            self:ChatMsgRaw(
+                string.format(
+                    "  NeedsTooltipScan=%s%s",
+                    tostring(gate),
+                    gate and "" or "  (classifier skips bind detection: all flags forced false)"
                 ),
                 true
             )
@@ -1136,23 +1118,14 @@ function EmpireManager:SlashHandler(input)
                     local info = C_Container.GetContainerItemInfo(bag, slot)
                     if info and info.itemID == itemID then
                         found = found + 1
+                        -- Run the classifier's own parser on THIS slot's tooltip.
+                        -- Previously this listed tooltip lines matching a local
+                        -- whitelist, which was narrower than the parser's: a bind
+                        -- line the whitelist lacked printed as "(none)" even though
+                        -- the parser recognised it.
                         local td = C_TooltipInfo.GetBagItem(bag, slot)
-                        local binds = {}
-                        for _, line in ipairs(td and td.lines or {}) do
-                            local txt = line.leftText
-                            if
-                                txt
-                                and (
-                                    txt == ITEM_SOULBOUND
-                                    or txt == ITEM_BIND_ON_PICKUP
-                                    or txt == ITEM_ACCOUNTBOUND
-                                    or txt == ITEM_BNETACCOUNTBOUND
-                                    or txt == ITEM_BIND_ON_EQUIP
-                                )
-                            then
-                                binds[#binds + 1] = txt
-                            end
-                        end
+                        local sWarbound, sSoulbound, _, _, _, _, _, _, sPermWarbound =
+                            self.ParseTooltipBind(td)
                         -- Per-slot iLvl from that slot's own link: two upgraded copies
                         -- of one itemID differ here, which is what splits them across
                         -- the vendor ceiling (one kept, one flagged by Pawn).
@@ -1168,13 +1141,15 @@ function EmpireManager:SlashHandler(input)
                         local slotBound = C_Item.DoesItemExist(sloc) and C_Item.IsBound(sloc)
                         self:ChatMsgRaw(
                             string.format(
-                                "  bag %d:%d ilvl=%s  bindType=%s  isBound=%s  live bind lines: %s",
+                                "  bag %d:%d ilvl=%s  bindType=%s  isBound=%s  parsed: warbound=%s permanent=%s soulbound=%s",
                                 bag,
                                 slot,
                                 tostring(slotIlvl or "?"),
                                 tostring(slotBind or "?"),
                                 tostring(slotBound and true or false),
-                                #binds > 0 and table.concat(binds, " / ") or "(none)"
+                                tostring(sWarbound),
+                                tostring(sPermWarbound),
+                                tostring(sSoulbound)
                             ),
                             true
                         )
@@ -1559,7 +1534,106 @@ end
 -- Copyable textarea: plain ScrollFrame + EditBox scroll child. Avoids
 -- InputScrollFrameTemplate's character-counter overlay and the selection-rect
 -- bugs that come with chat-font templates.
-function EmpireManager:ShowDebugPopup(text)
+-- Chat Copy (`/em cc`): dump the visible chat frames into the debug popup so the
+-- text can be selected and copied out. Same window as `/em dump`.
+
+-- How many messages to pull per chat frame. WoW's own scrollback caps around
+-- 1000; 500 keeps a busy General tab responsive.
+local CHAT_COPY_MAX_LINES = 500
+
+-- Strip markup that is meaningless once the text leaves the chat frame: textures
+-- and atlases render as nothing in an EditBox, and WoW's pluralisation escape has
+-- to be resolved by hand.
+local function CleanChatLine(msg)
+    if not msg or msg == "" then
+        return ""
+    end
+    msg = msg:gsub("|T.-|t", "")
+    msg = msg:gsub("|A.-|a", "")
+    -- "5 |4second:seconds;" -> "5 seconds". Singular for exactly 1, plural
+    -- otherwise (including 0).
+    msg = msg:gsub("(%d+) |4([^:|]+):([^;|]+);", function(n, singular, plural)
+        return n .. " " .. (tonumber(n) == 1 and singular or plural)
+    end)
+    return msg
+end
+
+-- WoW 12.x marks some chat text as a "secret value": an addon may hold it but any
+-- comparison or concatenation raises "attempt to compare ... a secret string value,
+-- while execution tainted". Chat inside instanced content (delves, encounters) is
+-- routinely secret. issecretvalue is the sanctioned test - Blizzard uses it in their
+-- own error handler - and type() short-circuits it for nil. Guarded so a client
+-- without the function still works.
+local IsSecret = _G.issecretvalue
+local function IsCopyableText(v)
+    if type(v) ~= "string" then
+        return false
+    end
+    return not (IsSecret and IsSecret(v))
+end
+
+function EmpireManager:_DumpChat()
+    -- Collected in a table and concatenated once: appending to a string would
+    -- reallocate the whole buffer per message, up to 10 x 500 times.
+    local lines = {}
+    local secretLines = 0
+    for i = 1, NUM_CHAT_WINDOWS do
+        local frame = _G["ChatFrame" .. i]
+        if frame and frame:IsVisible() then
+            local numMessages = frame:GetNumMessages() or 0
+            if numMessages > 0 then
+                local startLine = math.max(1, numMessages - CHAT_COPY_MAX_LINES + 1)
+                if #lines > 0 then
+                    -- Name the tab rather than its index, so "Combat Log" reads
+                    -- as itself in the copied text.
+                    local name = frame.name
+                    if not name or name == "" then
+                        name = GetChatWindowInfo(i) or ("Chat Frame " .. i)
+                    end
+                    lines[#lines + 1] = ""
+                    lines[#lines + 1] = "--- " .. name .. " ---"
+                end
+                for n = startLine, numMessages do
+                    -- GetMessageInfo returns message, r, g, b, id - it does not
+                    -- expose the originating chat event, so per-type prefixes
+                    -- ([SAY], [GUILD]) are not recoverable here.
+                    local ok, message = pcall(frame.GetMessageInfo, frame, n)
+                    if ok and IsCopyableText(message) then
+                        if message ~= "" then
+                            lines[#lines + 1] = CleanChatLine(message)
+                        end
+                    elseif ok then
+                        -- Secret text. Counted so a short copy is explained rather
+                        -- than looking like lines went missing.
+                        secretLines = secretLines + 1
+                    end
+                end
+            end
+        end
+    end
+
+    if #lines == 0 then
+        self:ChatMsg("|cffff4444[cc]|r No chat content found to copy.", true)
+        if secretLines > 0 then
+            self:ChatMsg(string.format(
+                "|cffff4444[cc]|r %d line%s are protected by the game and cannot be read by addons (instanced content).",
+                secretLines,
+                secretLines == 1 and "" or "s"
+            ), true)
+        end
+        return
+    end
+    if secretLines > 0 then
+        self:ChatMsg(string.format(
+            "|cffff8800[cc]|r Skipped %d protected line%s the game does not let addons read.",
+            secretLines,
+            secretLines == 1 and "" or "s"
+        ), true)
+    end
+    self:ShowDebugPopup(table.concat(lines, "\n"), "EmpireManager - Chat Copy")
+end
+
+function EmpireManager:ShowDebugPopup(text, titleText)
     local f = _G.EmpireManagerDebugFrame
     if not f then
         f = CreateFrame("Frame", "EmpireManagerDebugFrame", UIParent, "BackdropTemplate")
@@ -1585,24 +1659,21 @@ function EmpireManager:ShowDebugPopup(text)
 
         local title = f:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
         title:SetPoint("TOP", 0, -16)
-        title:SetText("EmpireManager DEBUG")
+        f.TitleText = title
 
         local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
         close:SetPoint("TOPRIGHT", -4, -4)
 
-        -- Escape-to-close via a self-contained key handler instead of
-        -- UISpecialFrames: this frame is CreateFrame'd in Lua (tainted), and a
-        -- tainted UISpecialFrames entry taints Blizzard's secure window-close loop.
-        f:EnableKeyboard(true)
-        f:SetPropagateKeyboardInput(true)
-        f:SetScript("OnKeyDown", function(self_, key)
-            if key == "ESCAPE" then
-                self_:SetPropagateKeyboardInput(false)
-                self_:Hide()
-            else
-                self_:SetPropagateKeyboardInput(true)
-            end
-        end)
+        -- No frame-level keyboard capture. A parent frame with EnableKeyboard(true)
+        -- receives every keystroke before the EditBox does, which ate Backspace and
+        -- made the text flicker; and the only way to pass keys through,
+        -- SetPropagateKeyboardInput, is PROTECTED in combat - calling it there
+        -- raises ADDON_ACTION_BLOCKED, and a propagate=false left behind would
+        -- swallow movement keys the next time the window opened.
+        -- ESC is handled on the EditBox (OnEscapePressed); the X button closes it
+        -- otherwise. UISpecialFrames is not an option either: this frame is
+        -- CreateFrame'd in Lua (tainted), and a tainted UISpecialFrames entry
+        -- taints Blizzard's secure window-close loop.
 
         -- Plain ScrollFrame (NOT InputScrollFrameTemplate) so there's no
         -- character-counter overlay and no template-imposed font.
@@ -1619,7 +1690,7 @@ function EmpireManager:ShowDebugPopup(text)
         eb:EnableMouse(true)
         eb:SetCountInvisibleLetters(false) -- fix selection-rect mis-alignment with escapes
         eb:SetTextInsets(4, 4, 4, 4)
-        eb:SetFontObject("GameFontHighlightSmall")
+        eb:SetFontObject("ChatFontNormal")
         eb:SetMaxBytes(0)
         eb:SetMaxLetters(0)
         if eb.SetHyperlinksEnabled then
@@ -1659,7 +1730,9 @@ function EmpireManager:ShowDebugPopup(text)
             end
         end)
 
-        eb:SetScript("OnEscapePressed", eb.ClearFocus)
+        eb:SetScript("OnEscapePressed", function()
+            f:Hide()
+        end)
         eb:SetScript("OnEditFocusLost", function(self)
             self:HighlightText(0, 0)
         end)
@@ -1690,12 +1763,17 @@ function EmpireManager:ShowDebugPopup(text)
         f.EditBox = eb
         f.ScrollFrame = scroll
     end
+    f.TitleText:SetText(titleText or "EmpireManager DEBUG")
+    -- Show BEFORE filling. A multiline EditBox inside a ScrollFrame does not lay
+    -- out while hidden, so text set first leaves the scroll child at zero height
+    -- and the window renders empty. CreateFrame returns a shown frame, so only
+    -- the first call ever worked - every reopen after a close came up blank.
+    f:Show()
     f.EditBox:SetText(text or "")
     f.EditBox:SetTextColor(1, 1, 1, 1)
     f.EditBox:HighlightText(0, 0)
     f.EditBox:SetCursorPosition(0)
     f.ScrollFrame:SetVerticalScroll(0)
-    f:Show()
 end
 
 -- Apply the clampToScreen option to all addon windows at runtime.
