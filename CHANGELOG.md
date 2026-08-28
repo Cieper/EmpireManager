@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.1] - 2026-08-28
+
+### Fixed
+
+- **Character Bags rules are topped up from the bank.** A bags rule protected its floor in Bag Triage, so the items were never vendored or mailed away, but it could not bring any in: a rule for 10 healing potions read "out of stock" even with a full stack sitting in the bank. Open a bank now and a short bags rule pulls the difference into your bags, preferring the character bank over the warband bank.
+
+### Changed
+
+- **Aetherlume and Evercore route to Engineering only.** They were treated as universal recycle reagents and matched every crafting profession, so a storage rule for any craft would claim them and they scattered across whichever banker came first. They now follow their Parts category to Engineering, like the rest of that bucket.
+- **The Restock confirm dialog says what it is about to do.** It now states the direction and counts the items - "Take out 6 items into your bags?", "Deposit 12 items, take out 6 items?" - instead of naming internal floors, and the list groups moves under "To" and "From" headers so both directions stay readable when the same bank appears on either side. The button reads Deposit, Take Out, or Move to match.
+
 ## [1.2.0] - 2026-08-25
 
 ### Added

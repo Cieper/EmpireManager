@@ -787,14 +787,6 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [253302] = { "engineering" }, -- Malleable Wireframe
     [253303] = { "engineering" }, -- Pile of Junk
 
-    -- Midnight universal Parts (7/1) - Aetherlume + Evercore are shared
-    -- recycle/craft reagents across all crafting professions, not engineering-only
-    -- as the 7/1 → engineering map would suggest. Multiple itemIDs per name = quality tiers.
-    [243578] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Aetherlume
-    [243579] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Aetherlume (variant)
-    [243581] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Evercore
-    [243582] = { "engineering", "blacksmithing", "jewelcrafting", "leatherworking", "tailoring", "alchemy", "inscription", "enchanting" }, -- Evercore (variant)
-
     -- Midnight Trade Goods 7/11 profession-specific reagents.
     [240990] = { "jewelcrafting" },            -- Sunglass Vial (JC variant per Wowhead spell link)
     [240991] = { "alchemy", "jewelcrafting" }, -- Sunglass Vial

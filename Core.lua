@@ -62,7 +62,7 @@ local DB_DEFAULTS = {
             autoTransferGold = false, -- auto-balance bag gold vs warband gold on warband bank open (per-char amounts in Sidecar > Gold)
             groupMoverBoeOnly = true, -- TSM Group Mover: only claim tradeable (BoE/unbound) items
             groupMoverRespectKeepList = true, -- Keep List still wins over a selected Group
-            autoRestock = false, -- auto top-up restock floors from bags on bank open (off = OK/Cancel dialog).
+            autoRestock = false, -- auto top-up restock floors on bank open, both directions (off = OK/Cancel dialog).
             skipEquipmentSets = true, -- protect gear in equipment sets from vendor rules
             vendorBoePoor = false, -- also vendor poor quality items that are BoE (off = keep for AH)
             pawnVendorBop = false, -- vendor soulbound non-upgrades via Pawn
@@ -422,7 +422,7 @@ function EmpireManager:OnInitialize()
         generalCat,
         "autoRestock",
         "Auto Restock at Bank",
-        "When you open a bank, top up your Restock floors from this character's bags without asking. "
+        "When you open a bank, top up your Restock floors without asking. "
             .. "Set the floors in the Restock tab. When off, you are asked to confirm each top-up."
     )
 

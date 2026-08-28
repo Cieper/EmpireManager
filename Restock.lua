@@ -95,12 +95,115 @@ local function ClaimDestSlot(slots, want)
     return nil
 end
 
+-- Which banks can supply a `dest = "bags"` floor right now, in priority order.
+-- The guild bank is always its own frame (interaction type 10, separate from
+-- BANKFRAME/AccountBanker), so it never opens alongside the others: when it is
+-- open it is the only source. Otherwise char bank comes before warband, and
+-- warband-only mode (Distance Inhibitor) has no char bank to offer.
+local function SourceOrderFor(self)
+    if self:IsGuildBankOpen() then
+        return { "guildbank" }
+    end
+    if not self.bankIsOpen then
+        return {}
+    end
+    if self:IsWarbandBankOnly() then
+        return { "warbandbank" }
+    end
+    return { "charbank", "warbandbank" }
+end
+
+-- All slots in an open bank holding `itemID`, smallest stack first so a floor is
+-- filled from the most fragmented stack and whole stacks are left intact where
+-- possible. Returns { {container, slot, count}, ... }.
+local function FindBankStacks(ctx, itemID)
+    local stacks = {}
+    local first, last = ctx.ContainerRange()
+    for container = first, last do
+        local numSlots = ctx.GetNumSlots(container)
+        for slot = 1, numSlots do
+            local info = ctx.GetItemInfo(container, slot)
+            if info and info.itemID == itemID and not info.isLocked then
+                stacks[#stacks + 1] = { container = container, slot = slot, count = info.stackCount or 1 }
+            end
+        end
+    end
+    table.sort(stacks, function(a, b)
+        if a.count ~= b.count then
+            return a.count < b.count
+        end
+        if a.container ~= b.container then
+            return a.container < b.container
+        end
+        return a.slot < b.slot
+    end)
+    return stacks
+end
+
+-- Free bag slots that can receive `itemID`, partials first (top up an existing
+-- stack before consuming an empty slot), then empties. Same shape/semantics as
+-- BuildDestSlots, but over bags 0-5. Reagent-bag placement: a crafting reagent
+-- may use bag 5, anything else may not.
+local function BuildBagDestSlots(itemID)
+    local maxStack = (select(8, C_Item.GetItemInfo(itemID))) or 1
+    if maxStack < 1 then
+        maxStack = 1
+    end
+    local isReagent = select(17, C_Item.GetItemInfo(itemID)) and true or false
+    local partials, empties = {}, {}
+    for bag = 0, 5 do
+        if bag ~= 5 or isReagent then
+            local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+            for slot = 1, numSlots do
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                if not info then
+                    empties[#empties + 1] = { container = bag, slot = slot, room = maxStack }
+                elseif info.itemID == itemID then
+                    local room = maxStack - (info.stackCount or 1)
+                    if room > 0 then
+                        partials[#partials + 1] = { container = bag, slot = slot, room = room }
+                    end
+                end
+            end
+        end
+    end
+    for i = 1, #empties do
+        partials[#partials + 1] = empties[i]
+    end
+    return partials
+end
+
+-- True if a bags entry targets the current character. Mirrors the file-local
+-- RestockEntryTargetsMe in TriageLogic.lua (not exported), for the same
+-- `chars` array / legacy single `char` shapes.
+local function EntryTargetsMe(self, entry)
+    local guid = self.playerGUID
+    if entry.chars then
+        for _, g in ipairs(entry.chars) do
+            if g == guid then
+                return true
+            end
+        end
+        return false
+    end
+    return entry.char == guid
+end
+
 -- Reachability: which restock destinations can THIS character top up at the
 -- currently open bank. Warband: whenever warband containers are open. Char bank:
 -- only the owner, and only when the regular (non-warband-only) bank is open. Guild:
 -- when the guild bank is open and the entry's guild is this character's guild.
--- Bags: keep-in-bags floors are not deposited (protection handles them).
+-- Bags: filled FROM whichever bank is open (withdraw side; see SourceOrderFor).
 local function EntryReachableNow(self, entry)
+    if entry.dest == "bags" then
+        -- Bags floors are filled FROM a bank (the mirror of every other dest).
+        -- Reachable whenever any bank is open and this character is a target;
+        -- which bank actually supplies the units is decided by SourceOrderFor.
+        if not self.bankIsOpen and not self:IsGuildBankOpen() then
+            return false
+        end
+        return EntryTargetsMe(self, entry)
+    end
     if entry.dest == "warbandbank" then
         for bag = 12, 16 do
             if (C_Container.GetContainerNumSlots(bag) or 0) > 0 then
@@ -159,22 +262,52 @@ function EmpireManager:ComputeRestockPlan()
     local plan = {}
     for _, entry in ipairs(list) do
         if entry.itemID and entry.target and entry.target > 0 and EntryReachableNow(self, entry) then
-            local ctx = MoveContexts[entry.dest]
-            if ctx then
-                local inBank = CountInBankContainers(ctx, entry.itemID)
-                local deficit = entry.target - inBank
-                if deficit > 0 then
-                    local have = self:CountItemInBags(entry.itemID)
-                    local move = math.min(deficit, have)
-                    if move > 0 then
-                        plan[#plan + 1] = {
-                            ctx = ctx,
-                            destType = entry.dest,
-                            itemID = entry.itemID,
-                            name = entry.name or ("Item " .. entry.itemID),
-                            move = move,
-                            entry = entry, -- source rule (guild/char for dialog headers)
-                        }
+            if entry.dest == "bags" then
+                -- Withdraw side: the deficit is in BAGS and the supply is in the
+                -- open bank(s). One plan item per supplying bank, in priority
+                -- order, so a floor can be covered across char bank + warband.
+                local deficit = entry.target - self:CountItemInBags(entry.itemID)
+                for _, srcType in ipairs(SourceOrderFor(self)) do
+                    if deficit <= 0 then
+                        break
+                    end
+                    local srcCtx = MoveContexts[srcType]
+                    if srcCtx then
+                        local available = CountInBankContainers(srcCtx, entry.itemID)
+                        local move = math.min(deficit, available)
+                        if move > 0 then
+                            plan[#plan + 1] = {
+                                ctx = srcCtx,
+                                withdraw = true,
+                                destType = "bags",
+                                srcType = srcType,
+                                itemID = entry.itemID,
+                                name = entry.name or ("Item " .. entry.itemID),
+                                move = move,
+                                entry = entry,
+                            }
+                            deficit = deficit - move
+                        end
+                    end
+                end
+            else
+                local ctx = MoveContexts[entry.dest]
+                if ctx then
+                    local inBank = CountInBankContainers(ctx, entry.itemID)
+                    local deficit = entry.target - inBank
+                    if deficit > 0 then
+                        local have = self:CountItemInBags(entry.itemID)
+                        local move = math.min(deficit, have)
+                        if move > 0 then
+                            plan[#plan + 1] = {
+                                ctx = ctx,
+                                destType = entry.dest,
+                                itemID = entry.itemID,
+                                name = entry.name or ("Item " .. entry.itemID),
+                                move = move,
+                                entry = entry, -- source rule (guild/char for dialog headers)
+                            }
+                        end
                     end
                 end
             end
@@ -196,6 +329,10 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
 
     local idx = 0
     local totalDeposited = 0
+    -- Deposited units only. Withdrawals count toward the return value (so callers
+    -- see total work done) but must not inflate `itemsStashed`, which means
+    -- "items deposited to bank".
+    local stashedForStat = 0
     local listener = self:AcquireListener()
     local settleTimer -- debounce after BAG_UPDATE_DELAYED
     local fallbackTimer -- fires if no BAG_UPDATE_DELAYED arrives
@@ -219,9 +356,11 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
 
     local processNext -- forward decl
 
-    -- True if the destination bank for this item is currently open.
-    local function bankOpenFor(destType)
-        if destType == "guildbank" then
+    -- True if the bank this plan item touches is currently open. For a deposit
+    -- that is the destination bank; for a withdraw it is the source bank.
+    local function bankOpenFor(item)
+        local bankType = item.withdraw and item.srcType or item.destType
+        if bankType == "guildbank" then
             return self:IsGuildBankOpen()
         end
         return self.bankIsOpen
@@ -240,7 +379,7 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
     -- otherwise it splits off exactly the granted amount so the floor is hit precisely
     -- and no slot overflows. `maxMoves` bounds the WoW rate-limited APIs per pass.
     local function depositItem(item, destSlots, maxMoves)
-        if not bankOpenFor(item.destType) then
+        if not bankOpenFor(item) then
             return 0, nil
         end
         local need = item.move
@@ -285,6 +424,76 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
         return moves, lastTab
     end
 
+    -- Fire one batch of withdrawals for `item`: move up to `need` units of the
+    -- itemID out of the open source bank into bags. Mirror image of depositItem -
+    -- the source is a bank slot (ctx.PickupItem / ctx.SplitItem) and the
+    -- destination is a bag slot (C_Container.PickupContainerItem). Capped at
+    -- `maxMoves` pickup/place pairs by the same per-context batch size.
+    --
+    -- Splitting is the normal case here, not the exception: a floor of 1 against a
+    -- bank stack of 6 must split. When the whole source stack is wanted AND the
+    -- receiving slot can hold it, the stack moves whole; otherwise exactly
+    -- `granted` units are split off.
+    local function withdrawItem(item, bagSlots, maxMoves)
+        if not bankOpenFor(item) then
+            return 0, nil
+        end
+        -- Clamp to what the floor STILL needs, read live. `item.move` was computed
+        -- when the plan was built; by the time this pass fires, earlier passes (or
+        -- anything else that touched bags) may already have covered part of it.
+        -- Re-deriving from the live count is what keeps a floor of 1 from being
+        -- satisfied twice.
+        local need = item.move
+        if item.entry and item.entry.target then
+            local stillNeeded = item.entry.target - self:CountItemInBags(item.itemID)
+            if stillNeeded < need then
+                need = stillNeeded
+            end
+        end
+        if need <= 0 then
+            return 0, nil
+        end
+        local moves = 0
+        local lastTab
+        local isGuild = (item.srcType == "guildbank")
+        for _, st in ipairs(FindBankStacks(item.ctx, item.itemID)) do
+            if need <= 0 then
+                break
+            end
+            local remaining = math.min(need, st.count)
+            while remaining > 0 and not (maxMoves > 0 and moves >= maxMoves) do
+                local destBag, destSlot, granted = ClaimDestSlot(bagSlots, remaining)
+                if not destBag then
+                    -- Bags are full for this item; report what we could not take.
+                    return moves, lastTab
+                end
+                ClearCursor()
+                if granted >= st.count and not isGuild then
+                    -- Whole source stack wanted and it fits: move it intact. The
+                    -- guild bank always goes through SplitGuildBankItem (proven
+                    -- more reliable than PickupGuildBankItem, per the takeout path).
+                    item.ctx.PickupItem(st.container, st.slot)
+                else
+                    item.ctx.SplitItem(st.container, st.slot, granted)
+                end
+                -- Guild bank moves lie about success; confirm the cursor actually
+                -- holds the item before placing it, or we place nothing and count
+                -- a phantom move.
+                if GetCursorInfo() ~= "item" then
+                    ClearCursor()
+                    return moves, lastTab
+                end
+                C_Container.PickupContainerItem(destBag, destSlot)
+                ClearCursor()
+                lastTab = st.container
+                need = need - granted
+                remaining = remaining - granted
+                moves = moves + 1
+            end
+        end
+        return moves, lastTab
+    end
+
     -- Deposit for `item`, settle, then re-enter the same item if it made progress and
     -- is still short (batched contexts loop until satisfied). Any context re-enters:
     -- guild moves one at a time, warband five at a time, char unlimited - each pass
@@ -293,8 +502,8 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
     -- the loop so a full/blocked tab can't spin forever.
     local function runItem(item, depositedSoFar, noProgress)
         noProgress = noProgress or 0
-        if not bankOpenFor(item.destType) then
-            -- Destination bank closed mid-run; skip this item, try the next.
+        if not bankOpenFor(item) then
+            -- Bank closed mid-run; skip this item, try the next.
             processNext()
             return
         end
@@ -307,12 +516,17 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
 
         local batchSize = item.ctx.batchSize or 0
         local before = self:CountItemInBags(item.itemID)
-        -- Scan the bank's receiving slots fresh each pass so re-entry sees the
-        -- post-settle state (a merged partial stack, a newly emptied slot, etc.).
-        local destSlots = BuildDestSlots(item.ctx, item.itemID)
-        local fired, lastTab = depositItem(item, destSlots, batchSize)
-        -- Guild: refresh the server's view of the tab we deposited into so the next
-        -- pass counts the moved item.
+        -- Scan the receiving slots fresh each pass so re-entry sees the post-settle
+        -- state (a merged partial stack, a newly emptied slot, etc.). Deposits
+        -- receive into the bank; withdrawals receive into bags.
+        local fired, lastTab
+        if item.withdraw then
+            fired, lastTab = withdrawItem(item, BuildBagDestSlots(item.itemID), batchSize)
+        else
+            fired, lastTab = depositItem(item, BuildDestSlots(item.ctx, item.itemID), batchSize)
+        end
+        -- Guild: refresh the server's view of the tab we touched so the next pass
+        -- counts the moved item.
         if fired > 0 and lastTab and item.ctx.needsQueryAfterMove and item.ctx.QueryAfterMove then
             item.ctx.QueryAfterMove(lastTab)
         end
@@ -321,7 +535,7 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             return
         end
 
-        local isGuild = (item.destType == "guildbank")
+        local isGuild = (item.withdraw and item.srcType or item.destType) == "guildbank"
 
         -- Apply a verified move count: chat, tally, then either re-enter the
         -- same item if it still has a deficit or advance. Extracted so the
@@ -330,7 +544,27 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             if moved > 0 then
                 totalDeposited = totalDeposited + moved
                 depositedSoFar = depositedSoFar + moved
-                self:ChatMsg(string.format("|cff4d99ff[Restock]|r Deposited %d x %s", moved, item.name))
+                if not item.withdraw then
+                    stashedForStat = stashedForStat + moved
+                end
+                self:ChatMsg(string.format(
+                    "|cff4d99ff[Restock]|r %s %d x %s",
+                    item.withdraw and "Withdrew" or "Deposited", moved, item.name
+                ))
+            end
+            -- Withdrawals re-check the LIVE bag count against the floor instead of
+            -- trusting the running tally. All plan items share one listener and one
+            -- 0.4s settle window, so in a mixed plan a deposit still draining bags
+            -- can land inside a withdraw's measurement window and under-report it -
+            -- and an under-reported pass would re-enter and withdraw the units a
+            -- second time. The floor's truth is directly observable (how many are in
+            -- bags now vs. the target), so consult that and never overshoot.
+            if item.withdraw and item.entry then
+                local floor = item.entry.target or 0
+                if self:CountItemInBags(item.itemID) >= floor then
+                    processNext()
+                    return
+                end
             end
             -- Re-enter the same item if it still has a deficit. Batched contexts
             -- (warband 5, guild 1) need several passes; char (unlimited) usually
@@ -354,7 +588,9 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             clearTimers()
             listener:UnregisterAllEvents()
             local afterSettle = self:CountItemInBags(item.itemID)
-            local movedProvisional = before - afterSettle
+            -- Per-item bag count, not slot occupancy: a split leaves the source
+            -- slot populated, so an occupancy metric misreports every partial move.
+            local movedProvisional = item.withdraw and (afterSettle - before) or (before - afterSettle)
             if movedProvisional <= 0 then
                 applyMoved(0)
                 return
@@ -369,15 +605,15 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
             -- which triggers the existing noProgress retry path.
             C_Timer.After(1.5, function()
                 local afterVerify = self:CountItemInBags(item.itemID)
-                local movedReal = before - afterVerify
+                local movedReal = item.withdraw and (afterVerify - before) or (before - afterVerify)
                 if movedReal < 0 then
                     movedReal = 0
                 end
                 if movedReal < movedProvisional then
                     local bounced = movedProvisional - movedReal
                     self:ChatMsg(string.format(
-                        "|cffff8800[Restock]|r %d x %s bounced back (destination rejected)",
-                        bounced, item.name
+                        "|cffff8800[Restock]|r %d x %s bounced back (%s rejected)",
+                        bounced, item.name, item.withdraw and "bags" or "destination"
                     ))
                 end
                 applyMoved(movedReal)
@@ -411,8 +647,8 @@ function EmpireManager:ExecuteRestockPlan(plan, onDone)
         local item = plan[idx]
         if not item then
             cleanup()
-            if totalDeposited > 0 then
-                self:IncrementStat("itemsStashed", totalDeposited)
+            if stashedForStat > 0 then
+                self:IncrementStat("itemsStashed", stashedForStat)
             end
             -- Re-snapshot so the Fill column reflects the new counts. Bag
             -- counts feed "Character Bags" rules; SnapshotBankItemCounts writes
@@ -445,11 +681,19 @@ end
 -- "Character Bank (Ax)". Used as a section heading in the confirm dialog so the
 -- user can see where each batch is going at a glance.
 local function DestHeaderText(self, item)
+    if item.withdraw then
+        -- Withdrawals are grouped by the bank the units come FROM; the
+        -- destination is always this character's bags.
+        local srcName = item.srcType == "warbandbank" and "Warband Bank"
+            or item.srcType == "guildbank" and string.format("Guild Bank (%s)", GetGuildInfo("player") or "Guild")
+            or "Character Bank"
+        return "From " .. srcName
+    end
     if item.destType == "warbandbank" then
-        return "Warband Bank"
+        return "To Warband Bank"
     elseif item.destType == "guildbank" then
         local guild = item.entry and item.entry.guild or "Guild"
-        return string.format("Guild Bank (%s)", guild)
+        return string.format("To Guild Bank (%s)", guild)
     elseif item.destType == "charbank" then
         -- charbank rules are owner-only in the engine, so item.entry.chars must
         -- include the current player. Show that name for clarity.
@@ -457,10 +701,10 @@ local function DestHeaderText(self, item)
         if item.entry and item.entry.chars and item.entry.chars[myGuid] then
             local entry = self.db.global.registry[myGuid]
             if entry and entry.name then
-                return string.format("Character Bank (%s)", entry.name)
+                return string.format("To Character Bank (%s)", entry.name)
             end
         end
-        return "Character Bank"
+        return "To Character Bank"
     end
     return item.destType or "?"
 end
@@ -521,17 +765,57 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     -- Header
     local hdr = Track(content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"))
     hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-    hdr:SetText(string.format(
-        "|cffffcc00Top up %d Restock floor%s?|r",
-        #plan,
-        #plan == 1 and "" or "s"
-    ))
+    -- A plan can mix directions (deposit to a bank, withdraw to bags), so the
+    -- header, sub-header and action button all adapt to what it actually contains.
+    --
+    -- Counts are in UNITS, not plan rows: one rule can split across several banks
+    -- (a bags floor sourced from char bank + warband is two rows, one item), so a
+    -- row count would overstate the work. Rules are counted separately, by identity,
+    -- for the same reason.
+    local hasDeposit, hasWithdraw = false, false
+    local depositUnits, withdrawUnits = 0, 0
+    local ruleSet, ruleCount = {}, 0
+    for _, it in ipairs(plan) do
+        if it.withdraw then
+            hasWithdraw = true
+            withdrawUnits = withdrawUnits + (it.move or 0)
+        else
+            hasDeposit = true
+            depositUnits = depositUnits + (it.move or 0)
+        end
+        if it.entry and not ruleSet[it.entry] then
+            ruleSet[it.entry] = true
+            ruleCount = ruleCount + 1
+        end
+    end
+
+    local function units(n)
+        return string.format("%d item%s", n, n == 1 and "" or "s")
+    end
+
+    local hdrText
+    if hasWithdraw and not hasDeposit then
+        hdrText = string.format("Take out %s into your bags?", units(withdrawUnits))
+    elseif hasDeposit and not hasWithdraw then
+        hdrText = string.format("Deposit %s from your bags?", units(depositUnits))
+    else
+        hdrText = string.format(
+            "Deposit %s, take out %s?",
+            units(depositUnits), units(withdrawUnits)
+        )
+    end
+    hdr:SetText("|cffffcc00" .. hdrText .. "|r")
     y = y + 26
 
     -- Sub-header
     local sub = Track(content:CreateFontString(nil, "OVERLAY", "GameFontHighlight"))
     sub:SetPoint("TOPLEFT", content, "TOPLEFT", 8, -y)
-    sub:SetText("|cffffffffDeposit from your bags:|r")
+    -- "rule" is the word the user sees in the Restock tab; "floor" is internal.
+    -- A plain label, not a dangling "To meet ..." purpose clause with no main verb.
+    sub:SetText(string.format(
+        "|cffffffffFrom %d Restock rule%s:|r",
+        ruleCount, ruleCount == 1 and "" or "s"
+    ))
     y = y + 22
 
     y = y + 4
@@ -607,7 +891,7 @@ function EmpireManager:ShowRestockConfirmDialog(plan)
     local okBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     okBtn:SetSize(100, 28)
     okBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 18)
-    okBtn:SetText("Deposit")
+    okBtn:SetText((hasWithdraw and not hasDeposit) and "Take Out" or (hasWithdraw and "Move" or "Deposit"))
     okBtn:SetScript("OnClick", function()
         intentionalClose = true
         f:Hide()
