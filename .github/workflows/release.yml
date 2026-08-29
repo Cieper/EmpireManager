@@ -23,5 +23,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Extract release changelog
+        run: |
+          awk '/^## \[/ { if (found) exit; found=1 } found { print }' CHANGELOG.md > .release-changelog.md
+
       - name: Package and release
         uses: BigWigsMods/packager@v2
