@@ -6,6 +6,8 @@
 ## SavedVariables: EmpireManagerDB
 ## IconTexture: Interface\AddOns\EmpireManager\textures\logo256
 ## OptionalDeps: TradeSkillMaster, Pawn
+## X-Curse-Project-ID: 1528757
+## X-Wago-ID: bGoynJ60
 
 embeds.xml
 Core.lua
