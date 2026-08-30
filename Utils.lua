@@ -583,7 +583,7 @@ end
 -- Hardcoded: which item subclasses each profession consumes/produces
 -- Values are {classID, subClassID} pairs from WoW's item classification
 EmpireManager.PROF_ITEM_MAP = {
-    alchemy = { { 7, 9 }, { 7, 10 }, { 7, 11 } }, -- Herbs, Elemental, Other (vials/oils/transmutagens)
+    alchemy = { { 7, 9 }, { 7, 11 } }, -- Herbs, Other (vials/oils/transmutagens)
     blacksmithing = { { 7, 7 } }, -- Metal & Stone
     enchanting = { { 7, 12 } }, -- Enchanting
     engineering = { { 7, 7 }, { 7, 1 } }, -- Metal & Stone, Parts
@@ -616,6 +616,15 @@ EmpireManager.PROF_ITEM_MAP = {
     -- Secondary professions
     cooking = { { 7, 8 } }, -- Cooking mats. Do NOT add subclass 19 - it's the generic "Finishing Reagent" bucket shared across Tailoring/Alchemy/Inscription (Petal Powder, Mycobloom Culture, Weavercloth Embroidery Thread) and cannot route to a single profession.
     -- archaeology: no clean subclass match (fragments are not standard tradegoods)
+    -- Neutral material category, and the only key that claims 7/10. Alchemy,
+    -- Blacksmithing, Enchanting and Engineering all consume these materials, so
+    -- listing the subclass under any one of them sends the whole bucket to that
+    -- profession's banker and leaves the others empty. Giving it its own key means a
+    -- single Elemental rule routes the material itself rather than whichever
+    -- profession rule happens to sit highest in storageAssignments. Herbs, Metal &
+    -- Stone and Leather need no equivalent - Herbalism, Mining and Skinning are
+    -- already narrowed to exactly those subclasses.
+    elemental = { { 7, 10 } }, -- Elemental/Primal materials
     -- Non-profession storage categories
     consumables = {
         { 0, 0 },
@@ -838,6 +847,105 @@ EmpireManager.PROF_ITEM_OVERRIDES = {
     [2692] = { "cooking" },                    -- Hot Spices
     [17194] = { "cooking" },                   -- Holiday Spices
     [30817] = { "cooking" },                   -- Simple Flour
+
+    -- Legacy Trade Goods 7/11 items that PROF_ITEM_MAP's alchemy-only default gets
+    -- wrong. Verified against real recipe reagent data (AllTheThings' ReagentsDB,
+    -- cross-referenced with each recipe's requireSkill), not guessed from item names.
+    -- Some of these have zero Alchemy usage at all - the alchemy-only default was
+    -- simply wrong for them, not just incomplete.
+    [47556] = { "blacksmithing", "leatherworking", "tailoring" }, -- Crusader Orb
+    [45087] = { "blacksmithing", "leatherworking", "tailoring" }, -- Runed Orb
+    [17010] = { "blacksmithing", "leatherworking", "tailoring", "engineering", "enchanting", "mining" }, -- Fiery Core
+    [17011] = { "blacksmithing", "leatherworking", "tailoring", "engineering", "jewelcrafting" }, -- Lava Core
+    [69237] = { "blacksmithing", "leatherworking", "tailoring", "alchemy", "enchanting" }, -- Living Ember
+    [71998] = { "blacksmithing", "leatherworking", "tailoring" }, -- Essence of Destruction
+    [160298] = { "blacksmithing" }, -- Durable Flux (not Alchemy at all)
+    [49908] = { "blacksmithing", "leatherworking", "tailoring" }, -- Primordial Saronite
+    [221757] = { "blacksmithing", "leatherworking" }, -- Gloomfathom Hide
+    [221758] = { "blacksmithing", "leatherworking", "alchemy", "enchanting" }, -- Profaned Tinderbox
+    [221754] = { "blacksmithing", "leatherworking", "jewelcrafting", "enchanting", "inscription", "cooking" }, -- Ringing Deeps Ingot
+    [213610] = { "blacksmithing", "leatherworking", "alchemy", "enchanting", "engineering", "inscription", "skinning" }, -- Crystalline Powder
+    [211806] = { "alchemy", "engineering" }, -- Gilded Vial
+    [191474] = { "alchemy", "inscription", "engineering" }, -- Draconic Vial
+    [213611] = { "alchemy", "leatherworking", "engineering", "inscription", "tailoring", "skinning" }, -- Writhing Sample
+    [221756] = { "blacksmithing", "leatherworking", "alchemy", "enchanting", "engineering" }, -- Vial of Kaheti Oils
+    [221763] = { "alchemy", "enchanting" }, -- Viridian Charmcap
+    [19943] = { "alchemy", "blacksmithing", "inscription", "jewelcrafting", "leatherworking" }, -- Massive Mojo
+    [12804] = { "alchemy", "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Powerful Mojo
+    [124438] = { "alchemy", "blacksmithing", "leatherworking", "tailoring" }, -- Unbroken Claw
+    [124439] = { "alchemy", "blacksmithing", "leatherworking", "tailoring" }, -- Unbroken Tooth
+    [190456] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Artisan's Mettle
+    [230287] = { "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Astral Gladiator's Heraldry (not Alchemy at all)
+    [230906] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Fortunes
+    [190453] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Ingenuity
+    [211296] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Omens
+    [232875] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Radiance
+    [211516] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Awakening
+    [206959] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Dreams
+    [204440] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Shadowflame
+    [231756] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Spark of Starlight
+    [2325] = { "tailoring", "leatherworking" }, -- Black Dye (not Alchemy at all)
+    [6260] = { "tailoring", "leatherworking" }, -- Blue Dye (not Alchemy at all)
+    [2604] = { "tailoring", "leatherworking", "blacksmithing" }, -- Red Dye (not Alchemy at all)
+    [10290] = { "tailoring" }, -- Pink Dye (not Alchemy at all)
+    [3371] = { "alchemy", "enchanting", "inscription" }, -- Crystal Vial
+    [22682] = { "leatherworking", "tailoring", "blacksmithing", "inscription", "jewelcrafting" }, -- Frozen Rune (not Alchemy at all)
+    [180732] = { "alchemy", "inscription" }, -- Rune Etched Vial
+    [191493] = { "alchemy", "jewelcrafting" }, -- Primal Convergent
+    [207702] = { "blacksmithing", "engineering", "jewelcrafting", "leatherworking", "tailoring" }, -- Wartorn Scrap (not Alchemy at all)
+    [177062] = { "tailoring", "leatherworking", "engineering" }, -- Penumbra Thread (not Alchemy at all)
+    [224764] = { "leatherworking", "tailoring" }, -- Mosswool Thread (not Alchemy at all)
+    [228930] = { "tailoring" }, -- Adorning Ribbon (not Alchemy at all)
+    [229390] = { "leatherworking", "blacksmithing", "tailoring", "engineering", "inscription", "jewelcrafting" }, -- Prized Gladiator's Heraldry (not Alchemy at all)
+    [241281] = { "alchemy", "leatherworking" }, -- Composite Flora
+    [5637] = { "alchemy", "blacksmithing", "jewelcrafting", "leatherworking" }, -- Large Fang
+    [11291] = { "enchanting", "engineering", "leatherworking" }, -- Star Wood (not Alchemy at all)
+    [2880] = { "blacksmithing", "engineering" }, -- Weak Flux (not Alchemy at all)
+    [2324] = { "leatherworking", "tailoring" }, -- Bleach (not Alchemy at all)
+    [251768] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Darkpine Lumber
+    [191475] = { "alchemy", "engineering", "inscription" }, -- Draconic Vial (2nd variant)
+    [201401] = { "tailoring" }, -- Iridescent Plume (not Alchemy at all)
+    [201402] = { "blacksmithing" }, -- Large Sturdy Femur (not Alchemy at all)
+    [201403] = { "blacksmithing", "leatherworking" }, -- Mastodon Tusk (not Alchemy at all)
+    [242691] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Olemba Lumber
+    [191497] = { "alchemy", "engineering", "leatherworking", "tailoring" }, -- Omnium Draconis
+    [142335] = { "tailoring" }, -- Pristine Falcosaur Feather (not Alchemy at all)
+    [229388] = { "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Prized Combatant's Heraldry (not Alchemy at all)
+    [210221] = { "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Forged Combatant's Heraldry (not Alchemy at all)
+    [124436] = { "blacksmithing" }, -- Foxflower Flux (not Alchemy at all)
+    [256559] = { "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Galactic Combatant's Heraldry (not Alchemy at all)
+    [160059] = { "leatherworking" }, -- Amber Tanning Oil (not Alchemy at all)
+    [183955] = { "leatherworking" }, -- Curing Salt (not Alchemy at all)
+    [201399] = { "leatherworking", "blacksmithing" }, -- Primal Bear Spine (not Alchemy at all)
+    [38682] = { "enchanting" }, -- Enchanting Vellum (not Alchemy at all)
+    [115524] = { "jewelcrafting" }, -- Taladite Crystal (not Alchemy at all)
+    [112377] = { "inscription" }, -- War Paints (not Alchemy at all)
+    [80433] = { "blacksmithing", "leatherworking", "tailoring" }, -- Blood Spirit (not Alchemy at all)
+    [52078] = { "blacksmithing", "engineering", "jewelcrafting", "leatherworking", "tailoring" }, -- Chaos Orb (not Alchemy at all)
+    [127759] = { "alchemy", "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Felblight
+    [43102] = { "alchemy", "blacksmithing", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Frozen Orb
+    [94289] = { "blacksmithing", "enchanting", "leatherworking", "tailoring" }, -- Haunting Spirit (not Alchemy at all)
+    [32428] = { "blacksmithing", "leatherworking", "tailoring" }, -- Heart of Darkness (not Alchemy at all)
+    [213613] = { "alchemy", "enchanting", "engineering", "herbalism", "inscription", "leatherworking", "tailoring" }, -- Leyline Residue
+    [12811] = { "blacksmithing", "enchanting", "inscription", "tailoring" }, -- Righteous Orb (not Alchemy at all)
+    [118472] = { "alchemy", "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Savage Blood
+    [21882] = { "tailoring" }, -- Soul Essence (not Alchemy at all)
+    [34664] = { "blacksmithing", "jewelcrafting", "leatherworking", "tailoring" }, -- Sunmote (not Alchemy at all)
+    [12662] = { "blacksmithing", "jewelcrafting", "tailoring" }, -- Demonic Rune (not Alchemy at all)
+    [245345] = { "blacksmithing", "enchanting", "engineering", "inscription", "jewelcrafting", "leatherworking", "tailoring" }, -- Fused Vitality (not Alchemy at all)
+    [201406] = { "blacksmithing", "alchemy" }, -- Glowing Titan Orb
+    [201832] = { "engineering" }, -- Smudged Lens (not Alchemy at all)
+    [213612] = { "enchanting", "inscription", "alchemy", "leatherworking" }, -- Viridescent Spores
+    -- Left unresolved for now (found in the same audit, but not fixed here):
+    -- 87399 Restored Artifact, 114781 Timber, 190455 Concentrated Primal Focus,
+    -- 63128 Troll Tablet, 64396 Nerubian Obelisk, 118225 Highmaul Hops, 210828
+    -- Dilution Solution, and 168262 Sentry Fish all show isCraftingReagent=true
+    -- but zero recipes reference them in reagent data - unclear what consumes
+    -- them, if anything. 13757 Lightning Eel and 162515 Midnight Salmon resolve
+    -- only to Cooking, which isn't a tracked crafting profession here - no valid
+    -- override target, left as-is. 114836 Hexweave Embroidery and 119293 Secret
+    -- of Draenor Enchanting also show zero recipe usage. 40195 Pygmy Oil and 6358
+    -- Oily Blackmouth are genuinely Alchemy-only and need no change.
 }
 
 -- RESTOCK_ITEMS: curated reagent itemIDs per expansion, used as the source pool by
@@ -1108,44 +1216,11 @@ EmpireManager.ROLE_TOOLTIPS = {
     pvper = "PvP-focused character.\n\nTag for quick identification in the roster.",
 }
 
--- Non-profession item categories for storage routing (not shown in Sidecar/Roster)
+-- Non-profession item categories for storage routing (not shown in Sidecar/Roster).
+-- Grouped by source: Gear, then crafting-adjacent materials/goods, then Consumables,
+-- then Collection & Utility (not profession/crafting-related at all).
 EmpireManager.STORAGE_CATEGORY_DISPLAY = {
-    {
-        key = "pets",
-        label = "Pets",
-        category = "general",
-        icon = "Interface\\Icons\\INV_Box_PetCarrier_01",
-        r = 0.4,
-        g = 0.9,
-        b = 0.4,
-    },
-    {
-        key = "pvp",
-        label = "PvP",
-        category = "general",
-        icon = "Interface\\Icons\\Ability_DualWield",
-        r = 0.95,
-        g = 0.95,
-        b = 0.95,
-    },
-    {
-        key = "lumber",
-        label = "Lumber",
-        category = "general",
-        icon = "Interface\\Icons\\INV_TradeskillItem_03",
-        r = 0.7,
-        g = 0.5,
-        b = 0.2,
-    },
-    {
-        key = "housing",
-        label = "Housing",
-        category = "general",
-        icon = "Interface\\Icons\\Garrison_Building_Storehouse",
-        r = 0.5,
-        g = 0.75,
-        b = 0.4,
-    },
+    -- Gear
     {
         key = "equipment_boe",
         label = "Equipment (BoE)",
@@ -1175,6 +1250,20 @@ EmpireManager.STORAGE_CATEGORY_DISPLAY = {
         g = 0.63,
         b = 0.88,
     },
+    -- Crafting materials & goods
+    {
+        -- Neutral material category: 7/10 is shared by Alchemy/Blacksmithing/Enchanting/
+        -- Engineering with none of them narrowed to just this subclass alone (see
+        -- PROF_ITEM_MAP comment above), unlike Herbs/Metal & Stone/Leather which are
+        -- already exactly Herbalism/Mining/Skinning and don't need a separate category.
+        key = "elemental",
+        label = "Elemental",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Elemental_Primal_Fire",
+        r = 0.95,
+        g = 0.45,
+        b = 0.15,
+    },
     {
         key = "recipes",
         label = "Recipes",
@@ -1185,6 +1274,16 @@ EmpireManager.STORAGE_CATEGORY_DISPLAY = {
         b = 0.4,
     },
     {
+        key = "item_enhancements",
+        label = "Item Enhancements",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Enchant_FormulaEpic_01",
+        r = 0.7,
+        g = 0.4,
+        b = 0.9,
+    },
+    -- Consumables
+    {
         key = "consumables",
         label = "Consumables",
         category = "general",
@@ -1193,14 +1292,42 @@ EmpireManager.STORAGE_CATEGORY_DISPLAY = {
         g = 0.3,
         b = 0.3,
     },
+    -- Collection & Utility
     {
-        key = "item_enhancements",
-        label = "Item Enhancements",
+        key = "lumber",
+        label = "Lumber",
         category = "general",
-        icon = "Interface\\Icons\\INV_Enchant_FormulaEpic_01",
+        icon = "Interface\\Icons\\INV_TradeskillItem_03",
         r = 0.7,
-        g = 0.4,
-        b = 0.9,
+        g = 0.5,
+        b = 0.2,
+    },
+    {
+        key = "housing",
+        label = "Housing",
+        category = "general",
+        icon = "Interface\\Icons\\Garrison_Building_Storehouse",
+        r = 0.5,
+        g = 0.75,
+        b = 0.4,
+    },
+    {
+        key = "pets",
+        label = "Pets",
+        category = "general",
+        icon = "Interface\\Icons\\INV_Box_PetCarrier_01",
+        r = 0.4,
+        g = 0.9,
+        b = 0.4,
+    },
+    {
+        key = "pvp",
+        label = "PvP",
+        category = "general",
+        icon = "Interface\\Icons\\Ability_DualWield",
+        r = 0.95,
+        g = 0.95,
+        b = 0.95,
     },
 }
 

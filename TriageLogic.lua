@@ -609,6 +609,37 @@ local TOOLTIP_SCAN_CLASSES = {
 -- Forward-declared; populated at ITEM_CATEGORY_MAP definition below.
 local ITEM_CATEGORY_MAP
 
+-- Resolve a display name for a scanned slot. C_Container.GetContainerItemInfo and
+-- C_Item.GetItemInfo both return nil names for items the client has not cached yet
+-- (common on a fresh login when a bank tab holds items never seen this session), and
+-- the old `name or ""` fallback rendered those rows as a bare icon + count. The
+-- hyperlink carries the name inside its [brackets] even when the item cache is cold,
+-- so fall back to that before giving up.
+local function ResolveItemName(name, link)
+    -- Reagents with a quality tier carry an |A:...|a atlas marker for the star icon.
+    -- GetContainerItemInfo sometimes hands back a name that is nothing but that
+    -- marker, which paints the row as a lone quality star with no text, so strip the
+    -- markup and treat what is left as the name only if there is anything to show.
+    if name and name ~= "" then
+        local stripped = name:gsub("|A:.-|a", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if stripped ~= "" then
+            return stripped
+        end
+    end
+    -- Nothing usable: the client has not cached this item yet, or the name was pure
+    -- markup. The hyperlink still carries the real name inside its brackets.
+    if link then
+        local bracketed = link:match("%[(.-)%]")
+        if bracketed then
+            bracketed = bracketed:gsub("|A:.-|a", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if bracketed ~= "" then
+                return bracketed
+            end
+        end
+    end
+    return ""
+end
+
 local function NeedsTooltipScan(classID, bindType, itemID)
     if TOOLTIP_SCAN_CLASSES[classID] or bindType == 2 then
         return true
@@ -871,7 +902,7 @@ local function ScanBagSlot(items, bag, slot)
         bag = bag,
         slot = slot,
         itemID = info.itemID,
-        itemName = info.itemName or "",
+        itemName = ResolveItemName(info.itemName, info.hyperlink),
         itemLink = info.hyperlink,
         stackCount = info.stackCount or 1,
         maxStack = maxStack or 1,
@@ -953,7 +984,7 @@ local function ScanGuildBankSlot(items, tab, slot)
         bag = tab,
         slot = slot,
         itemID = itemID,
-        itemName = itemName or "",
+        itemName = ResolveItemName(itemName, link),
         itemLink = link,
         stackCount = count or 1,
         quality = quality or 0,
@@ -1025,7 +1056,7 @@ local function ScanContainerBankSlot(items, container, slot, tabNum, bankType)
         bag = container,
         slot = slot,
         itemID = info.itemID,
-        itemName = info.itemName or "",
+        itemName = ResolveItemName(info.itemName, info.hyperlink),
         itemLink = info.hyperlink,
         stackCount = info.stackCount or 1,
         quality = info.quality or 0,
@@ -3097,12 +3128,52 @@ function EmpireManager:RunBankTriageAsync(callback)
         -- Phase 1: scan bank slots (yields between slots)
         local bankItems = ScanBankCore(addon, yieldCheck)
 
+        -- Phase 1b: a cold bank tab holds items the client has not cached, whose names
+        -- come back empty. Touching the itemID asks the server for the data; yield until
+        -- it lands so the list paints once, complete. Painting early and refreshing on
+        -- GET_ITEM_INFO_RECEIVED redraws the list under the user's cursor, which is worse
+        -- than a short wait on the "Scanning bank..." state. Capped so a permanently
+        -- unresolvable item cannot hang the scan - those rows just paint nameless.
+        local WAIT_TICKS = 40 -- ~2s at one yield per frame
+        for _ = 1, WAIT_TICKS do
+            local pending = false
+            for _, item in ipairs(bankItems) do
+                if item.itemName == "" and item.itemID then
+                    -- Name and quality both come back empty/0 for an uncached item, and
+                    -- quality drives the row's text colour - backfill both together or
+                    -- resolved rows paint their name in grey (quality 0 = Poor).
+                    local name, _, quality = C_Item.GetItemInfo(item.itemID)
+                    if name and name ~= "" then
+                        item.itemName = name
+                        if quality then
+                            item.quality = quality
+                        end
+                    else
+                        pending = true
+                    end
+                end
+            end
+            if not pending then
+                break
+            end
+            coroutine.yield()
+        end
+
         -- Phase 2: classify each item (yields between items)
         BuildEquipSetLookup(addon)
         PrepareClassificationContext(addon)
         local results = {}
         for _, item in ipairs(bankItems) do
+            item._restockSurplus = nil -- reset per scan; set by the restock-floor rule
             local category, action, routing, destTabs = addon:ClassifyBankItem(item, entry)
+            -- routeCount = surplus above a straddled restock floor (floor stays in the
+            -- bank it is pinned to), else nil = whole stack. Same contract as the bag
+            -- scan: display + mail/deposit split at action time.
+            if (category == CAT_STASH or category == CAT_TAKEOUT) and item._restockSurplus then
+                item.routeCount = item._restockSurplus
+            else
+                item.routeCount = nil
+            end
             results[#results + 1] = {
                 item = item,
                 category = category,

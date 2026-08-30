@@ -488,21 +488,8 @@ end
 -- Human label for a rule's destination (profession + bank type + optional tab/guild).
 local function RemapRuleDescription(rule)
     local profKey = rule.profession or "?"
-    local profLabel = profKey
-    for _, info in ipairs(EmpireManager.PROF_DISPLAY) do
-        if info.key == profKey then
-            profLabel = info.label
-            break
-        end
-    end
-    if profLabel == profKey then
-        for _, info in ipairs(EmpireManager.STORAGE_CATEGORY_DISPLAY) do
-            if info.key == profKey then
-                profLabel = info.label
-                break
-            end
-        end
-    end
+    local info = EmpireManager.PROF_INFO_BY_KEY and EmpireManager.PROF_INFO_BY_KEY[profKey]
+    local profLabel = (info and info.label) or profKey
     local destText
     if rule.type == "warbandbank" then
         destText = "Warband Bank"
@@ -4413,22 +4400,8 @@ function EmpireManager:OpenStorageDialog(editIdx)
 
         -- Update dropdown display text
         -- Category
-        local catLabel
-        for _, info in ipairs(self.PROF_DISPLAY) do
-            if info.key == st.prof then
-                catLabel = info.label
-                break
-            end
-        end
-        if not catLabel then
-            for _, info in ipairs(self.STORAGE_CATEGORY_DISPLAY) do
-                if info.key == st.prof then
-                    catLabel = info.label
-                    break
-                end
-            end
-        end
-        f.CategoryDD:OverrideText(catLabel or "Select category")
+        local catInfo = self.PROF_INFO_BY_KEY and self.PROF_INFO_BY_KEY[st.prof]
+        f.CategoryDD:OverrideText((catInfo and catInfo.label) or "Select category")
 
         -- Bank type
         local btLabels = { warbandbank = "Warband Bank", guildbank = "Guild Bank", charbank = "Character Bank" }

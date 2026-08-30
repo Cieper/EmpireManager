@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.3] - 2026-08-30
+
+### Added
+
+- **Elemental storage category.** Primal Fire, Crystallized Air, the Motes and the rest of the elemental materials now route on their own instead of being tied to one profession. They used to follow your Alchemy rule, even though Blacksmithing, Enchanting and Engineering use them just as much, so add an **Elemental** rule to say where they should go.
+
+### Fixed
+
+- **Bank Triage ignored your Restock rule floor**, letting a Storage rule take the whole stack instead of just the surplus above it.
+- Sometimes **Bank rows showed no item name**, painting as a bare grey icon and count until you switched tabs.
+
 ## [1.2.2] - 2026-08-29
 
 ### Added
