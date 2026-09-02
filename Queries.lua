@@ -44,6 +44,48 @@ function EmpireManager:GetVendorWhitelist()
 end
 
 -------------------------------------------------------------------------------
+-- Rule-Ownership Predicates (Dashboard smart filters)
+-------------------------------------------------------------------------------
+
+-- True if any storage rule names this character as its banker. Warband rules
+-- carry no `char` (any alt can deposit), so they belong to nobody and never
+-- match - the question is "is this character a destination", not "does a rule
+-- exist that this character could use".
+function EmpireManager:HasStorageRules(guid)
+    if not guid then
+        return false
+    end
+    for _, asn in ipairs(self.db.global.storageAssignments or {}) do
+        if asn.char == guid then
+            return true
+        end
+    end
+    return false
+end
+
+-- True if any restock rule targets this character. Only charbank/bags entries
+-- carry target characters; warband/guild floors are shared and match nobody,
+-- for the same reason as HasStorageRules above. Handles both the `chars` array
+-- and the legacy single `char` GUID (see RESTOCK.md build delta 3).
+function EmpireManager:HasRestockRules(guid)
+    if not guid then
+        return false
+    end
+    for _, entry in ipairs(self.db.global.restockList or {}) do
+        if entry.chars then
+            for _, g in ipairs(entry.chars) do
+                if g == guid then
+                    return true
+                end
+            end
+        elseif entry.char == guid then
+            return true
+        end
+    end
+    return false
+end
+
+-------------------------------------------------------------------------------
 -- Registry Filtering (Dashboard:ApplyFilters)
 -------------------------------------------------------------------------------
 
@@ -115,11 +157,17 @@ function EmpireManager:FilterRegistry(filterState)
         end
 
         -- Smart filters (multiple toggles, AND logic: must match ALL active filters)
+        -- Most keys are role keys; the rule-ownership keys below are properties
+        -- of the character rather than roles, so they dispatch separately.
         if pass and next(state.activeSmartFilters) then
             for key in pairs(state.activeSmartFilters) do
-                local matches = false
-                if self:HasRole(entry, key) then
-                    matches = true
+                local matches
+                if key == "hasStorageRules" then
+                    matches = self:HasStorageRules(guid)
+                elseif key == "hasRestockRules" then
+                    matches = self:HasRestockRules(guid)
+                else
+                    matches = self:HasRole(entry, key)
                 end
                 if not matches then
                     pass = false

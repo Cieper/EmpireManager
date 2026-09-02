@@ -720,6 +720,12 @@ function EmpireManagerFrameMixin:InitFilterBar()
         for _, display in ipairs(EmpireManager.ROLE_DISPLAY) do
             AddFilter(rootDescription, display.label or display.key, display.key)
         end
+
+        -- Rule ownership: properties of the character, not roles, so they sit
+        -- below a divider. Warband/guild rules name no character and match none.
+        rootDescription:CreateDivider()
+        AddFilter(rootDescription, "Has Storage Rules", "hasStorageRules")
+        AddFilter(rootDescription, "Has Restock Rules", "hasRestockRules")
     end)
 
     -- Clear X button (AH-style red X on filter dropdown)
@@ -970,6 +976,14 @@ function EmpireManager:RebuildGrid(filteredData)
         if data.guid == self.playerGUID then
             playerIndex = i
         end
+    end
+
+    -- Row count, right of the filter dropdown. Shown always, so it doubles as a
+    -- roster total when nothing is filtered.
+    local countText = frame.CharactersPage.FilterBar.CountText
+    if countText then
+        local n = #sorted
+        countText:SetText(n == 1 and "1 character" or (n .. " characters"))
     end
 
     -- Preserve scroll position across rebuilds

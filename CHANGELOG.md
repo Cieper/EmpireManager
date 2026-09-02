@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.4] - 2026-09-02
+
+### Added
+
+- **Filter the roster by who owns a rule.** Two new filters in the Dashboard dropdown, **Has Storage Rules** and **Has Restock Rules**, narrow the grid to the characters a rule actually names. Warband and guild rules belong to nobody, so they match no character.
+- **The filter bar shows how many characters are listed**, which doubles as a roster count when no filter is active.
+
+### Fixed
+
+- **Fixed a deposit that could fail when the destination stack was nearly full.** Deposits that worked are no longer reported as failures, and a failure says which rule caused it.
+
+### Changed
+
+- **Optimized Restock data and item inspection.**
+
 ## [1.2.3] - 2026-08-30
 
 ### Added

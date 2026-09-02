@@ -344,6 +344,18 @@
                                     relativeKey="$parent.TriageButton"
                                     relativePoint="TOPLEFT" x="-8" y="-2"/>
                         </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString parentKey="CountText"
+                                            inherits="GameFontNormalSmall"
+                                            justifyH="RIGHT">
+                                    <Anchors>
+                                        <Anchor point="RIGHT" x="-54" y="0"/>
+                                    </Anchors>
+                                    <Color r="1" g="0.82" b="0" a="0.6"/>
+                                </FontString>
+                            </Layer>
+                        </Layers>
                         <Frames>
                             <EditBox parentKey="SearchBox"
                                      inherits="SearchBoxTemplate"

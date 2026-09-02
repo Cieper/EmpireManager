@@ -323,6 +323,23 @@ local function CountOccupiedBagSlots()
     return count
 end
 
+-- Total quantity held in bags across a set of itemIDs. Slot counting cannot see a
+-- partial move (a restock-floor straddle leaves the slot occupied with the floor),
+-- so progress for those is measured in items, not slots.
+local function CountBagQuantities(itemIDs)
+    local total = 0
+    for bag = 0, 5 do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        for slot = 1, numSlots do
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            if info and info.itemID and itemIDs[info.itemID] then
+                total = total + (info.stackCount or 1)
+            end
+        end
+    end
+    return total
+end
+
 -------------------------------------------------------------------------------
 -- Bags-full warning: call after any bulk action completes
 -------------------------------------------------------------------------------
@@ -4395,6 +4412,10 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
     -- but still in bags after FinishAll are "unknown" (locked, unique limit,
     -- guild bank rejection without a tab signal, etc.).
     local moveFailReason = {}
+    -- Moves that actually fired. A later pass can stamp a transient reason ("locked",
+    -- "moved") on the same slot, so success has to be recorded separately rather than
+    -- inferred from the absence of a reason.
+    local moveSucceeded = {}
 
     local function UpdateDepositBtn()
         if self.triageDepositBtn then
@@ -4408,19 +4429,24 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
 
     -- Find a destination slot in a bank address, respecting allocated slots.
     -- Uses the move context to read items (works for guild bank too).
-    local function FindDestSlot(ctx, destAddr, itemID, allocated)
+    local function FindDestSlot(ctx, destAddr, itemID, allocated, send)
         local numSlots = ctx.GetNumSlots(destAddr)
         if not numSlots or numSlots == 0 then
             return nil
         end
         local aSlots = allocated[destAddr] or {}
         local maxStack = GetMaxStack(itemID)
-        -- Pass 1: partial stacks of same item
+        -- Pass 1: partial stacks of same item, but only ones with room for the whole
+        -- amount being sent. A stack that is merely non-full is not enough: dropping
+        -- 5 onto a 998/1000 stack merges 2 and strands 3 on the cursor, which
+        -- ClearCursor then discards and the move counts as failed. Falling through to
+        -- an empty slot costs a slot but always completes.
         if maxStack > 1 then
+            local need = send or 1
             for slot = 1, numSlots do
                 if not aSlots[slot] then
                     local info = ctx.GetItemInfo(destAddr, slot)
-                    if info and info.itemID == itemID and info.stackCount < maxStack then
+                    if info and info.itemID == itemID and (maxStack - info.stackCount) >= need then
                         return slot
                     end
                 end
@@ -4442,10 +4468,16 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         local moveKey = move.srcBag * 1000 + move.srcSlot
         local srcLoc = ItemLocation:CreateFromBagAndSlot(move.srcBag, move.srcSlot)
         if not C_Item.DoesItemExist(srcLoc) or C_Item.IsLocked(srcLoc) then
+            -- Transient: the slot is mid-move (cursor still settling from an earlier
+            -- split) or the item is gone. Retried on the next pass.
+            moveFailReason[moveKey] = "locked"
             return false
         end
         local srcInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
         if not srcInfo or srcInfo.itemID ~= move.itemID then
+            -- The slot no longer holds what the scan classified: bags shifted under
+            -- us (restack, manual move) since the move list was built.
+            moveFailReason[moveKey] = "moved"
             return false
         end
 
@@ -4463,18 +4495,24 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         -- Try all candidate addresses until we find a slot
         local candidates = ResolveCandidateAddresses(move.routing)
         if #candidates == 0 then
+            -- The rule's tabs resolved to nothing: pinned tabs that are unpurchased
+            -- (0 slots), or the bank was not populated when the deposit ran.
+            moveFailReason[moveKey] = "notabs"
             return false
         end
 
+        -- How many this move sends, needed up front so FindDestSlot can reject a
+        -- partial stack that cannot take the whole amount. A restock-floor straddling
+        -- slot carries routeCount = surplus above the floor; otherwise the full stack.
+        local sInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
+        local have = sInfo and sInfo.stackCount or 0
+        local send = move.routeCount or have
+
         for _, destAddr in ipairs(candidates) do
-            local destSlot = FindDestSlot(ctx, destAddr, move.itemID, allocated)
+            local destSlot = FindDestSlot(ctx, destAddr, move.itemID, allocated, send)
             if destSlot then
-                -- Execute the move: pick up from bag, place in bank. A restock-floor
-                -- straddling slot carries routeCount = surplus above the floor; split
-                -- off exactly that many (leave the floor in bags), else move the whole.
-                local sInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
-                local have = sInfo and sInfo.stackCount or 0
-                local send = move.routeCount or have
+                -- Execute the move: pick up from bag, place in bank. Split off exactly
+                -- the surplus (leaving the floor in bags), else move the whole stack.
                 if send > 0 and send < have then
                     C_Container.SplitContainerItem(move.srcBag, move.srcSlot, send)
                 else
@@ -4488,6 +4526,7 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                 allocated[destAddr][destSlot] = true
                 -- Clear any stale fail-reason in case this move was retried.
                 moveFailReason[moveKey] = nil
+                moveSucceeded[moveKey] = true
                 return true, destAddr
             else
                 if not fullTabs[destAddr] then
@@ -4595,14 +4634,43 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
             local dt = m.routing and m.routing.destType
             if accessibleType[dt] then
                 local info = C_Container.GetContainerItemInfo(m.srcBag, m.srcSlot)
-                if info and info.itemID == m.itemID then
-                    local moveKey = m.srcBag * 1000 + m.srcSlot
+                local moveKey = m.srcBag * 1000 + m.srcSlot
+                -- "Item still in the slot" only proves failure for a whole-stack move.
+                -- A restock-floor straddle deposits the surplus and leaves the floor
+                -- behind, so the slot legitimately still holds the same itemID on
+                -- success. Treat those as failed only when nothing actually left:
+                -- the recorded fail reason is the reliable signal there.
+                local stillThere = info and info.itemID == m.itemID
+                local partial = m.routeCount and m.routeCount > 0
+                local failed
+                if partial then
+                    -- The surplus left but the floor stayed, so the slot still holds the
+                    -- item either way. Only a move that never fired is a failure.
+                    failed = stillThere and not moveSucceeded[moveKey]
+                else
+                    failed = stillThere
+                end
+                if failed then
                     local reasonKey = moveFailReason[moveKey] or "unknown"
+                    -- Name the storage rule that routed this item. Which tabs are full
+                    -- is on the "no space" line above; the rule number is what the user
+                    -- actually has to go edit, and it is not derivable from the tabs.
+                    local ruleTag = ""
+                    local rIdx = m.routing and m.routing.ruleIndex
+                    if rIdx then
+                        ruleTag = string.format(" (rule #%d)", rIdx)
+                    end
                     local reasonText
                     if reasonKey == "bind" then
                         reasonText = "bind restriction"
                     elseif reasonKey == "fulltab" then
-                        reasonText = "destination full"
+                        reasonText = "destination full" .. ruleTag
+                    elseif reasonKey == "notabs" then
+                        reasonText = "no usable destination tab" .. ruleTag
+                    elseif reasonKey == "locked" then
+                        reasonText = "slot busy"
+                    elseif reasonKey == "moved" then
+                        reasonText = "item moved during deposit"
                     else
                         reasonText = "unknown"
                     end
@@ -4687,6 +4755,19 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         -- Count occupied bag slots (source side) to detect items leaving bags.
         -- Slot-based bank counting fails when items merge into existing stacks.
         local CountBagItems = CountOccupiedBagSlots
+
+        -- Partial moves (restock-floor straddle) never free the slot, so slot counting
+        -- reports no progress and the whole deposit reads as failed. Track the summed
+        -- quantity of the straddling itemIDs alongside the slot count.
+        local partialItemIDs = {}
+        local hasPartial = false
+        for _, mv in ipairs(moveList or {}) do
+            if mv.routeCount and mv.routeCount > 0 and mv.itemID then
+                partialItemIDs[mv.itemID] = true
+                hasPartial = true
+            end
+        end
+        local partialQtyBefore = hasPartial and CountBagQuantities(partialItemIDs) or 0
 
         local function Cleanup()
             running = false
@@ -4790,6 +4871,14 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
 
             local bagCountAfter = CountBagItems()
             local actualMoved = bagCountBefore - bagCountAfter
+            -- Credit a partial move too: the slot stayed occupied but the stack shrank.
+            if hasPartial then
+                local qtyAfter = CountBagQuantities(partialItemIDs)
+                if qtyAfter < partialQtyBefore and actualMoved <= 0 then
+                    actualMoved = 1
+                end
+                partialQtyBefore = qtyAfter
+            end
             if actualMoved > 0 then
                 totalMoved = totalMoved + actualMoved
                 UpdateDepositBtn()
@@ -4932,12 +5021,14 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
         end
 
         -- Find a dest slot: first partial stacks of same item, then first empty.
-        local function FindGuildSlot(emptySlots, filledSlots, usedSlots, itemID)
+        local function FindGuildSlot(emptySlots, filledSlots, usedSlots, itemID, send)
             local maxStack = GetMaxStack(itemID)
-            -- Pass 1: partial stacks of same item
+            -- Pass 1: partial stacks of same item with room for the whole amount.
+            -- A merely non-full stack is not enough - see the note in FindDestSlot.
             if maxStack > 1 then
+                local need = send or 1
                 for slot, info in pairs(filledSlots) do
-                    if not usedSlots[slot] and info.itemID == itemID and info.count < maxStack then
+                    if not usedSlots[slot] and info.itemID == itemID and (maxStack - info.count) >= need then
                         return slot
                     end
                 end
@@ -4988,13 +5079,16 @@ function EmpireManager:BankTriageStashAfterRestack(gen)
                             end
                             if validTab then
                                 tabWasTargeted = true
-                                local destSlot = FindGuildSlot(emptySlots, filledSlots, usedSlots, move.itemID)
+                                -- Amount up front so FindGuildSlot can reject a partial
+                                -- stack too small to take it. Restock straddle: split off
+                                -- routeCount (surplus), else the whole stack.
+                                local gInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
+                                local gHave = gInfo and gInfo.stackCount or 0
+                                local gSend = move.routeCount or gHave
+                                local destSlot =
+                                    FindGuildSlot(emptySlots, filledSlots, usedSlots, move.itemID, gSend)
                                 if destSlot then
                                     -- Execute the move: PickupGuildBankItem takes tab param directly.
-                                    -- Restock straddle: split off routeCount (surplus), else whole.
-                                    local gInfo = C_Container.GetContainerItemInfo(move.srcBag, move.srcSlot)
-                                    local gHave = gInfo and gInfo.stackCount or 0
-                                    local gSend = move.routeCount or gHave
                                     if gSend > 0 and gSend < gHave then
                                         C_Container.SplitContainerItem(move.srcBag, move.srcSlot, gSend)
                                     else

@@ -112,6 +112,30 @@ function EmpireManager:OnInitialize()
         self.db.global.restockCounts = {}
     end
 
+    -- Prune the snapshots down to what the fill column actually reads: itemIDs a
+    -- restock rule names, and destinations that still exist. Earlier builds tallied
+    -- every item in every bank and never dropped deleted characters, which left
+    -- ~99% of the table unread. Runs on the saved data, so it also cleans up after
+    -- a rule or character is removed.
+    do
+        local counts = self.db.global.restockCounts
+        local want = self:GetRestockItemIDs()
+        local liveDests = self:GetRestockDestKeys()
+        for destKey, tally in pairs(counts) do
+            if not liveDests[destKey] then
+                counts[destKey] = nil
+            elseif type(tally) == "table" then
+                for itemID in pairs(tally) do
+                    if not want[itemID] then
+                        tally[itemID] = nil
+                    end
+                end
+                -- An empty tally is meaningful: RestockFillState treats a missing
+                -- key as "No data" but an empty one as a real zero, so keep it.
+            end
+        end
+    end
+
     -- Resolve legacy Keep/Vendor conflicts: items on BOTH lists. Keep List wins
     -- in classification, so remove conflicting entries from the Vendor List.
     -- New code blocks the conflict at add-time; this only matters for saved data
@@ -1020,7 +1044,8 @@ function EmpireManager:SlashHandler(input)
         end
         self:EnsureStorageCache()
         local itemID, _, _, itemEquipLoc, icon, classID, subClassID = C_Item.GetItemInfoInstant(itemLink)
-        local itemName, _, _, _, _, _, _, _, _, _, _, _, _, bindType, expansionID = C_Item.GetItemInfo(itemLink)
+        local itemName, _, _, _, _, _, _, maxStack, _, _, _, _, _, bindType, expansionID =
+            C_Item.GetItemInfo(itemLink)
         self:ChatMsg(string.format("|cffffcc00[Inspect]|r %s", itemName or itemLink), true)
         self:ChatMsgRaw(
             string.format(
@@ -1039,10 +1064,11 @@ function EmpireManager:SlashHandler(input)
                 -- bindType is the item's DECLARED bind rule, not its current state: a
                 -- Warbound-until-equipped piece keeps bindType=2 after being equipped.
                 -- Classification trusts isBound/isWarbound, never bindType alone.
-                "  bindType=%d  expansionID=%s  icon=%s",
+                "  bindType=%d  expansionID=%s  icon=%s  maxStack=%s",
                 bindType or -1,
                 tostring(expansionID or "nil"),
-                tostring(icon or "nil")
+                tostring(icon or "nil"),
+                tostring(maxStack or "nil")
             ),
             true
         )
@@ -1139,11 +1165,16 @@ function EmpireManager:SlashHandler(input)
                         -- it beside bindType shows why a bindType=2 item is not AH-routed.
                         local sloc = ItemLocation:CreateFromBagAndSlot(bag, slot)
                         local slotBound = C_Item.DoesItemExist(sloc) and C_Item.IsBound(sloc)
+                        -- Stack size of THIS slot. Read beside maxStack on the header
+                        -- line, it gives the room a deposit into this slot would have.
+                        local slotInfo = C_Container.GetContainerItemInfo(bag, slot)
+                        local slotCount = slotInfo and slotInfo.stackCount
                         self:ChatMsgRaw(
                             string.format(
-                                "  bag %d:%d ilvl=%s  bindType=%s  isBound=%s  parsed: warbound=%s permanent=%s soulbound=%s",
+                                "  bag %d:%d count=%s  ilvl=%s  bindType=%s  isBound=%s  parsed: warbound=%s permanent=%s soulbound=%s",
                                 bag,
                                 slot,
+                                tostring(slotCount or "?"),
                                 tostring(slotIlvl or "?"),
                                 tostring(slotBind or "?"),
                                 tostring(slotBound and true or false),
@@ -2319,6 +2350,41 @@ function EmpireManager:BANKFRAME_OPENED()
     end)
 end
 
+-- Set of itemIDs any restock rule cares about. The fill column only ever reads
+-- these, so the snapshots below tally nothing else - storing every item in every
+-- bank made restockCounts the second-largest table in SavedVariables for data
+-- that was never read.
+function EmpireManager:GetRestockItemIDs()
+    local want = {}
+    for _, rule in ipairs(self.db.global.restockList or {}) do
+        if rule.itemID then
+            want[rule.itemID] = true
+        end
+    end
+    return want
+end
+
+-- Destination keys the fill column can actually read: only the shared banks a
+-- rule points at, and only the characters a charbank/bags rule names. Counts for
+-- any other destination are written but never looked up.
+function EmpireManager:GetRestockDestKeys()
+    local keys = {}
+    for _, rule in ipairs(self.db.global.restockList or {}) do
+        if rule.dest == "warbandbank" then
+            keys["warbandbank"] = true
+        elseif rule.dest == "guildbank" and rule.guild then
+            keys["guildbank:" .. self:GuildKey(rule.guild, rule.realm)] = true
+        elseif rule.dest == "charbank" or rule.dest == "bags" then
+            local prefix = (rule.dest == "bags") and "bags:" or "charbank:"
+            local chars = rule.chars or (rule.char and { rule.char } or {})
+            for _, guid in ipairs(chars) do
+                keys[prefix .. guid] = true
+            end
+        end
+    end
+    return keys
+end
+
 -- Snapshot per-item counts in the currently open bank containers into
 -- db.global.restockCounts, for the Restock fill column. Warband is account-shared
 -- (single key); char bank is keyed per owning character. Reads only containers that
@@ -2335,6 +2401,8 @@ function EmpireManager:SnapshotBankItemCounts()
         self.db.global.restockCounts = counts
     end
 
+    local want = self:GetRestockItemIDs()
+
     -- Character bank: containers 6-11.
     local charTally, sawChar = {}, false
     for bag = 6, 11 do
@@ -2343,7 +2411,7 @@ function EmpireManager:SnapshotBankItemCounts()
             sawChar = true
             for slot = 1, numSlots do
                 local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info and info.itemID then
+                if info and info.itemID and want[info.itemID] then
                     charTally[info.itemID] = (charTally[info.itemID] or 0) + (info.stackCount or 1)
                 end
             end
@@ -2361,7 +2429,7 @@ function EmpireManager:SnapshotBankItemCounts()
             sawWb = true
             for slot = 1, numSlots do
                 local info = C_Container.GetContainerItemInfo(bag, slot)
-                if info and info.itemID then
+                if info and info.itemID and want[info.itemID] then
                     wbTally[info.itemID] = (wbTally[info.itemID] or 0) + (info.stackCount or 1)
                 end
             end
@@ -2380,12 +2448,13 @@ function EmpireManager:SnapshotBagItemCounts()
     if not guid then
         return
     end
+    local want = self:GetRestockItemIDs()
     local tally = {}
     for bag = 0, 5 do
         local numSlots = C_Container.GetContainerNumSlots(bag) or 0
         for slot = 1, numSlots do
             local info = C_Container.GetContainerItemInfo(bag, slot)
-            if info and info.itemID then
+            if info and info.itemID and want[info.itemID] then
                 tally[info.itemID] = (tally[info.itemID] or 0) + (info.stackCount or 1)
             end
         end
